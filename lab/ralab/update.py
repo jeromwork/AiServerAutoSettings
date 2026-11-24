@@ -21,7 +21,10 @@ def _args():
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument('--exe', default='')
     p.add_argument('--exe-version', default='')
-    return p.parse_known_args(sys.argv[1:])[0]
+    a = p.parse_known_args(sys.argv[1:])[0]
+    a.exe = os.environ.get('RA_EXE') or a.exe  # сначала переменные окружения от EXE, аргументы - запасной вариант
+    a.exe_version = os.environ.get('RA_EXE_VERSION') or a.exe_version
+    return a
 
 
 def _vkey(v):
