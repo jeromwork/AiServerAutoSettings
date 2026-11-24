@@ -1,0 +1,15 @@
+#!/bin/sh
+# devports — dev-серверы сервера на localhost ПК владельца (решение 24.11.2026).
+#   devports list                 что слушает на сервере и что уже выложено на ПК
+#   devports free                 свободный порт (от 8200), держится за вами 10 минут
+#   devports open <имя> <порт>    выложить порт сервера на ПК -> печатает http://localhost:<порт ПК>
+#   devports close <имя>          снять проброс
+# Исполняет Лаборатория (ra-lab); агентам про неё знать не нужно.
+cmd="$1"; [ $# -gt 0 ] && shift
+case "$cmd" in
+  list|ls)    exec ra-lab ports "$@" ;;
+  free)       exec ra-lab free-port "$@" ;;
+  open)       exec ra-lab expose "$@" ;;
+  close)      exec ra-lab unexpose "$@" ;;
+  *) sed -n 2,7p "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

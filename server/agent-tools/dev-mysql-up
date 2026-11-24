@@ -102,7 +102,7 @@ def main():
                    '--network', 'dev-net', '--network-alias', 'dev-mysql',
                    '--memory', '1g', '--memory-swap', '1g', '--restart', 'unless-stopped',
                    '--publish', '127.0.0.1:3306:3306', '--mount', 'type=bind,src=%s,dst=/var/lib/mysql' % directory,
-                   '--env-file', str(filename), 'mysql:8.0')
+                   '--env-file', str(filename), 'mysql:8.0', '--skip-log-bin')
         ready()
 
 
