@@ -1,4 +1,4 @@
-"""TUN-адаптер ralab-tun только для сетей клиники (route_address), второй sing-box (ralab-core) -> постоянный lanProxy.
+"""TUN-адаптер RA2-LAN только для сетей клиники (route_address), второй sing-box (ralab-core) -> постоянный lanProxy.
 По умолчанию ВЫКЛЮЧЕН: включается разделом lab-конфига tun {enabled: true, routes: [...]} (routes - для опытов, например один адрес /32).
 Подсети, пересекающиеся с адресами самого ПК (домашняя сеть), не берутся - иначе TUN перехватил бы локальный трафик.
 Маршруты (сети клиники + адреса доменов канала) живут, пока жив процесс (auto_route); DNS ПК не трогаем (dns_mode disabled); умер Python - Job Object гасит sing-box, маршруты снимаются.
@@ -15,7 +15,7 @@ from .bus import bus
 NAME = 'tun'
 # Формат PnPDeviceID не угадываем: допускаем оба известных вида, строго fullmatch; дополнительно фильтр по InterfaceDescription.
 WINTUN_ID = re.compile(r'ROOT\\(?:WINTUN|NET)\\\d{1,4}|SWD\\WINTUN\\\{[0-9A-Fa-f-]{36}\}', re.IGNORECASE)
-OUR_NAME = re.compile(r'ralab-tun.*')  # главная защита: чужие sing-box-адаптеры (happ-tun) имеют то же описание, но другое имя
+OUR_NAME = re.compile(r'(?:RA2-LAN|RemoteAgents-Lab|ralab-tun).*', re.IGNORECASE)  # чужие адаптеры с тем же описанием не трогаем
 GUID = re.compile(r'\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?')
 
 
@@ -35,7 +35,7 @@ def local_addrs(cancel):
 
 
 ADAPTER_FILE = 'tun-adapter.json'
-GHOST_DESCS = ('sing-tun Tunnel', 'Wintun Userspace Tunnel')  # реальный sing-box даёт первое; у happ-tun то же описание: защищает имя ralab-tun*
+GHOST_DESCS = ('sing-tun Tunnel', 'Wintun Userspace Tunnel')  # защищает имя нашего адаптера, включая прежние имена
 RETRY_GAP, MAX_FAILS, STABLE = 30, 5, 60
 DOMAIN_RECHECK = 600  # раз в 10 мин адреса доменов канала сверяются; сменились - TUN перезапускается с новыми маршрутами
 # Худший stop(): процесс ~7 с (помощник 2 + ожидание 3 + taskkill 2) + 1 + поток 6 + очистка 12 = ~26 с; EXE и app.py ждут дольше (45 / 40 с).
@@ -130,10 +130,10 @@ class Tun:
             return None
         self.ctx.forward.tun_nets = [{'name': 'tun', 'nets': [ipaddress.ip_network(r) for r in pl['routes']], 'domains': []}]
         self.routes, self.gen = pl['routes'], self.gen + 1
-        inbound = {'type': 'tun', 'tag': 'tun-in', 'interface_name': 'ralab-tun', 'address': [t.get('address') or '172.19.0.1/30'], 'mtu': 1400,
+        inbound = {'type': 'tun', 'tag': 'tun-in', 'interface_name': 'RA2-LAN', 'address': [t.get('address') or '172.19.0.1/30'], 'mtu': 1400,
                    'auto_route': True, 'strict_route': False, 'route_address': pl['routes'], 'stack': 'system', 'dns_mode': 'disabled'}
         outbound = {'type': 'socks', 'tag': 'tun-lan', 'server': '127.0.0.1', 'server_port': pl['socks'], 'version': '5'}
-        journal.log('tun', 'start', {'routes': pl['routes'], 'socks': pl['socks'], 'domain_ips': self.dom_ips, 'shared': True}, 'TUN ralab-tun в общем sing-box')
+        journal.log('tun', 'start', {'routes': pl['routes'], 'socks': pl['socks'], 'domain_ips': self.dom_ips, 'shared': True}, 'TUN RA2-LAN в общем sing-box')
         return inbound, outbound, {'inbound': 'tun-in', 'outbound': 'tun-lan'}
 
     def wants(self):
@@ -360,7 +360,7 @@ class Tun:
             return
         self.routes = routes
         cfg = {'log': {'level': 'info'},
-               'inbounds': [{'type': 'tun', 'tag': 'tun-in', 'interface_name': 'ralab-tun', 'address': [t.get('address') or '172.19.0.1/30'], 'mtu': 1400,
+               'inbounds': [{'type': 'tun', 'tag': 'tun-in', 'interface_name': 'RA2-LAN', 'address': [t.get('address') or '172.19.0.1/30'], 'mtu': 1400,
                              'auto_route': True, 'strict_route': False, 'route_address': routes, 'stack': 'system',
                              'dns_mode': 'disabled'}],  # без DNS-адреса на адаптере: иначе Windows ждёт 12 с ответа с .2 (при Happ ответ теряется)
                'outbounds': [{'type': 'socks', 'tag': 'chan', 'server': '127.0.0.1', 'server_port': self.socks, 'version': '5'}],
@@ -389,14 +389,14 @@ class Tun:
                 return
         self.started = time.monotonic()
         self.last = 'запущен, маршруты: %s' % ', '.join(routes)
-        journal.log('tun', 'start', {'routes': routes, 'socks': self.socks, 'domain_ips': self.dom_ips}, 'TUN ralab-tun запускается')
+        journal.log('tun', 'start', {'routes': routes, 'socks': self.socks, 'domain_ips': self.dom_ips}, 'TUN RA2-LAN запускается')
         self._remember(p, gen)
 
     def _snapshot(self, timeout, cancel=None):
         """Wintun-адаптеры (включая скрытые): {pnp: {pnp, guid, status}} или None, если спросить не удалось."""
         if not procs.WIN:
             return {}
-        script = ("@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -in @(%s) -and $_.Name -like 'ralab-tun*' } | "
+        script = ("@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -in @(%s) -and ($_.Name -like 'RA2-LAN*' -or $_.Name -like 'RemoteAgents-Lab*' -or $_.Name -like 'ralab-tun*') } | "
                   "ForEach-Object { @{pnp=[string]$_.PnPDeviceID; guid=[string]$_.InterfaceGuid; status=[string]$_.Status; name=[string]$_.Name} }) | ConvertTo-Json -Compress" % ', '.join("'%s'" % d for d in GHOST_DESCS))
         r = _ps(script, timeout, cancel)
         if not r or r[0]:
