@@ -1,12 +1,13 @@
 """TUN-адаптер ralab-tun только для сетей клиники (route_address), второй sing-box (ralab-core) -> постоянный lanProxy.
 По умолчанию ВЫКЛЮЧЕН: включается разделом lab-конфига tun {enabled: true, routes: [...]} (routes - для опытов, например один адрес /32).
 Подсети, пересекающиеся с адресами самого ПК (домашняя сеть), не берутся - иначе TUN перехватил бы локальный трафик.
-Маршруты живут, пока жив процесс (auto_route); умер Python - Job Object гасит sing-box, маршруты снимаются.
+Маршруты (сети клиники + адреса доменов канала) живут, пока жив процесс (auto_route); DNS ПК не трогаем (dns_mode disabled); умер Python - Job Object гасит sing-box, маршруты снимаются.
 Отключение: tun.enabled=false или ra-lab exec 'Stop-Process -Name ralab-core' (только лабораторный TUN-процесс называется tun в procs).
 """
-import ipaddress, json, os, re, subprocess, threading, time
+import ipaddress, json, os, re, socket, subprocess, threading, time
 
 from . import journal, procs
+from .forward import parse_nets
 from .bus import bus
 
 NAME = 'tun'
@@ -34,6 +35,7 @@ def local_addrs(cancel):
 ADAPTER_FILE = 'tun-adapter.json'
 GHOST_DESCS = ('sing-tun Tunnel', 'Wintun Userspace Tunnel')  # реальный sing-box даёт первое; у happ-tun то же описание: защищает имя ralab-tun*
 RETRY_GAP, MAX_FAILS, STABLE = 30, 5, 60
+DOMAIN_RECHECK = 600  # раз в 10 мин адреса доменов канала сверяются; сменились - TUN перезапускается с новыми маршрутами
 # Худший stop(): процесс ~7 с (помощник 2 + ожидание 3 + taskkill 2) + 1 + поток 6 + очистка 12 = ~26 с; EXE и app.py ждут дольше (45 / 40 с).
 CLEANUP_BUDGET, WORKER_WAIT = 12, 6
 
@@ -82,6 +84,7 @@ class Tun:
         self.gen, self.fails, self.last_try, self.started, self.worker, self.gave_up = 0, 0, 0.0, 0.0, None, False
         self.closing, self.stopping, self.stopper = False, False, None
         self.cancel, self.before, self.owned = threading.Event(), None, {}
+        self.dom_ips, self.dom_check = [], 0.0
         bus.subscribe('settings.loaded', self._on_settings)
         bus.subscribe('channel.up', lambda _: self._ensure())
         bus.subscribe('app.stop', lambda _: self.stop())
@@ -110,9 +113,45 @@ class Tun:
         while True:
             time.sleep(10)
             try:
+                self._recheck_domains()
                 self._ensure()
             except Exception as e:  # поток повтора не должен умирать
                 journal.log('tun', 'retry.error', {'error': repr(e)})
+
+    def _recheck_domains(self):
+        p = procs.get(NAME)
+        if not (p and p.alive()) or time.monotonic() - self.dom_check < DOMAIN_RECHECK:
+            return
+        self.dom_check = time.monotonic()
+        ips = self._domain_ips(self.ctx.settings.cfg)
+        if ips and set(ips) != set(self.dom_ips):
+            journal.log('tun', 'domains.changed', {'old': self.dom_ips, 'new': ips}, 'адреса доменов канала сменились: TUN перезапускается')
+            self.stop(closing=False).join(40)
+            self.last_try = 0.0
+
+    @staticmethod
+    def _domain_ips(cfg):
+        """Домены канала (lan[].share.domains, happier.viaChannel) -> их IPv4 /32 для route_address. DNS ПК не трогаем:
+        имя разрешает обычный резолвер Windows, в TUN идут только эти адреса. '*.x' -> адреса самого x."""
+        hosts = []
+        for n in parse_nets(cfg):
+            for d in n['domains']:
+                h = d[2:] if d.startswith('*.') else d
+                if h and '*' not in h and '?' not in h and h not in hosts:
+                    hosts.append(h)
+        res = {}
+        def one(h):
+            try:
+                res[h] = sorted({a[4][0] for a in socket.getaddrinfo(h, 443, socket.AF_INET, socket.SOCK_STREAM)})
+            except OSError:
+                res[h] = []
+        ts = [threading.Thread(target=one, args=(h,), daemon=True) for h in hosts[:16]]
+        for th in ts:
+            th.start()
+        end = time.monotonic() + 5
+        for th in ts:
+            th.join(max(0, end - time.monotonic()))
+        return sorted({ip + '/32' for h in list(res) for ip in res[h][:8]})
 
     def _ensure(self):
         with self.lock:
@@ -217,6 +256,10 @@ class Tun:
             routes.append(str(net))
         if self.skipped:
             journal.log('tun', 'overlap', {'skipped': self.skipped}, 'подсети пересекаются с адресами самого ПК: в TUN не берём')
+        self.dom_ips, self.dom_check = (self._domain_ips(st.cfg) if t.get('domains') is not False else []), time.monotonic()
+        for r in self.dom_ips:
+            if r not in routes and not any(a in ipaddress.ip_network(r) for a in local if a.version == 4):
+                routes.append(r)
         if not routes:
             self.last = 'нет маршрутов'
             self.fails = 0  # это не сбой запуска
@@ -224,7 +267,8 @@ class Tun:
         self.routes = routes
         cfg = {'log': {'level': 'info'},
                'inbounds': [{'type': 'tun', 'tag': 'tun-in', 'interface_name': 'ralab-tun', 'address': [t.get('address') or '172.19.0.1/30'], 'mtu': 1400,
-                             'auto_route': True, 'strict_route': False, 'route_address': routes, 'stack': 'system'}],
+                             'auto_route': True, 'strict_route': False, 'route_address': routes, 'stack': 'system',
+                             'dns_mode': 'disabled'}],  # без DNS-адреса на адаптере: иначе Windows ждёт 12 с ответа с .2 (при Happ ответ теряется)
                'outbounds': [{'type': 'socks', 'tag': 'chan', 'server': '127.0.0.1', 'server_port': self.socks, 'version': '5'}],
                'route': {'final': 'chan', 'auto_detect_interface': True}}
         d = os.path.join(self.ctx.home, 'private')
@@ -251,7 +295,7 @@ class Tun:
                 return
         self.started = time.monotonic()
         self.last = 'запущен, маршруты: %s' % ', '.join(routes)
-        journal.log('tun', 'start', {'routes': routes, 'socks': self.socks}, 'TUN ralab-tun запускается')
+        journal.log('tun', 'start', {'routes': routes, 'socks': self.socks, 'domain_ips': self.dom_ips}, 'TUN ralab-tun запускается')
         self._remember(p, gen)
 
     def _snapshot(self, timeout, cancel=None):
