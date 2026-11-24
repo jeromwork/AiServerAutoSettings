@@ -1,4 +1,4 @@
-"""VPN: весь интернет через туннель (Россия - напрямую), отдельный процесс sing-box RemoteAgents-VPN.exe с адаптером RemoteAgents-VPN.
+"""VPN: весь интернет через туннель (Россия - напрямую), отдельный процесс sing-box RA2-VPN.exe с адаптером RA2-VPN.
 Имена на ПК и строки для людей - без слова «lab» (приложение станет второй версией RemoteAgents).
 
 Режим (state\\vpn.json, команда `ra-lab vpn off|auto|only`): off - выключен (по умолчанию); auto - включается сам, если нет чужого VPN,
@@ -8,7 +8,7 @@
 1.1.1.1 (по нему paths.vpn_iface видит чужой VPN и при включённом нашем). DNS ПК не трогаем (dns_mode disabled).
 Fail-open: процесс вышел сам или 2 проверки через туннель подряд не прошли - процесс снимается, интернет идёт напрямую;
 3 сбоя подряд - VPN выключен до новой команды. Выход/падение Python: Job Object гасит sing-box, адаптер исчезает вместе с ним;
-при запуске оставшийся наш адаптер (RemoteAgents-VPN*, прежнее имя ralab-vpn*) удаляется (имя - защита от чужих адаптеров).
+при запуске оставшийся наш адаптер (RA2-VPN*, прежнее имя ralab-vpn*) удаляется (имя - защита от чужих адаптеров).
 Журнал sing-box VPN в общий журнал не пишется (там адреса сайтов): в памяти последние ошибки, они попадают в причину сбоя.
 """
 import collections, copy, http.client, ipaddress, json, os, re, secrets, shutil, socket, threading, time, urllib.request
@@ -17,8 +17,8 @@ from . import journal, paths as pth, procs
 from .bus import bus
 from .tun import WINTUN_ID, _ps, _run
 
-NAME, IFACE, EXE = 'vpn', 'RemoteAgents-VPN', 'RemoteAgents-VPN.exe'
-OWN_IFACES = (IFACE, 'ralab-vpn')  # наши адаптеры VPN (прежнее имя - для уборки хвостов)
+NAME, IFACE, EXE = 'vpn', 'RA2-VPN', 'RA2-VPN.exe'
+OWN_IFACES = ('RA2-VPN', 'ralab-vpn')  # наши адаптеры VPN (прежнее имя - для уборки хвостов)
 MODES = {'off': 'выключен', 'auto': 'авто', 'only': 'только наш'}
 CHECK_S, CHECK_FAILS, FAILS_MAX, RETRY_S, STABLE_S, START_S = 10, 2, 3, 60, 300, 25
 CHECK_URL = 'http://www.gstatic.com/generate_204'
@@ -161,7 +161,7 @@ class Vpn:
     def _foreign(st):
         """Чужой VPN: интернет (1.1.1.1 - он вне нашего туннеля) идёт через не железный интерфейс, либо открыт прокси другого VPN."""
         v = pth.vpn_iface()
-        if v and not v.lower().startswith(('ralab', 'remoteagents')):
+        if v and not v.lower().startswith(('ralab', 'remoteagents', 'ra2-')):
             return v
         prox = pth.local_proxies(st.cfg)
         return 'прокси 127.0.0.1:%d' % prox[0] if prox else None
@@ -320,7 +320,7 @@ class Vpn:
 
     def _own_copy(self, exe):
         """Своя копия под своим именем: Happ пускает sing-box.exe мимо туннеля, а у канала своя копия."""
-        dst = os.path.join(self.ctx.home, 'runtime', EXE if os.name == 'nt' else 'remoteagents-vpn')
+        dst = os.path.join(self.ctx.home, 'runtime', EXE if os.name == 'nt' else 'ra2-vpn')
         if not os.path.isfile(dst) or os.path.getsize(dst) != os.path.getsize(exe):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copy2(exe, dst + '.tmp')
