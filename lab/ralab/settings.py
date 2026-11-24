@@ -7,6 +7,10 @@ known_hosts разбирается своим кодом (без внешних 
 import base64, fnmatch, glob, hashlib, hmac, json, os, re, shutil, threading, time, types
 
 from . import bins, journal
+try:
+    from . import v2config
+except ImportError:
+    v2config = None
 from .bus import bus
 
 LAN_MAX = 64
@@ -136,7 +140,7 @@ def load(lab_home, installed):
     """-> SimpleNamespace(cfg, prof, outs, ssh, singbox, paths, skipped, lans, server, login, key, known_hosts, port)."""
     from . import paths as pth
     inst, lab = os.path.join(installed, 'config.json'), os.path.join(lab_home, 'config.json')
-    cfg = read_json(inst) if os.path.isfile(inst) else {}
+    cfg = (v2config.legacy_view(lab_home) if v2config else None) or (read_json(inst) if os.path.isfile(inst) else {})  # свой конфиг v2 главнее Программы
     if os.path.isfile(lab):
         cfg = _merge(cfg, read_json(lab))
         journal.log('settings', 'lab.config', {'file': lab}, 'найден config.json лаборатории: его разделы главнее установленной программы')

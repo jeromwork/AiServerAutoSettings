@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Сборка lab/out/RemoteAgents-Lab.exe: сторож на C# + переносной Python + наш код + STOP.cmd (всё встроено в EXE).
+# Сборка lab/out/RemoteAgents-Lab.exe: сторож на C# + переносной Python + наш код (всё встроено в EXE).
 # По образцу build/build-exe.sh основной программы (dotnet publish, закреплённая сумма для сторонних файлов).
 # Запуск: timeout 420 flock --close /tmp/heavy-tests.lock bash lab/build.sh
 set -euo pipefail
@@ -104,10 +104,7 @@ with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as z:
 print('lab-code.zip: %d файлов' % (len(files) + 1))
 PY
 
-# 4. СТОП.cmd: в репозитории с LF, на выходе строго CRLF (cmd).
-sed 's/\r$//; s/$/\r/' "$here/exe/STOP.cmd" > "$out/RemoteAgents-Lab-STOP.cmd"
-
-# 4б. Клиент меню Проводника (asInvoker): собирается до основного EXE и встраивается в него.
+# 4. Клиент меню Проводника (asInvoker): собирается до основного EXE и встраивается в него.
 rm -rf "$out/publish-shell"
 "$dotnet" publish "$here/exe/shell/RemoteAgents.Lab.Shell.csproj" -c Release -o "$out/publish-shell"
 cp "$out/publish-shell/RemoteAgents-Lab-shell.exe" "$out/RemoteAgents-Lab-shell.exe"
@@ -115,9 +112,9 @@ cp "$out/publish-shell/RemoteAgents-Lab-shell.exe" "$out/RemoteAgents-Lab-shell.
 # 5. Публикация EXE.
 rm -rf "$out/publish"
 "$dotnet" publish "$here/exe/RemoteAgents.Lab.csproj" -c Release \
-  -p:LabVersion="$version" -p:PythonEmbedZip="$work/python-embed.zip" -p:LabCodeZip="$work/lab-code.zip" -p:BinZip="$work/bin.zip" -p:StopCmdPath="$out/RemoteAgents-Lab-STOP.cmd" -p:ShellExePath="$out/RemoteAgents-Lab-shell.exe" \
+  -p:LabVersion="$version" -p:PythonEmbedZip="$work/python-embed.zip" -p:LabCodeZip="$work/lab-code.zip" -p:BinZip="$work/bin.zip" -p:ShellExePath="$out/RemoteAgents-Lab-shell.exe" \
   -o "$out/publish"
 cp "$out/publish/RemoteAgents-Lab.exe" "$out/RemoteAgents-Lab.exe"
 echo "версия: $version"
-ls -l "$out/RemoteAgents-Lab.exe" "$out/RemoteAgents-Lab-shell.exe" "$out/RemoteAgents-Lab-STOP.cmd"
-sha256sum "$out/RemoteAgents-Lab.exe" "$out/RemoteAgents-Lab-STOP.cmd"
+ls -l "$out/RemoteAgents-Lab.exe" "$out/RemoteAgents-Lab-shell.exe"
+sha256sum "$out/RemoteAgents-Lab.exe"
