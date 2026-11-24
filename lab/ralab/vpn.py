@@ -1,4 +1,5 @@
-"""VPN Лаборатории: весь интернет через туннель (Россия - напрямую), отдельный процесс sing-box ralab-vpn.exe с адаптером ralab-vpn.
+"""VPN: весь интернет через туннель (Россия - напрямую), отдельный процесс sing-box RemoteAgents-VPN.exe с адаптером RemoteAgents-VPN.
+Имена на ПК и строки для людей - без слова «lab» (приложение станет второй версией RemoteAgents).
 
 Режим (state\\vpn.json, команда `ra-lab vpn off|auto|only`): off - выключен (по умолчанию); auto - включается сам, если нет чужого VPN,
 и уступает любому чужому; only - только наш: при чужом VPN не включается и просит его отключить.
@@ -7,7 +8,7 @@
 1.1.1.1 (по нему paths.vpn_iface видит чужой VPN и при включённом нашем). DNS ПК не трогаем (dns_mode disabled).
 Fail-open: процесс вышел сам или 2 проверки через туннель подряд не прошли - процесс снимается, интернет идёт напрямую;
 3 сбоя подряд - VPN выключен до новой команды. Выход/падение Python: Job Object гасит sing-box, адаптер исчезает вместе с ним;
-при запуске оставшийся адаптер ralab-vpn* удаляется (имя - защита от чужих адаптеров).
+при запуске оставшийся наш адаптер (RemoteAgents-VPN*, прежнее имя ralab-vpn*) удаляется (имя - защита от чужих адаптеров).
 Журнал sing-box VPN в общий журнал не пишется (там адреса сайтов): в памяти последние ошибки, они попадают в причину сбоя.
 """
 import collections, copy, http.client, ipaddress, json, os, re, secrets, shutil, socket, threading, time, urllib.request
@@ -16,7 +17,8 @@ from . import journal, paths as pth, procs
 from .bus import bus
 from .tun import WINTUN_ID, _ps, _run
 
-NAME, IFACE, EXE = 'vpn', 'ralab-vpn', 'ralab-vpn.exe'
+NAME, IFACE, EXE = 'vpn', 'RemoteAgents-VPN', 'RemoteAgents-VPN.exe'
+OWN_IFACES = (IFACE, 'ralab-vpn')  # наши адаптеры VPN (прежнее имя - для уборки хвостов)
 MODES = {'off': 'выключен', 'auto': 'авто', 'only': 'только наш'}
 CHECK_S, CHECK_FAILS, FAILS_MAX, RETRY_S, STABLE_S, START_S = 10, 2, 3, 60, 300, 25
 CHECK_URL = 'http://www.gstatic.com/generate_204'
@@ -159,7 +161,7 @@ class Vpn:
     def _foreign(st):
         """Чужой VPN: интернет (1.1.1.1 - он вне нашего туннеля) идёт через не железный интерфейс, либо открыт прокси другого VPN."""
         v = pth.vpn_iface()
-        if v and not v.lower().startswith('ralab'):
+        if v and not v.lower().startswith(('ralab', 'remoteagents')):
             return v
         prox = pth.local_proxies(st.cfg)
         return 'прокси 127.0.0.1:%d' % prox[0] if prox else None
@@ -211,7 +213,7 @@ class Vpn:
             self._stop(why)
         if self.fails >= FAILS_MAX:
             self.gave_up = True
-            self.state = 'выключен после %d сбоев подряд (%s); интернет напрямую. Включить снова: ra-lab vpn %s' % (self.fails, why[:120], self.mode)
+            self.state = 'выключен после %d сбоев подряд (%s); интернет напрямую. Включить снова: переключатель VPN' % (self.fails, why[:120])
         else:
             self.next_try = time.monotonic() + RETRY_S
             self.state = 'сбой: %s; интернет напрямую, повтор через %d с' % (why[:120], RETRY_S)
@@ -245,10 +247,10 @@ class Vpn:
         return out
 
     def _system(self):
-        """Один вызов PowerShell: оставшиеся адаптеры ralab-vpn* (PnP) и DNS-серверы ПК."""
-        script = ("$a=@(Get-NetAdapter -IncludeHidden -Name '%s*' -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.PnPDeviceID }); "
+        """Один вызов PowerShell: оставшиеся наши адаптеры VPN (PnP) и DNS-серверы ПК."""
+        script = ("$a=@(Get-NetAdapter -IncludeHidden -Name %s -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.PnPDeviceID }); "
                   "$d=@(Get-DnsClientServerAddress -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses }); "
-                  "@{adapters=$a; dns=$d} | ConvertTo-Json -Compress" % IFACE)
+                  "@{adapters=$a; dns=$d} | ConvertTo-Json -Compress" % ','.join("'%s*'" % n for n in OWN_IFACES))
         r = _ps(script, 8) if procs.WIN else None
         try:
             d = json.loads(r[1]) if r and r[0] == 0 else {}
@@ -257,7 +259,7 @@ class Vpn:
         return [x for x in (d.get('adapters') or []) if isinstance(x, str)], [x for x in (d.get('dns') or []) if isinstance(x, str)]
 
     def _cleanup(self):
-        """Наш адаптер, оставшийся без процесса (прошлый запуск, жёсткое убийство): удалить. Чужие не трогаем - только имя ralab-vpn*."""
+        """Наш адаптер, оставшийся без процесса (прошлый запуск, жёсткое убийство): удалить. Чужие не трогаем - только имена OWN_IFACES*."""
         if not procs.WIN or self._running():
             return
         for pnp in self._system()[0]:
@@ -317,8 +319,8 @@ class Vpn:
                 'experimental': {'clash_api': {'external_controller': '127.0.0.1:%d' % self.clash_port, 'secret': self.secret}}}
 
     def _own_copy(self, exe):
-        """Своя копия под своим именем: Happ пускает sing-box.exe мимо туннеля, а ralab-core - процесс канала."""
-        dst = os.path.join(self.ctx.home, 'runtime', EXE if os.name == 'nt' else 'ralab-vpn')
+        """Своя копия под своим именем: Happ пускает sing-box.exe мимо туннеля, а у канала своя копия."""
+        dst = os.path.join(self.ctx.home, 'runtime', EXE if os.name == 'nt' else 'remoteagents-vpn')
         if not os.path.isfile(dst) or os.path.getsize(dst) != os.path.getsize(exe):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copy2(exe, dst + '.tmp')
