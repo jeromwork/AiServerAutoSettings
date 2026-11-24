@@ -7,6 +7,17 @@ import argparse, os, re, socket, sys, threading, time, traceback, types
 from . import bins, journal, procs
 from .bus import bus, rss_bytes
 
+from . import control, webui
+
+try:  # модули других дорожек
+    from . import cleanup
+except ImportError:
+    cleanup = None
+try:
+    from . import v2config
+except ImportError:
+    v2config = None
+
 MEM_MAX = 300 * 1024 * 1024
 
 
@@ -54,7 +65,7 @@ def main(argv):
     a = ap.parse_known_args(argv)[0]
     home = os.path.abspath(a.home)
     code_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # <home>\code\<имя>\ : версия кода = имя папки
-    ctx = Ctx(home=home, installed=a.installed or os.path.join(os.path.dirname(home), 'RemoteAgents'), exe_version=a.exe_version,
+    ctx = Ctx(home=home, exe=os.environ.get('RA_EXE') or a.exe, installed=a.installed or os.path.join(os.path.dirname(home), 'RemoteAgents'), exe_version=a.exe_version,
               rollback=re.sub(r'[^\x20-\x7e]', '?', a.rollback_reason)[:160], version=os.path.basename(code_dir), settings=None,
               computer=re.sub(r'[^A-Za-z0-9_-]', '_', os.environ.get('COMPUTERNAME') or socket.gethostname())[:40], t0=time.monotonic(), exit_code=None)
     for d in ('logs', 'state', 'code', 'undo', 'private'):
@@ -93,6 +104,41 @@ def main(argv):
     ctx.disk = Disk(ctx)
     ctx.link = Link(ctx)
     done = threading.Event()
+    jlog = lambda text: journal.log('app', 'event', {}, text)
+
+    try:  # страница управления: до чтения настроек, без неё программа всё равно работает
+        url = webui.start(ctx)
+        ctx.link._send({'t': 'ui', 'url': url})
+    except Exception:
+        journal.log('app', 'webui', {'trace': traceback.format_exc()[-800:]}, 'страница управления не запущена')
+    has_cfg = lambda: bool(v2config and v2config.status(home).get('has'))
+    opened = []
+
+    def need_config(ev):  # прежний путь не дал настроек и своего конфига нет: подсказка при каждой ошибке, окно - один раз
+        try:
+            if has_cfg() or os.path.isfile(os.path.join(ctx.installed, 'config.json')) or os.path.isfile(os.path.join(home, 'config.json')):
+                return  # конфиг есть, но сломан: остаётся красная подсказка, версия откатится по таймеру
+            ctx.link.set('red', 'Вставьте конфиг', 'Вставьте конфиг, который вам прислали')
+            ctx.link._refresh()
+            if not opened:
+                opened.append(1)
+                ctx.link._send({'t': 'noconfig'})
+                ctx.link._send({'t': 'open-ui'})
+        except Exception:
+            journal.log('app', 'need-config', {'trace': traceback.format_exc()[-800:]})
+    config_ok = []
+
+    def on_loaded(ev):
+        if not config_ok:
+            config_ok.append(1)
+            ctx.link._send({'t': 'config-ok'})
+    bus.subscribe('settings.loaded', on_loaded)
+    bus.subscribe('settings.failed', need_config)
+    if cleanup:
+        try:  # хвосты прошлого запуска убираем до сети
+            cleanup.run('startup', home, jlog)
+        except Exception:
+            journal.log('app', 'cleanup', {'trace': traceback.format_exc()[-800:]}, 'уборка при старте не удалась')
 
     def leave(code, why):
         if ctx.exit_code is None:
@@ -116,5 +162,16 @@ def main(argv):
     # Худший stop() ~26 с (см. tun.py), EXE ждёт 45 с.
     ctx.tun.stop().join(timeout=40)
     procs.kill_all()  # sing-box, ssh и команды агента (Job Object убьёт и тех, кого не успели)
+    if cleanup and ctx.exit_code == 0 and getattr(ctx, 'final_exit', False):  # только {"t":"exit","final":true}
+        def _clean():
+            try:
+                cleanup.run('exit', home, jlog)
+            except Exception:
+                journal.log('app', 'cleanup', {'trace': traceback.format_exc()[-800:]}, 'уборка при выходе не удалась')
+        th = threading.Thread(target=_clean, name='cleanup-exit', daemon=True)
+        th.start()
+        th.join(timeout=30)
+        if th.is_alive():
+            journal.log('app', 'cleanup', {}, 'уборка при выходе не успела за 30 с')
     journal.flush()
     return ctx.exit_code

@@ -2,13 +2,16 @@
 
 stdout: {"t":"state","color":"grey|yellow|green|red","tip":"<=63","lines":[<=50 строк по <=300]},
         {"t":"good","version":"..."} (один раз, на первый channel.up), {"t":"report","text":"..."} (<=64 КБ, ответ на запрос отчёта).
-        {"t":"notice","text":"..."} (сообщение для человека), {"t":"restart-exe"} (подмена файла сделана, EXE перезапускается сам).
-stdin:  {"t":"exit"}, {"t":"report"}, {"t":"update"} (проверить релиз и обновить EXE), {"t":"rollback"} (вернуть прежний EXE).
+        {"t":"notice","text":"..."} (сообщение для человека), {"t":"ui","url":"..."}, {"t":"open-ui"}, {"t":"restart-exe"} (подмена файла сделана, EXE перезапускается сам).
+        {"t":"noconfig"} (настроек нет совсем: ни своего конфига, ни прежних config.json; EXE останавливает таймер отката В, чтобы человек успел вставить конфиг),
+        {"t":"config-ok"} (настройки прочитаны: EXE снова запускает таймер В, если его остановил noconfig; таймер не останавливает и версию рабочей
+        не отмечает - это делает только good).
+stdin:  {"t":"exit"[,"final":true]} (final - окончательный выход программы: только тогда Python делает уборку; обычный exit = перезапуск Python, без уборки), {"t":"report"}, {"t":"update"} (проверить релиз и обновить EXE), {"t":"rollback"} (вернуть прежний EXE), {"t":"control","enabled":bool}.
 В stdout пишет только этот модуль (sys.stdout после старта указывает на stderr). Секретов нет: всё проходит journal.mask().
 """
 import json, sys, threading
 
-from . import journal, update
+from . import control, journal, update
 from .bus import bus
 
 LINES_MAX, LINE_MAX, TIP_MAX, REPORT_MAX = 50, 300, 63, 64000
@@ -18,7 +21,7 @@ class Link:
     def __init__(self, ctx):
         self.ctx, self.out, self.lock = ctx, sys.stdout, threading.Lock()
         sys.stdout = sys.stderr  # случайный print не должен портить поток протокола
-        self.color, self.tip, self.note, self.last, self.good_sent = 'grey', 'Запуск', 'запуск', None, False
+        self.color, self.tip, self.note, self.last, self.good_sent, self.lines = 'grey', 'Запуск', 'запуск', None, False, []
         attach(self)
         bus.subscribe('app.start', self._on_start)
         bus.subscribe('link.report_request', self._on_report)
@@ -40,10 +43,12 @@ class Link:
         try:
             for raw in sys.stdin:
                 try:
-                    t = json.loads(raw).get('t')
+                    msg_in = json.loads(raw)
+                    t = msg_in.get('t')
                 except (ValueError, AttributeError):
                     continue
                 if t == 'exit':
+                    self.ctx.final_exit = bool(msg_in.get('final'))
                     bus.publish('app.stop', {'reason': 'команда exit от EXE'})
                 elif t == 'report':
                     bus.publish('link.report_request')
@@ -51,6 +56,12 @@ class Link:
                     update.install(self._send)
                 elif t == 'rollback':
                     update.rollback(self._send)
+                elif t == 'control':
+                    try:
+                        control.set(self.ctx.home, bool(msg_in.get('enabled')))
+                    except OSError as e:
+                        journal.log('link', 'control', {'err': str(e)}, 'не удалось записать переключатель управления')
+                    self._refresh()
         except (OSError, ValueError):
             pass
         bus.publish('app.stop', {'reason': 'EOF stdin: EXE закрыл связь'})
@@ -83,7 +94,8 @@ class Link:
         for s in (lan.status() if lan else [])[:20]:
             lines.append('Сеть %s: %s %s' % (s['name'], s['status'], s['detail']))
         lines = [journal.mask(l)[:LINE_MAX] for l in lines][:LINES_MAX]
-        msg = {'t': 'state', 'color': self.color, 'tip': self.tip[:TIP_MAX], 'lines': lines}
+        self.lines = lines
+        msg = {'t': 'state', 'color': self.color, 'tip': self.tip[:TIP_MAX], 'lines': lines, 'control': control.enabled(ctx.home)}
         if getattr(ctx, 'disk', None) and ctx.disk.state == 'running':
             msg['disk'] = True  # V8: EXE включает значки Проводника только пока Диск ведёт Лаборатория
             if (ctx.disk.info or {}).get('home'):
