@@ -70,6 +70,8 @@ class Link:
             lines.append(up.over())
         if getattr(ctx, 'tun', None):
             lines.append('TUN: %s' % ctx.tun.last)
+        if getattr(ctx, 'vpn', None):
+            lines.append('VPN (%s): %s' % (ctx.vpn.mode, ctx.vpn.state))
         for x in (r.get('ranking') or [])[:12]:
             lines.append('%s: %s %s' % (x['path'], x['outcome'], '%d КиБ/с' % (x['down_bps'] // 1024) if x.get('down_bps') else (x.get('reason') or '')[:80]))
         lan = getattr(ctx, 'lan', None)
@@ -114,5 +116,5 @@ class Link:
 def attach(link):
     """Подписки с темой: bus передаёт подписчику только данные, поэтому по одной функции на тему."""
     for t in ('settings.loaded', 'settings.failed', 'singbox.started', 'singbox.failed', 'channel.up', 'channel.down', 'round.done',
-              'lan.result', 'path.ok', 'path.failed', 'agent.ready', 'singbox.exited', 'uplink.selected'):
+              'lan.result', 'path.ok', 'path.failed', 'agent.ready', 'singbox.exited', 'uplink.selected', 'vpn.state'):
         bus.subscribe(t, lambda ev, t=t: link.handle(t, ev or {}))

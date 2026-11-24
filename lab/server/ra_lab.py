@@ -4,7 +4,7 @@
   ra-lab session ...   служебная: её запускает ssh ПК (проба 64 КиБ и канал), руками не вызывается
   ra-lab wait-up [--deadline 90] [--pc ИМЯ]      ждать подключения ПК
   ra-lab status | log [-n N] | rank | exec "<cmd>" [--shell powershell|cmd] [--max-time S] [--cwd D] | kill <id> |
-         read <удалённый путь> [локальный] | write <удалённый путь> <локальный|-> | restart | switch <путь> | push [--wait] |
+         read <удалённый путь> [локальный] | write <удалённый путь> <локальный|-> | restart | switch <путь> | vpn [off|auto|only] | push [--wait] |
          collect [--every 20]   (долгая: докачивает журнал ПК в ~/work/logs-in/lab/<ПК>/, живёт и после закрытия лаборатории)
 Состояние: ~/.local/state/ra-lab/ (0700): <ПК>.json {port, token, version, rollback} (0600) и <ПК>.events (unix-сокет wait-up).
 Токен агента никогда не печатается. Стандартная библиотека, Python 3.8+.
@@ -277,6 +277,15 @@ def cmd_switch(a):
     print('переключение на %s запрошено' % a.path)
 
 
+def cmd_vpn(a):
+    st = read_state(a.pc)
+    if a.mode:
+        ok(st, 'POST', '/vpn', {'mode': a.mode})
+        print('VPN: режим %s' % a.mode)
+    code, r = call(st, 'GET', '/status')
+    print(json.dumps((r or {}).get('vpn') if isinstance(r, dict) else r, ensure_ascii=False, indent=2))
+
+
 def cmd_push(a):
     here = os.getcwd()
     try:
@@ -396,6 +405,7 @@ def main():
     add('write', cmd_write, P('remote'), P('local'))
     add('restart', cmd_restart)
     add('switch', cmd_switch, P('path'))
+    add('vpn', cmd_vpn, P('mode', nargs='?', choices=['off', 'auto', 'only']))
     add('collect', cmd_collect, P('--every', type=int, default=20))
     add('push', cmd_push, P('--wait', action='store_true'), P('--deadline', type=int, default=90))
     a = ap.parse_args()

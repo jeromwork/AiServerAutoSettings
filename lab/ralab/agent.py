@@ -67,7 +67,8 @@ class Agent:
         self.execs, self.seq, self.lock = {}, 0, threading.Lock()
         self.routes = {('GET', 'status'): self.r_status, ('GET', 'log'): self.r_log, ('POST', 'exec'): self.r_exec, ('GET', 'proc'): self.r_proc,
                        ('GET', 'procs'): self.r_procs, ('POST', 'kill'): self.r_kill, ('GET', 'read'): self.r_read, ('POST', 'write'): self.r_write,
-                       ('GET', 'files'): self.r_files, ('POST', 'code'): self.r_code, ('POST', 'restart'): self.r_restart, ('POST', 'switch'): self.r_switch}
+                       ('GET', 'files'): self.r_files, ('POST', 'code'): self.r_code, ('POST', 'restart'): self.r_restart, ('POST', 'switch'): self.r_switch,
+                       ('POST', 'vpn'): self.r_vpn}
         bus.subscribe('app.start', self._on_start)
         bus.subscribe('proc.exited', self._on_exit)
 
@@ -282,3 +283,9 @@ class Agent:
             return 400, {'error': 'нужен path'}
         bus.publish('path.switch', {'path': str(p)})
         return 200, {'ok': True}
+
+    def r_vpn(self, h, q, body):
+        m = self._json(body).get('mode')
+        if not self.ctx.vpn.set_mode(m):
+            return 400, {'error': 'режим: off, auto или only'}
+        return 200, self.ctx.vpn.status()
