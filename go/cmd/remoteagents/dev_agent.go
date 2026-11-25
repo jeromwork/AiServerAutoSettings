@@ -190,14 +190,14 @@ func devAgent(ctx context.Context, args []string) int {
 		fmt.Fprintf(os.Stderr, "agent: listen: %v\n", err)
 		return 1
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	homeDir, err := os.MkdirTemp("", "ra3-dev-agent-")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agent: temp: %v\n", err)
 		return 1
 	}
-	defer os.RemoveAll(homeDir)
+	defer func() { _ = os.RemoveAll(homeDir) }()
 
 	paths := api.NewPaths(homeDir)
 	log := &fake.Logger{}
@@ -219,7 +219,7 @@ func devAgent(ctx context.Context, args []string) int {
 		return 1
 	}
 	ag.Serve(ln)
-	defer ag.Close()
+	defer func() { _ = ag.Close() }()
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", ln.Addr().(*net.TCPAddr).Port)
 	client := &http.Client{Timeout: 5 * time.Second}
