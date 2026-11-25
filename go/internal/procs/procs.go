@@ -1,6 +1,7 @@
 package procs
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -234,8 +236,8 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 	go func() {
 		err := cmd.Wait()
 		closeInput()
-		// Reap descendants even when the group leader exits first.
-		p.hardKill()
+		// Reap a private Windows Job; Unix children share one group.
+		p.reapExited()
 		m.releaseCmd(cmd)
 
 		p.mu.Lock()
@@ -350,9 +352,8 @@ func (p *proc) Stop(ctx context.Context) error {
 	}
 }
 
-// prepareStdin borrows input without closing it. A private pipe keeps Wait
-// independent of input.Read. io.Reader has no cancellation contract: if Read
-// blocks forever, its caller must arrange to unblock it; cleanup never waits.
+// prepareStdin borrows files and finite in-memory readers. Arbitrary Readers
+// cannot be canceled through io.Reader, so reject them before starting a copier.
 func prepareStdin(cmd *exec.Cmd, input io.Reader) (func(), error) {
 	noop := func() {}
 	if input == nil {
@@ -361,6 +362,11 @@ func prepareStdin(cmd *exec.Cmd, input io.Reader) (func(), error) {
 	if file, ok := input.(*os.File); ok {
 		cmd.Stdin = file
 		return noop, nil
+	}
+	switch input.(type) {
+	case *bytes.Buffer, *bytes.Reader, *strings.Reader:
+	default:
+		return nil, fmt.Errorf("unsupported stdin reader: use *os.File or an in-memory reader")
 	}
 	readEnd, writeEnd, err := os.Pipe()
 	if err != nil {

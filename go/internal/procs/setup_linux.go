@@ -18,19 +18,34 @@ import (
 	"remoteagents/internal/api"
 )
 
-type platformState struct{ releases *sync.Map }
+type platformState struct {
+	releases *sync.Map
+	pgid     int
+}
 
 func newPlatformState() (platformState, error) {
 	return platformState{releases: &sync.Map{}}, nil
 }
 
-func (m *manager) terminatePlatform() {}
+func (m *manager) terminatePlatform() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.platform.pgid > 0 {
+		_ = syscall.Kill(-m.platform.pgid, syscall.SIGKILL)
+		m.platform.pgid = 0
+	}
+}
 
 func (m *manager) setupCmd(cmd *exec.Cmd, s api.ProcSpec) error {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
+	// An empty group disappears when its last member exits.
+	if m.platform.pgid > 0 && syscall.Kill(-m.platform.pgid, 0) == syscall.ESRCH {
+		m.platform.pgid = 0
+	}
+	cmd.SysProcAttr.Pgid = m.platform.pgid
 	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
 
 	if s.RunAs != "" {
@@ -87,19 +102,22 @@ func (m *manager) startCmd(cmd *exec.Cmd, _ context.Context) error {
 	return nil
 }
 
-func (m *manager) postStart(_ *exec.Cmd) error {
+func (m *manager) postStart(cmd *exec.Cmd) error {
+	if m.platform.pgid == 0 {
+		m.platform.pgid = cmd.Process.Pid
+	}
 	return nil
 }
 
 func (p *proc) softStop() {
 	if p.pid > 0 {
-		_ = syscall.Kill(-p.pid, syscall.SIGTERM)
+		_ = syscall.Kill(-p.groupID(), syscall.SIGTERM)
 	}
 }
 
 func (p *proc) hardKill() {
 	if p.pid > 0 {
-		_ = syscall.Kill(-p.pid, syscall.SIGKILL)
+		_ = syscall.Kill(-p.groupID(), syscall.SIGKILL)
 	}
 	if p.cmd != nil && p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
@@ -146,4 +164,14 @@ func processStarted(_ context.Context, cmd *exec.Cmd) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("missing boot time")
+}
+
+// Do not kill the shared group merely because one member has exited.
+func (p *proc) reapExited() {}
+
+func (p *proc) groupID() int {
+	if p.cmd != nil && p.cmd.SysProcAttr != nil && p.cmd.SysProcAttr.Pgid > 0 {
+		return p.cmd.SysProcAttr.Pgid
+	}
+	return p.pid
 }

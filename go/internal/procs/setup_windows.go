@@ -31,9 +31,12 @@ func newPlatformState() (platformState, error) {
 }
 
 func (m *manager) terminatePlatform() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.platform.job != nil {
 		_ = m.platform.job.Terminate()
 		_ = m.platform.job.Close()
+		m.platform.job = nil
 	}
 }
 
@@ -154,3 +157,5 @@ func processStarted(_ context.Context, cmd *exec.Cmd) (time.Time, error) {
 	}
 	return time.Unix(0, created.Nanoseconds()).UTC(), nil
 }
+
+func (p *proc) reapExited() { p.hardKill() }
