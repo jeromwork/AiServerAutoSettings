@@ -3,9 +3,12 @@
 package procs
 
 import (
+	"context"
+	"fmt"
 	"os/exec"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/kolesnikovae/go-winjob"
 	"golang.org/x/sys/windows"
@@ -28,10 +31,14 @@ func newPlatformState() (platformState, error) {
 func (m *manager) terminatePlatform() {
 	if m.platform.job != nil {
 		_ = m.platform.job.Terminate()
+		_ = m.platform.job.Close()
 	}
 }
 
-func (m *manager) setupCmd(cmd *exec.Cmd, _ api.ProcSpec) error {
+func (m *manager) setupCmd(cmd *exec.Cmd, s api.ProcSpec) error {
+	if s.RunAs != "" {
+		return fmt.Errorf("runAs is unsupported on Windows")
+	}
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -39,7 +46,7 @@ func (m *manager) setupCmd(cmd *exec.Cmd, _ api.ProcSpec) error {
 	return nil
 }
 
-func (m *manager) startCmd(cmd *exec.Cmd) error {
+func (m *manager) startCmd(cmd *exec.Cmd, _ context.Context) error {
 	return cmd.Start()
 }
 
@@ -58,10 +65,14 @@ func (p *proc) softStop() {
 
 func (p *proc) hardKill() {
 	if p.pid > 0 {
-		killCmd := exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(p.pid))
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		killCmd := exec.CommandContext(ctx, "taskkill", "/F", "/T", "/PID", strconv.Itoa(p.pid))
 		_ = killCmd.Run()
 	}
 	if p.cmd != nil && p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
 	}
 }
+
+func (m *manager) releaseCmd(_ *exec.Cmd) {}
