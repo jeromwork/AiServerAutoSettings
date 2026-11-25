@@ -26,11 +26,7 @@ func runDevProcs(ctx context.Context, args []string) int {
 	}
 	switch args[0] {
 	case "orphan":
-		pr, err := procs.New(nil, nil)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "procs: new-failed: %v\n", err)
-			return 1
-		}
+		pr := procs.New(nil)
 		sleepPath, err := exec.LookPath("sleep")
 		if err != nil {
 			sleepPath = "/bin/sleep"
