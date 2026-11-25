@@ -58,13 +58,13 @@ func runDevSingbox(ctx context.Context, args []string) error {
 	}
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
-	defer func() {
-		stop, done := context.WithTimeout(context.Background(), 10*time.Second)
+	defer func(parent context.Context) {
+		stop, done := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
 		defer done()
 		if err := sb.Stop(stop); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
-	}()
+	}(ctx)
 	if err = sb.Start(ctx); err != nil {
 		return err
 	}

@@ -24,6 +24,11 @@ type Options struct {
 
 type box struct {
 	mu             sync.Mutex
+	control        sync.Mutex
+	opCancel       context.CancelFunc
+	live           api.Process
+	liveCancel     context.CancelFunc
+	stopping       int
 	cfg            *api.Config
 	p              api.Paths
 	log            api.Logger
@@ -62,7 +67,7 @@ func New(cfg *api.Config, p api.Paths, log api.Logger, tr api.Traces, pr api.Pro
 	log.Secret(token)
 	ports := make([]int, 2)
 	for i := range ports {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
+		l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 		if err != nil {
 			return nil, fmt.Errorf("singbox: port: %w", err)
 		}
@@ -83,10 +88,24 @@ func (s *box) Effective() api.Effective { s.mu.Lock(); defer s.mu.Unlock(); retu
 func (s *box) PathNames() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	data, err := s.render(s.rc.Effective)
+	if err != nil {
+		return nil
+	}
+	var config struct {
+		Outbounds []struct {
+			Tag       string
+			Outbounds []string
+		}
+	}
+	if json.Unmarshal(data, &config) != nil {
+		return nil
+	}
 	var names []string
-	for _, e := range s.cfg.Paths.Entries {
-		if e.Enabled {
-			names = append(names, e.Name)
+	for _, outbound := range config.Outbounds {
+		if outbound.Tag == "chan" {
+			names = append(names, outbound.Outbounds...)
+			break
 		}
 	}
 	return names
@@ -103,7 +122,7 @@ func (s *box) Start(ctx context.Context) error {
 	if s.running {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := s.operation(ctx)
 	defer cancel()
 	lock := s.o.LockJSON
 	if lock == "" {
@@ -122,7 +141,7 @@ func (s *box) Apply(ctx context.Context, e api.Effective) error {
 	if s.binary == "" {
 		return fmt.Errorf("singbox: stopped: start before apply")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := s.operation(ctx)
 	defer cancel()
 	return s.apply(ctx, e)
 }
@@ -140,7 +159,7 @@ func (s *box) render(e api.Effective) ([]byte, error) {
 		return nil, fmt.Errorf("singbox: config: %w", err)
 	}
 	var raw map[string]any
-	if err = json.Unmarshal(data, &raw); err != nil {
+	if err = json.Unmarshal(data, &raw); err != nil || len(raw) == 0 {
 		return nil, fmt.Errorf("singbox: config: invalid JSON")
 	}
 	// Raw input is for dev only; keep the controller local and authenticated.
@@ -167,7 +186,11 @@ func (s *box) apply(ctx context.Context, e api.Effective) error {
 	if err != nil {
 		return err
 	}
-	s.log.Secret(string(data))
+	var values any
+	if err = json.Unmarshal(data, &values); err != nil {
+		return fmt.Errorf("singbox: config: invalid JSON")
+	}
+	s.secrets(values)
 	path, release, err := tempFile(s.p, s.tr, "config-*.new")
 	if err != nil {
 		return err
@@ -225,8 +248,19 @@ func (s *box) apply(ctx context.Context, e api.Effective) error {
 	return nil
 }
 func (s *box) launch(ctx context.Context, e api.Effective) error {
-	life, cancel := context.WithCancel(context.Background())
+	life, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	s.control.Lock()
+	if ctx.Err() != nil {
+		s.control.Unlock()
+		cancel()
+		return fmt.Errorf("singbox: start: %w", ctx.Err())
+	}
+	s.liveCancel = cancel
+	s.control.Unlock()
 	proc, err := s.pr.Start(life, api.ProcSpec{Name: "singbox", Path: s.binary, Args: []string{"run", "-c", s.config}, Stream: api.StreamSB})
+	s.control.Lock()
+	s.live = proc
+	s.control.Unlock()
 	if err != nil {
 		cancel()
 		return fmt.Errorf("singbox: start: %w", err)
@@ -277,7 +311,7 @@ func (s *box) watch(ctx context.Context, p api.Process, e api.Effective) {
 	default:
 	}
 	if e.VPN || e.LAN {
-		retry, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		retry, cancel := s.operation(context.WithoutCancel(ctx))
 		defer cancel()
 		if err := s.apply(retry, api.Effective{}); err != nil {
 			s.log.Error("singbox.fallback", "error", err)
@@ -304,7 +338,29 @@ func (s *box) stop(ctx context.Context) error {
 	return nil
 }
 func (s *box) Stop(ctx context.Context) error {
-	s.mu.Lock()
+	s.control.Lock()
+	s.stopping++
+	defer func() { s.control.Lock(); s.stopping--; s.control.Unlock() }()
+	if s.opCancel != nil {
+		s.opCancel()
+	}
+	if s.liveCancel != nil {
+		s.liveCancel()
+	}
+	live := s.live
+	s.control.Unlock()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for !s.mu.TryLock() {
+		select {
+		case <-ctx.Done():
+			if live != nil {
+				_ = live.Stop(ctx)
+			}
+			return fmt.Errorf("singbox: stop: %w", ctx.Err())
+		case <-tick.C:
+		}
+	}
 	defer s.mu.Unlock()
 	if err := s.stop(ctx); err != nil {
 		return err
@@ -322,4 +378,34 @@ func (s *box) remove(path string) error {
 		return fmt.Errorf("singbox: cleanup: %w", err)
 	}
 	return s.tr.Done("tmp", path)
+}
+
+// operation lets Stop interrupt work that holds the state lock.
+func (s *box) operation(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	s.control.Lock()
+	s.opCancel = cancel
+	if s.stopping > 0 {
+		cancel()
+	}
+	s.control.Unlock()
+	return ctx, cancel
+}
+
+// Register decoded values, including credentials printed separately by sing-box.
+func (s *box) secrets(value any) {
+	switch v := value.(type) {
+	case string:
+		if v != "" {
+			s.log.Secret(v)
+		}
+	case []any:
+		for _, item := range v {
+			s.secrets(item)
+		}
+	case map[string]any:
+		for _, item := range v {
+			s.secrets(item)
+		}
+	}
 }
