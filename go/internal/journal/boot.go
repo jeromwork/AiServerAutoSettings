@@ -141,6 +141,7 @@ func migrateBootLogs(p api.Paths, o Options, root *Journal) {
 		before := target.drops.Load()
 		old := b.target
 		old.mu.Lock()
+		old.flushRepeatLocked()
 		if old.file != nil {
 			_ = old.file.Close()
 			old.file = nil

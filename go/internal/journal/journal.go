@@ -361,7 +361,8 @@ func (j *Journal) getStreamJournal(stream string) *Journal {
 	sj, err := newJournalInternal(j.paths, stream, j.opts)
 	if err != nil {
 		j.drops.Add(1)
-		return &Journal{}
+		// Retain a closed sink so every rejected line is counted by Drops.
+		sj = &Journal{stream: stream, component: stream, closed: true}
 	}
 	j.streamJournals[stream] = sj
 	return sj

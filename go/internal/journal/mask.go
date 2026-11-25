@@ -50,7 +50,13 @@ func RegisterSecret(val string) {
 
 	addSecretLocked(val)
 	lines := strings.FieldsFunc(val, func(r rune) bool {
-		return r == '\n' || r == '\r'
+		// Python str.splitlines() boundaries; empty lines cannot be secrets.
+		switch r {
+		case '\n', '\r', '\v', '\f', '\x1c', '\x1d', '\x1e', '\u0085', '\u2028', '\u2029':
+			return true
+		default:
+			return false
+		}
 	})
 	for _, l := range lines {
 		addSecretLocked(l)
