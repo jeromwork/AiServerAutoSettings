@@ -17,28 +17,10 @@ import (
 
 	"remoteagents/internal/api"
 	"remoteagents/internal/cleanup"
+	"remoteagents/internal/journal"
 
 	"remoteagents/internal/platform"
 )
-
-type defaultLogger struct{}
-
-func (d *defaultLogger) Info(event string, kv ...any)  {}
-func (d *defaultLogger) Warn(event string, kv ...any)  {}
-func (d *defaultLogger) Error(event string, kv ...any) {}
-func (d *defaultLogger) With(component string) api.Logger {
-	return d
-}
-func (d *defaultLogger) Secret(value string) {}
-func (d *defaultLogger) Writer(stream, source string) io.WriteCloser {
-	return discardCloser{}
-}
-func (d *defaultLogger) Drops() int64 { return 0 }
-
-type discardCloser struct{}
-
-func (discardCloser) Write(p []byte) (int, error) { return len(p), nil }
-func (discardCloser) Close() error                { return nil }
 
 type execProcess struct {
 	cmd          *exec.Cmd
@@ -103,7 +85,7 @@ func (p *execProcess) Stop(ctx context.Context) error {
 	}
 }
 
-func startProcess(ctx context.Context, pr api.Procs, exe string, args []string, dir string) (api.Process, io.ReadCloser, io.ReadCloser, error) {
+func startProcess(ctx context.Context, pr api.Procs, log api.Logger, exe string, args []string, dir string) (api.Process, io.ReadCloser, io.ReadCloser, error) {
 	stdoutR, stdoutW := io.Pipe()
 	stderrR, stderrW := io.Pipe()
 
@@ -132,7 +114,7 @@ func startProcess(ctx context.Context, pr api.Procs, exe string, args []string, 
 		return nil, nil, nil, err
 	}
 
-	tr, err := cleanup.New(api.NewPaths(dir), &defaultLogger{}, platform.Current())
+	tr, err := cleanup.New(api.NewPaths(dir), log, platform.Current())
 	if err != nil {
 		_ = stdoutR.Close()
 		_ = stdoutW.Close()
@@ -329,7 +311,17 @@ func checkSwitchExpire(p api.Paths, log api.Logger) (bool, error) {
 
 func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self string, mode api.Mode, args []string) int {
 	if log == nil {
-		log = &defaultLogger{}
+		j, err := journal.New(p, api.StreamSup, journal.Options{MaxBytes: 5 << 20, Keep: 4})
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "supervise: journal-open: cannot open supervisor journal")
+			return 1
+		}
+		defer func() {
+			if err := j.Close(); err != nil {
+				_, _ = fmt.Fprintln(os.Stderr, "supervise: journal-close: cannot close supervisor journal")
+			}
+		}()
+		log = j
 	}
 
 	if err := os.MkdirAll(p.State, 0700); err != nil {
@@ -436,7 +428,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 			cmdArgs = append(cmdArgs, "--rollback-reason", s.RollbackReason)
 		}
 
-		proc, stdoutReader, stderrReader, err := startProcess(ctx, pr, exe, cmdArgs, p.Home)
+		proc, stdoutReader, stderrReader, err := startProcess(ctx, pr, log, exe, cmdArgs, p.Home)
 		if err != nil {
 			log.Error("supervise: failed to start core process", "err", err, "exe", exe)
 			if err := s.transition(1, false, false, "core start failed"); err != nil {

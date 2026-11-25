@@ -32,10 +32,9 @@ type slotState struct {
 
 type slots struct {
 	slotState
-	p               api.Paths
-	embedded        string
-	embeddedVersion string
-	self            string
+	p        api.Paths
+	embedded string
+	self     string
 }
 
 func executableName() string {
@@ -76,14 +75,13 @@ func loadSlots(p api.Paths, self, embeddedVersion string, reset bool) (*slots, e
 	if err != nil {
 		return nil, err
 	}
-	if embeddedVersion == "" {
-		embeddedVersion = "embedded"
+	if !versionName.MatchString(embeddedVersion) {
+		return nil, fmt.Errorf("supervise: embedded-version: invalid version")
 	}
 	s := &slots{
-		p:               p,
-		embedded:        "embedded",
-		embeddedVersion: embeddedVersion,
-		self:            self,
+		p:        p,
+		embedded: embeddedVersion,
+		self:     self,
 	}
 	if err := os.MkdirAll(p.Versions, 0700); err != nil {
 		return nil, err
@@ -95,6 +93,13 @@ func loadSlots(p api.Paths, self, embeddedVersion string, reset bool) (*slots, e
 	if len(b) > 0 {
 		if err := json.Unmarshal(b, &s.slotState); err != nil {
 			s.slotState = slotState{}
+		}
+	}
+	// Older state used a literal alias. Resolve it using the version recorded
+	// at that time, never the newly installed binary's version.
+	for _, slot := range []*string{&s.Current, &s.LastGood, &s.PrevGood} {
+		if *slot == "embedded" {
+			*slot = s.EmbeddedSeen
 		}
 	}
 	if s.EmbeddedSeen != embeddedVersion || s.Current == "" || !s.exists(s.Current) {
