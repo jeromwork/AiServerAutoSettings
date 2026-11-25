@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strings"
 
 	"remoteagents/internal/api"
 )
@@ -232,6 +233,14 @@ func (s *slots) transition(code int, silence, rollback bool, reason string) erro
 }
 
 func (s *slots) prune() error {
+	// Keep the pending snapshot valid until deletion finishes: Stage and
+	// pending-slot promotion use the same operation lock.
+	unlock, err := lockFile(filepath.Join(s.p.State, api.LockOp))
+	if err != nil {
+		return fmt.Errorf("supervise: op-lock: %w", err)
+	}
+	defer unlock()
+
 	pending, err := s.pending()
 	if err != nil {
 		return err
@@ -242,7 +251,7 @@ func (s *slots) prune() error {
 	}
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() && versionName.MatchString(e.Name()) {
+		if e.IsDir() && versionName.MatchString(e.Name()) && !strings.HasSuffix(e.Name(), ".tmp") {
 			names = append(names, e.Name())
 		}
 	}
