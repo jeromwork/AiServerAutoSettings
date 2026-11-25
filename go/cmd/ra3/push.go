@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"debug/buildinfo"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -18,9 +19,13 @@ import (
 	"time"
 
 	"remoteagents/internal/api"
+	"remoteagents/internal/cleanup"
+	"remoteagents/internal/journal"
+	"remoteagents/internal/platform"
+	"remoteagents/internal/procs"
 )
 
-func cmdPush(ctx context.Context, stateDir, pc, binaryFile, customVersion string, deadlineSec int) error {
+func cmdPush(ctx context.Context, stateDir, pc, binaryFile, customVersion string, deadlineSec int) (retErr error) {
 	st, err := readState(stateDir, pc)
 	if err != nil {
 		return err
@@ -28,6 +33,19 @@ func cmdPush(ctx context.Context, stateDir, pc, binaryFile, customVersion string
 
 	if deadlineSec <= 0 || deadlineSec > 150 {
 		return fmt.Errorf("ra3: deadline должен быть от 1 до 150 секунд")
+	}
+
+	// Keep server-side traces separate from the PC connection registry.
+	paths := api.NewPaths(filepath.Join(stateDir, ".ra3-"+st.PC))
+	log, err := journal.New(paths, api.StreamUpdate, journal.Options{})
+	if err != nil {
+		return fmt.Errorf("ra3: journal: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, log.Close()) }()
+	log.Secret(st.Token)
+	tr, err := cleanup.New(paths, log, platform.Current())
+	if err != nil {
+		return fmt.Errorf("ra3: traces: %w", err)
 	}
 
 	if binaryFile == "" {
@@ -60,12 +78,31 @@ func cmdPush(ctx context.Context, stateDir, pc, binaryFile, customVersion string
 		}
 
 		_, _ = fmt.Fprintf(os.Stderr, "ra3: сборка под цель %s через %s...\n", target, buildScript)
-		cmd := exec.CommandContext(ctx, "bash", buildScript, "--target", target)
-		cmd.Dir = filepath.Dir(buildScript)
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("ra3: ошибка сборки (%s): %w", target, err)
+		pr, err := procs.New(log, tr)
+		if err != nil {
+			return fmt.Errorf("ra3: procs: %w", err)
+		}
+		proc, err := pr.Start(ctx, api.ProcSpec{
+			Name: "ra3-build", Path: "bash", Args: []string{buildScript, "--target", target},
+			Dir: filepath.Dir(buildScript), Stdout: os.Stderr, Stderr: os.Stderr,
+		})
+		if err != nil {
+			return fmt.Errorf("ra3: build-start: %w", err)
+		}
+		// Stop/KillAll own the entire process tree; always wait for its exit.
+		select {
+		case <-proc.Done():
+		case <-ctx.Done():
+		}
+		stopCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		stopErr := errors.Join(proc.Stop(stopCtx), pr.KillAll(stopCtx))
+		stop()
+		<-proc.Done()
+		if err := errors.Join(ctx.Err(), stopErr); err != nil {
+			return fmt.Errorf("ra3: build-stop: %w", err)
+		}
+		if proc.ExitCode() != 0 {
+			return fmt.Errorf("ra3: build-failed: exit %d (%s)", proc.ExitCode(), target)
 		}
 
 		located, err := findBuiltBinary(filepath.Dir(buildScript), osName, archName)
@@ -105,13 +142,27 @@ func cmdPush(ctx context.Context, stateDir, pc, binaryFile, customVersion string
 	// 1. Слушатель <ПК>.events создаётся ДО POST запроса
 	eventsPath := filepath.Join(stateDir, st.PC+".events")
 
+	const listenerID = "push-events"
+	if err := tr.Intent(api.Trace{Kind: "listener", ID: listenerID,
+		Instance: tr.Instance(), Owner: "ra3", Data: map[string]string{"addr": eventsPath}}); err != nil {
+		return fmt.Errorf("ra3: listener-intent: %w", err)
+	}
 	var lc net.ListenConfig
 	l, err := lc.Listen(ctx, "unix", eventsPath)
 	if err != nil {
 		return fmt.Errorf("ra3: не удалось открыть сокет событий %s: %w", eventsPath, err)
 	}
 
-	defer func() { _ = l.Close() }()
+	defer func() {
+		if err := l.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			retErr = errors.Join(retErr, err)
+			return
+		}
+		retErr = errors.Join(retErr, tr.Done("listener", listenerID))
+	}()
+	if err := tr.Applied("listener", listenerID, map[string]string{"addr": eventsPath}, nil); err != nil {
+		return fmt.Errorf("ra3: listener-applied: %w", err)
+	}
 	if err := os.Chmod(eventsPath, 0600); err != nil {
 		return err
 	}
