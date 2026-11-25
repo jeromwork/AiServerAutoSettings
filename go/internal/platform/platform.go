@@ -1,8 +1,15 @@
+// Package platform contains the OS hooks used by the v2 core.
 package platform
 
-import "remoteagents/internal/api"
+import (
+	"remoteagents/internal/api"
+	"runtime"
+)
 
-// stubPlatform — каркас платформы до реализации P5b.
-type stubPlatform struct{}
+type nativePlatform struct{}
 
-var _ api.Platform = (*stubPlatform)(nil)
+func Current() api.Platform         { return nativePlatform{} }
+func (nativePlatform) OS() string   { return runtime.GOOS }
+func (nativePlatform) Arch() string { return runtime.GOARCH }
+
+var _ api.Platform = nativePlatform{}
