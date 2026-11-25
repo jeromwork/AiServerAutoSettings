@@ -25,7 +25,7 @@ $tempFile = [System.IO.Path]::GetTempFileName(); try { $lines = [System.Collecti
                 if ($line -match '^\s*#\s*ra3-[^\s]+\s+end\s*$') { $active = $false } } } catch { [Console]::Out.WriteLine("ERROR permission"); [Console]::Error.WriteLine("ERROR permission: hosts"); exit 1 } }; $lines.Add("[interfaces]")
     try { $adapters = Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object { ($inst8 -and $_.Name -like "ra3-$inst8*") }; foreach ($a in ($adapters | Sort-Object Name)) { $lines.Add("interface: $($a.Name)") } } catch { throw }
     $procIds = [System.Collections.Generic.HashSet[int]]::new(); $pList = [System.Collections.Generic.List[string]]::new(); try { foreach ($p in (Get-CimInstance Win32_Process -ErrorAction Stop)) {
-            $tracedProcess = @($traces | Where-Object { $_.kind -eq 'process' -and $_.instance -eq $inst -and
+            if (-not $p.ExecutablePath -and @($traces | Where-Object { $_.kind -eq 'process' -and $_.instance -eq $inst -and $_.data.pid -eq [string]$p.ProcessId }).Count) { throw [UnauthorizedAccessException]::new('ERROR permission: traced process executable unavailable') }; $tracedProcess = @($traces | Where-Object { $_.kind -eq 'process' -and $_.instance -eq $inst -and
                 $_.data.pid -eq [string]$p.ProcessId -and $_.data.exe -eq $p.ExecutablePath -and
                 ([datetimeoffset]$_.data.start).UtcDateTime -eq $p.CreationDate.ToUniversalTime() }).Count -gt 0
             if ($p.ExecutablePath -and ($tracedProcess -or $p.ExecutablePath.StartsWith(($instanceHome + [IO.Path]::DirectorySeparatorChar), [System.StringComparison]::OrdinalIgnoreCase))) { [void]$procIds.Add([int]$p.ProcessId)
@@ -37,7 +37,7 @@ $tempFile = [System.IO.Path]::GetTempFileName(); try { $lines = [System.Collecti
         $lines.Add("route: $($r.DestinationPrefix) $($r.InterfaceAlias) $($r.NextHop) $($r.RouteMetric)") }; foreach ($d in (Get-DnsClientServerAddress -ErrorAction Stop | Where-Object { $_.InterfaceIndex -in $indexes })) {
         $lines.Add("dns: $($d.InterfaceAlias) $($d.AddressFamily) $($d.ServerAddresses -join ',')") }; $lines.Add("[nrpt]"); try { $nrpt = Get-DnsClientNrptRule -ErrorAction Stop | Where-Object { ($inst8 -and $_.Comment -like "ra3-$inst8*")
         }; foreach ($n in ($nrpt | Sort-Object Name)) { $lines.Add("nrpt: $($n.Comment) $($n.Namespace) $($n.NameServers -join ',')") } } catch { throw }; $lines.Add("[processes]"); $pList.Sort(); foreach ($p in $pList) { $lines.Add($p) }
-    $lines.Add("[proxy]"); $proxyTraces = @($traces | Where-Object { $_.kind -eq 'proxy' -and $_.instance -eq $inst }); if ($proxyTraces.Count) {
+    $lines.Add("[proxy]"); & { # Always capture the same registry baseline, including before the first trace.
         $proxy = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
         foreach ($key in @('ProxyEnable', 'ProxyServer', 'AutoConfigURL')) { $lines.Add("proxy: $key=$($proxy.$key)") } }; $autostart = @($traces | Where-Object { $_.kind -eq 'autostart' -and $_.instance -eq $inst })
     $tasks = Get-ScheduledTask -ErrorAction Stop | Where-Object { $candidate = $_; ($inst8 -and ($_.TaskName -like "RemoteAgents3-$inst8*" -or $_.TaskName -like "ra3-$inst8*")) -or

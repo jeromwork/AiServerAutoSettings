@@ -3,7 +3,7 @@
 set -euo pipefail
 command -v python3 >/dev/null || { echo 'ERROR unsupported: python3' >&2; exit 1; }
 exec python3 - "$@" <<'PY'
-import datetime, difflib, json, os, pathlib, re, shutil, subprocess, sys, tempfile
+import datetime, difflib, json, os, pathlib, re, shutil, subprocess, sys, tempfile, signal
 def fail(kind, detail): raise RuntimeError('ERROR ' + kind + ': ' + detail)
 def run(*args):
     if not shutil.which(args[0]): fail('unsupported', args[0])
@@ -66,7 +66,7 @@ def snapshot(home):
             if 'end' in line: active = False
         elif active: add('hosts', line.strip())
     for iface in sorted(ifaces & {x['ifname'] for x in links}):
-        for key in ('dns', 'domain'): add('dns', run('resolvectl', key, iface).strip())
+        for key in ('dns', 'domain'): add('dns', re.sub(r'(?m)^Link \d+ (?=\()', 'Link ', run('resolvectl', key, iface).strip()))
     pids = {}
     proc = pathlib.Path('/proc')
     if not proc.is_dir(): fail('unsupported', '/proc')
@@ -131,15 +131,19 @@ def main():
     home = pathlib.Path(a).resolve(strict=True)
     result = snapshot(home)
     target = pathlib.Path(b).absolute()
-    name = None
+    name = None; blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
     try:
         with tempfile.NamedTemporaryFile(mode='w', dir=target.parent, delete=False) as f:
             name = f.name
+            signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
             f.write(result)
         os.replace(name, target)
     finally:
         if name and os.path.exists(name): os.unlink(name)
+        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
     return 0
+def interrupted(signum, frame): raise SystemExit(128 + signum)
+for sig in (signal.SIGINT, signal.SIGTERM): signal.signal(sig, interrupted)
 try:
     sys.exit(main())
 except PermissionError as e: print('ERROR permission: ' + str(e), file=sys.stderr)
