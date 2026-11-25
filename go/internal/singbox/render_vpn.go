@@ -1,12 +1,15 @@
 package singbox
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
@@ -17,7 +20,9 @@ import (
 	"time"
 
 	"remoteagents/internal/api"
+	"remoteagents/internal/bus"
 	"remoteagents/internal/cleanup"
+	"remoteagents/internal/forward"
 	"remoteagents/internal/vpnrun"
 )
 
@@ -71,7 +76,7 @@ func vpnBridges(cfg *api.Config, paths []api.VPNPath) []api.VPNPath {
 
 // RenderVPN строит отдельный конфиг vpn.py, не часть конфига канала/ЛВС.
 // ExcludeIPs — уже разрешённые IP сервера, мостов и DNS ПК (или CIDR).
-func RenderVPN(rc api.RenderContext, paths []api.VPNPath, probeURL string) ([]byte, error) {
+func renderVPNOnly(rc api.RenderContext, paths []api.VPNPath, probeURL string) ([]byte, error) {
 	if VPNMode(rc.Cfg) == "off" || !rc.Mode.AllowsTun() {
 		return nil, nil
 	}
@@ -188,24 +193,118 @@ func vpnGeoIP(raw json.RawMessage) bool {
 	return true
 }
 
-// ApplyVPN вызывается при настройках/смене сети. Бинарник в r.Sing уже подготовлен установщиком.
-// auto уступает чужому VPN; only сообщает, что его надо отключить. Без vpn ничего не создаём и не запускаем.
+// RenderVPN объединяет VPN и LAN в единственный процесс с правами.
+// Конфиг без VPN тоже допустим: TUN ЛВС идёт в sing-box №1 через tun-lan.
+func RenderVPN(rc api.RenderContext, paths []api.VPNPath, probeURL string) ([]byte, error) {
+	lan, err := RenderLAN(rc)
+	if err != nil {
+		return nil, err
+	}
+	data, err := renderVPNOnly(rc, paths, probeURL)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 && len(lan.Inbounds) == 0 {
+		return nil, nil
+	}
+	conf := map[string]any{"log": map[string]any{"level": "info"}, "inbounds": []map[string]any{}, "outbounds": []map[string]any{{"type": "direct", "tag": "direct"}}, "route": map[string]any{"rules": []map[string]any{}, "final": "direct", "auto_detect_interface": true}}
+	// Typed slices keep the merge small and the order explicit.
+	if len(data) > 0 {
+		var old struct {
+			Inbounds, Outbounds []map[string]any
+			Route               map[string]any
+		}
+		if err := json.Unmarshal(data, &old); err != nil {
+			return nil, err
+		}
+		var routeRules []map[string]any
+		raw, _ := json.Marshal(old.Route["rules"])
+		_ = json.Unmarshal(raw, &routeRules)
+		old.Route["rules"] = routeRules
+		conf["inbounds"], conf["outbounds"], conf["route"] = old.Inbounds, old.Outbounds, old.Route
+	}
+	conf["inbounds"] = append(lan.Inbounds, conf["inbounds"].([]map[string]any)...)
+	conf["outbounds"] = append(conf["outbounds"].([]map[string]any), lan.Outbounds...)
+	route := conf["route"].(map[string]any)
+	route["rules"] = append(lan.Rules, route["rules"].([]map[string]any)...)
+	if len(lan.Inbounds) > 0 {
+		if _, _, err := addLANDNS(conf, rc); err != nil {
+			return nil, err
+		}
+	}
+	conf["experimental"] = map[string]any{"clash_api": map[string]any{"external_controller": net.JoinHostPort("127.0.0.1", strconv.Itoa(rc.ClashPort)), "secret": rc.ClashSecret}}
+	return json.Marshal(conf)
+}
+
+// ApplyVPN: начальное применение и подписки на последующие события. Вызов не требует прав;
+// только vpnrun запускает привилегированный sing-box и команды DNS.
 func ApplyVPN(ctx context.Context, rc api.RenderContext, paths []api.VPNPath, foreign string, r *vpnrun.Runner) error {
+	return r.Configure(func() error {
+		desired := rc
+		r.OnChange(func(ctx context.Context, ev bus.Event) error {
+			return r.Configure(func() error {
+				if ev.Topic == "settings.loaded" {
+					if cfg, ok := ev.Data["config"].(*api.Config); ok {
+						desired.Cfg = cfg
+						candidates, _ := BuildPaths(cfg, desired.ProxyPorts, desired.VPNInterface)
+						paths = nil
+						for _, p := range candidates {
+							via := ""
+							if strings.HasSuffix(p.Name, "-vpn") {
+								via = "vpn"
+							}
+							paths = append(paths, api.VPNPath{Name: p.Name, Kind: p.Kind, Via: via, Final: p.Final, Outs: p.Outbounds})
+						}
+					}
+				}
+				if !r.AllowEvent(ev.Topic) {
+					return nil
+				}
+				active := desired
+				if ev.Topic == "channel.down" {
+					active.LANSocks = ""
+				}
+				return applyVPN(ctx, active, paths, foreign, r, false)
+			})
+		})
+		return applyVPN(ctx, rc, paths, foreign, r, true)
+	})
+}
+
+func applyVPN(ctx context.Context, rc api.RenderContext, paths []api.VPNPath, foreign string, r *vpnrun.Runner, manual bool) error {
 	mode := VPNMode(rc.Cfg)
-	if mode == "off" || !rc.Mode.AllowsTun() || foreign != "" {
-		if err := r.Stop(); err != nil {
+	geoChanged := false
+	if !rc.Mode.AllowsTun() || rc.Cfg == nil {
+		return r.Stop()
+	}
+	conflict := mode == "only" && foreign != ""
+	if foreign != "" {
+		copyCfg := *rc.Cfg
+		copyCfg.VPN.Mode = "off"
+		rc.Cfg = &copyCfg
+	}
+	if lanWanted(rc) && rc.LANSocks != "" {
+		var err error
+		rc.LANRoutes, err = forward.LANRoutes(ctx, rc.Cfg)
+		if err != nil {
 			return err
 		}
-		if mode == "only" && foreign != "" && rc.Mode.AllowsTun() {
-			return fmt.Errorf("работает другой VPN (%s) — отключите его, чтобы работал наш", foreign)
+	}
+	if VPNMode(rc.Cfg) != "off" {
+		if rc.GeoIPPath == "" {
+			rc.GeoIPPath = filepath.Join(filepath.Dir(filepath.Dir(r.Conf)), "state", "vpn-geoip-ru.srs")
 		}
-		return nil
+		before, _ := os.Stat(rc.GeoIPPath)
+		if err := fetchGeoIP(ctx, rc); err != nil && r.Log != nil {
+			r.Log.Warn("vpn.geoip.failed", "err", err.Error())
+		}
+		if after, e := os.Stat(rc.GeoIPPath); e == nil {
+			geoChanged = before == nil || !after.ModTime().Equal(before.ModTime())
+		}
 	}
-	if r.Running() {
-		return nil // v2 _step: уже работающий VPN не перезапускается на каждое событие.
-	}
-	if len(vpnBridges(rc.Cfg, paths)) == 0 {
-		return fmt.Errorf("VPN: нет мостов без SSH и чужого VPN")
+	if rc.ClashPort == 0 && r.API != "" {
+		_, p, _ := net.SplitHostPort(r.API)
+		rc.ClashPort, _ = strconv.Atoi(p)
 	}
 	if rc.ClashPort == 0 {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -214,6 +313,9 @@ func ApplyVPN(ctx context.Context, rc api.RenderContext, paths []api.VPNPath, fo
 		}
 		rc.ClashPort = l.Addr().(*net.TCPAddr).Port
 		l.Close()
+	}
+	if rc.ClashSecret == "" {
+		rc.ClashSecret = r.Secret
 	}
 	if rc.ClashSecret == "" {
 		var secret [24]byte
@@ -229,27 +331,139 @@ func ApplyVPN(ctx context.Context, rc api.RenderContext, paths []api.VPNPath, fo
 	if err != nil {
 		return err
 	}
+	if len(data) == 0 {
+		return r.Stop()
+	}
+	previous, _ := os.ReadFile(r.Conf)
+	if r.Running() && bytes.Equal(previous, data) && !geoChanged {
+		if conflict {
+			return fmt.Errorf("работает другой VPN (%s) — отключите его, чтобы работал наш", foreign)
+		}
+		return nil
+	}
 	if err := r.Stop(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(r.Conf), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(r.Conf), 0700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(r.Conf, data, 0o600); err != nil {
+	if err := os.WriteFile(r.Conf, data, 0600); err != nil {
 		return err
 	}
-	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second) // v2: предел одного sing-box check — 15 с.
+	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if err := exec.CommandContext(checkCtx, r.Sing, "check", "-c", r.Conf).Run(); err != nil {
-		return fmt.Errorf("VPN: конфиг не прошёл sing-box check: %w", err)
+		return fmt.Errorf("VPN/LAN: конфиг не прошёл sing-box check: %w", err)
 	}
 	r.API, r.Secret = net.JoinHostPort("127.0.0.1", strconv.Itoa(rc.ClashPort)), rc.ClashSecret
-	// vpnrun ищет ошибки конкретного узла выхода, а не группы urltest.
-	r.Exit = vpnBridges(rc.Cfg, paths)[0].Final
+	var exitTags []string
+	lanOnly := VPNMode(rc.Cfg) == "off"
+	if !lanOnly {
+		for _, p := range vpnBridges(rc.Cfg, paths) {
+			for _, o := range p.Outs {
+				if tag, ok := o["tag"].(string); ok {
+					exitTags = append(exitTags, tag)
+				}
+			}
+		}
+	}
+	r.SetExits(exitTags, lanOnly)
+	if lanWanted(rc) && rc.LANSocks != "" {
+		for _, p := range lanDNS(rc.Cfg) {
+			if len(p.Servers) == 0 {
+				r.Bus.Publish("lan.dns.failed", map[string]any{"error": "share.dnsServers missing", "domains": p.Domains})
+			}
+		}
+	}
+	// Из готового конфига берём только реально включённый DNS, без догадок по флагам.
+	var conf map[string]any
+	_ = json.Unmarshal(data, &conf)
+	var domains []string
+	address := ""
+	if conf["dns"] != nil {
+		plans := rc.LANDNS
+		if plans == nil {
+			plans = lanDNS(rc.Cfg)
+		}
+		for _, p := range plans {
+			if len(p.Servers) > 0 {
+				domains = append(domains, p.Domains...)
+			}
+		}
+		addr := rc.Cfg.Tun.Address
+		if addr == "" {
+			addr = "172.19.0.1/30"
+		}
+		ip, _, _ := net.ParseCIDR(addr)
+		address = ip.String()
+	}
+	r.SetLAN(address, domains)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return r.Start()
+	if manual {
+		err = r.Start()
+	} else {
+		err = r.Resume()
+	}
+	if err == nil && conflict {
+		return fmt.Errorf("работает другой VPN (%s) — отключите его, чтобы работал наш", foreign)
+	}
+	return err
+}
+
+// Проверка возраста только при старте и событиях сети; скачивание — одно действие до 30 с.
+func fetchGeoIP(ctx context.Context, rc api.RenderContext) error {
+	raw := rc.Cfg.VPN.Direct.GeoIP
+	if !vpnGeoIP(raw) {
+		return nil
+	}
+	cfg := struct {
+		URL  string `json:"url"`
+		Days any    `json:"refreshDays"`
+	}{URL: "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs", Days: 7}
+	_ = json.Unmarshal(raw, &cfg)
+	if cfg.URL == "" {
+		cfg.URL = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs"
+	}
+	days := 7
+	if n, err := strconv.ParseFloat(fmt.Sprint(cfg.Days), 64); err == nil && n != 0 {
+		days = max(1, int(n))
+	}
+	if st, err := os.Stat(rc.GeoIPPath); err == nil && time.Since(st.ModTime()) <= time.Duration(days)*24*time.Hour {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", cfg.URL, nil)
+	if err != nil {
+		return fmt.Errorf("invalid geoip URL")
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("download failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("geoip HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return fmt.Errorf("read failed")
+	}
+	if !bytes.HasPrefix(data, []byte("SRS")) {
+		return fmt.Errorf("not a rule-set")
+	}
+	if err := os.MkdirAll(filepath.Dir(rc.GeoIPPath), 0700); err != nil {
+		return err
+	}
+	tmp := rc.GeoIPPath + ".tmp"
+	defer os.Remove(tmp)
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, rc.GeoIPPath)
 }
 
 // vpnIDNA — lower/strip и punycode меток (RFC 3492), как _idna в vpn.py.

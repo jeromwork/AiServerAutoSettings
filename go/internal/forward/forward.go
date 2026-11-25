@@ -1,5 +1,5 @@
 // Package forward — проброс через канал (как v2 forward.py и lan.py): точечные порты на 127.0.0.1 ПК, expose/unexpose по имени,
-// локальный прокси ЛВС (SOCKS5/HTTP/PAC), внутренний SOCKS для sing-box LAN, проверка сетей ЛВС.
+// внутренний SOCKS для sing-box LAN, проверка сетей ЛВС.
 // Слушатели только 127.0.0.1. Канала нет — входящее закрывается сразу. Системную сеть/прокси/реестр не трогаем.
 package forward
 
@@ -19,12 +19,9 @@ import (
 	"remoteagents/internal/api"
 )
 
-const (
-	connMax   = 256
-	proxyPort = 17891
-)
+const connMax = 256
 
-var exposeReserved = map[int]bool{47831: true, proxyPort: true}
+var exposeReserved = map[int]bool{47831: true}
 
 type handler func(c net.Conn, s *sess) error
 
@@ -109,11 +106,6 @@ func (f *fwd) Start(ctx context.Context) error {
 				h: func(c net.Conn, s *sess) error { return f.forward(c, s, x.ToHost, x.ToPort) }}
 			f.static = append(f.static, l)
 		}
-		pp := proxyPort
-		if f.cfg.LanProxy != nil && f.cfg.LanProxy.Port != 0 {
-			pp = f.cfg.LanProxy.Port
-		}
-		f.static = append(f.static, &listener{name: "lanProxy", port: pp, h: func(c net.Conn, s *sess) error { return f.proxy(c, s, pp) }})
 		f.retryStaticLocked()
 		if l := f.listenLocked(&listener{name: "internalSocks", h: f.internalSocks}); l.ok {
 			f.internal = fmt.Sprintf("127.0.0.1:%d", l.port)

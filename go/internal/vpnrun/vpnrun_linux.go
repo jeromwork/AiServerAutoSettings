@@ -5,6 +5,8 @@ package vpnrun
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/user"
 
 	"remoteagents/internal/api"
 )
@@ -17,10 +19,38 @@ func (r *Runner) Install() error {
 	if _, err := run("sudo", "setcap", "cap_net_admin,cap_net_bind_service+ep", r.Sing); err != nil {
 		return err
 	}
-	return nil
+	f, err := os.CreateTemp("", "ra-vpn-sudoers-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	u, err := user.Current()
+	if err != nil {
+		f.Close()
+		return err
+	}
+	data := u.Username + " ALL=(root) NOPASSWD: /usr/bin/resolvectl default-route RA2-LAN no, /usr/bin/resolvectl dns RA2-LAN *, /usr/bin/resolvectl domain RA2-LAN *, /usr/bin/resolvectl revert RA2-LAN\n"
+	if _, err = f.WriteString(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if _, err = run("sudo", "visudo", "-cf", f.Name()); err != nil {
+		return err
+	}
+	_, err = run("sudo", "install", "-m", "440", "-o", "root", "-g", "root", f.Name(), "/etc/sudoers.d/ru-remoteagents-vpn-dns")
+	return err
 }
 
 func (r *Runner) Uninstall() error {
+	if err := r.ClearDNS(context.Background()); err != nil {
+		return err
+	}
+	if _, err := run("sudo", "rm", "-f", "/etc/sudoers.d/ru-remoteagents-vpn-dns"); err != nil {
+		return err
+	}
 	if r.Sing == "" {
 		return nil
 	}

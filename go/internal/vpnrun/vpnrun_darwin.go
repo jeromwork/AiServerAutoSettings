@@ -16,7 +16,7 @@ const (
 	target  = "system/" + label
 )
 
-// Install: LaunchDaemon (root, не стартует сам) + правило sudoers только на два точных launchctl-вызова
+// Install: LaunchDaemon (root, не стартует сам), точные launchctl-вызовы и помощник DNS в sudoers
 // (иначе обычный пользователь не сможет kickstart/kill службы в system-домене). Один запрос пароля администратора.
 func (r *Runner) Install() error {
 	if err := badPath(r.Sing, r.Conf); err != nil {
@@ -33,7 +33,7 @@ func (r *Runner) Install() error {
 <key>RunAtLoad</key><false/>
 </dict></plist>
 `
-	sd := u.Username + " ALL=(root) NOPASSWD: /bin/launchctl kickstart -k " + target + ", /bin/launchctl kill TERM " + target + "\n"
+	sd := u.Username + " ALL=(root) NOPASSWD: /bin/launchctl kickstart -k " + target + ", /bin/launchctl kill TERM " + target + ", " + dnsHelper + " *\n"
 	tp, ts := os.TempDir()+"/ra-vpn.plist", os.TempDir()+"/ra-vpn.sudoers"
 	if err := os.WriteFile(tp, []byte(pl), 0o600); err != nil {
 		return err
@@ -43,8 +43,14 @@ func (r *Runner) Install() error {
 	}
 	defer os.Remove(tp)
 	defer os.Remove(ts)
-	sh := fmt.Sprintf("/usr/sbin/visudo -cf %[3]s && install -m 644 -o root -g wheel %[1]s %[2]s && install -m 440 -o root -g wheel %[3]s %[4]s && /bin/launchctl bootout %[5]s 2>/dev/null; /bin/launchctl bootstrap system %[2]s",
-		tp, plist, ts, sudoers, target)
+	th := os.TempDir() + "/ra-vpn-dns.sh"
+	if err := os.WriteFile(th, []byte(dnsScript), 0600); err != nil {
+		return err
+	}
+	defer os.Remove(th)
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+	sh := fmt.Sprintf("mkdir -p /Library/PrivilegedHelperTools && install -m 755 -o root -g wheel %[6]s %[7]s && /usr/sbin/visudo -cf %[3]s && install -m 644 -o root -g wheel %[1]s %[2]s && install -m 440 -o root -g wheel %[3]s %[4]s && { /bin/launchctl bootout %[5]s 2>/dev/null || true; } && /bin/launchctl bootstrap system %[2]s",
+		quote(tp), quote(plist), quote(ts), quote(sudoers), quote(target), quote(th), quote(dnsHelper))
 	_, err = run("osascript", "-e", `do shell script "`+strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(sh)+`" with administrator privileges`)
 	if err != nil {
 		return err
@@ -53,7 +59,10 @@ func (r *Runner) Install() error {
 }
 
 func (r *Runner) Uninstall() error {
-	sh := "/bin/launchctl bootout " + target + "; rm -f " + plist + " " + sudoers
+	if err := r.ClearDNS(context.Background()); err != nil {
+		return err
+	}
+	sh := "/bin/launchctl bootout " + target + "; rm -f " + plist + " " + sudoers + " " + dnsHelper
 	_, err := run("osascript", "-e", `do shell script "`+sh+`" with administrator privileges`)
 	return err
 }

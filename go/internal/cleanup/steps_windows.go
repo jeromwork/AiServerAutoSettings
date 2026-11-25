@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"remoteagents/internal/vpnrun"
 	"sort"
 	"strconv"
 	"strings"
@@ -180,7 +181,17 @@ func (c *Cleaner) rules() error {
 		}
 		return nil
 	}
-	_, err := c.ps("$failed=0; @(" + nrpt + ") | ForEach-Object { try { Remove-DnsClientNrptRule -Name $_.Name -Force } catch { $failed++ } }; if ($failed) { throw 'dns' }")
+	own, err := c.query(nrpt + " | Where-Object { $_.Comment -eq 'RemoteAgents-Lab RA2-LAN' } | Select-Object Name")
+	if err != nil {
+		return err
+	}
+	if len(own) > 0 {
+		if err := (&vpnrun.Runner{Conf: filepath.Join(c.home, "private", "vpn.json")}).ClearDNS(c.ctx); err != nil {
+			return err
+		}
+	}
+
+	_, err = c.ps("$failed=0; @(" + nrpt + ") | ForEach-Object { try { Remove-DnsClientNrptRule -Name $_.Name -Force } catch { $failed++ } }; if ($failed) { throw 'dns' }")
 	return err
 }
 
