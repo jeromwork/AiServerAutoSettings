@@ -1,0 +1,71 @@
+package disk
+
+// Mandatory exclusions from v2 diskjoin.py.
+const ignoreRules = `// RemoteDisk: не передаём секреты и то, что генерируется
+(?i)/.stignore-remoteagents
+(?i).env*
+(?i).npmrc
+(?i).pypirc
+(?i).netrc
+(?i)auth.json
+(?i)credentials*
+(?i)secrets*
+(?i)id_rsa*
+(?i)id_ed25519*
+(?i)id_ecdsa*
+(?i)id_dsa*
+(?i)*.key
+(?i)*.keystore
+(?i)*.jks
+(?i)*.p8
+(?i)*.p12
+(?i)*.pfx
+(?i)local.properties
+(?i).git
+(?i).ssh
+(?i).codex
+(?i).claude
+(?i).tools
+(?i)node_modules
+(?i)vendor
+(?i).gradle
+(?i).next
+(?i).nuxt
+(?i).output
+(?i).cache
+(?i).turbo
+(?i).dart_tool
+(?i).cxx
+(?i)build
+(?i)dist
+(?i)target
+(?i)obj
+(?i)coverage
+(?i).idea
+(?i).vscode
+(?i)android-sdk
+(?i)*.log
+(?i)*.sqlite*
+(?i)*.db*
+(?i)*.dump
+(?i)*.bak
+// Laravel: загруженные файлы и кэш в storage проекта не передаём
+(?i)/storage/app
+(?i)/storage/framework
+// Оформление Проводника принадлежит этому компьютеру; вложенные desktop.ini не трогаем
+(?i)/desktop.ini
+// Дополнительные обязательные имена: ключи, окружения Python и локальные дампы
+(?i)*.pem
+(?i)*.crt
+(?i)*.crt?
+(?i)token*.json
+(?i).venv
+(?i)venv
+(?i)__pycache__
+(?i)*.sql
+(?i)*.sql.gz
+(?i)*.sql.bz2
+(?i)*.sql.xz
+(?i)*.sql.zst
+(?i)*.sql.zip
+`
