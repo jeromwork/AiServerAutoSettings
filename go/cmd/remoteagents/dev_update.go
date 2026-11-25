@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -171,7 +170,13 @@ func main() {
 		case "/assets/checksums.txt.sig":
 			w.Header().Set("Content-Type", "text/plain")
 			if corruptedSig.Load() {
-				badSig := bytes.Replace(armoredSig, []byte("SSHSIG"), []byte("BROKEN"), 1)
+				badSig := append([]byte(nil), armoredSig...)
+				i := len(badSig) / 2
+				if badSig[i] == 'A' {
+					badSig[i] = 'B'
+				} else {
+					badSig[i] = 'A'
+				}
 				_, _ = w.Write(badSig)
 			} else {
 				_, _ = w.Write(armoredSig)

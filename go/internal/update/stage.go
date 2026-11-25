@@ -15,6 +15,11 @@ import (
 )
 
 func (u *updater) Stage(ctx context.Context, candidate, version string) error {
+	u.stageMu.Lock()
+	defer u.stageMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return fail("cancelled", err.Error())
+	}
 	// Only consume candidates created in this updater's temporary directory.
 	candidate, err := filepath.Abs(candidate)
 	if err != nil {
@@ -163,9 +168,6 @@ func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 }
 
 func moveOrCopyFile(src, dst string) error {
-	if err := os.Rename(src, dst); err == nil {
-		return nil
-	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -183,9 +185,10 @@ func moveOrCopyFile(src, dst string) error {
 		return err
 	}
 	_ = in.Close()
-	_ = out.Close()
-	_ = os.Remove(src)
-	return nil
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Remove(src)
 }
 
 // boundedOutput consumes excess output without allocating unbounded memory.

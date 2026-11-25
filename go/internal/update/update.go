@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -36,6 +37,7 @@ type Options struct {
 }
 
 type updater struct {
+	stageMu  sync.Mutex
 	p        api.Paths
 	log      api.Logger
 	o        Options
