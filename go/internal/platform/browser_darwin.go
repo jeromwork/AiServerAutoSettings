@@ -14,23 +14,19 @@ import (
 	"time"
 )
 
-// OpenBrowser runs the desktop opener with a bounded lifetime.
+// OpenBrowser starts the desktop opener; only the launcher has a bounded lifetime.
 func (p *stubPlatform) OpenBrowser(url, runAs string) error {
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return fmt.Errorf("platform: browser-url: expected HTTP(S) URL")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 	cmd := exec.CommandContext(ctx, "open", url)
-	cmd.WaitDelay = time.Second
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	// Reap descendants even when the desktop opener exits before its children.
 	defer func() {
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if cmd.Process == nil {
+			cancel()
 		}
 	}()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if runAs != "" {
 		u, err := user.Lookup(runAs)
 		if err != nil {
@@ -66,8 +62,14 @@ func (p *stubPlatform) OpenBrowser(url, runAs string) error {
 		cmd.Dir = u.HomeDir
 
 	}
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		cancel()
 		return fmt.Errorf("platform: browser-open: %w", err)
 	}
+	// Reap only the launcher; desktop browser descendants survive its timeout.
+	go func() {
+		defer cancel()
+		_ = cmd.Wait()
+	}()
 	return nil
 }

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/user"
-	"path/filepath"
 	"strings"
 
 	"remoteagents/internal/api"
@@ -22,15 +21,8 @@ func (p *stubPlatform) RunAsUser(cfg api.ControlCfg) (string, error) {
 		return runAs, nil
 	}
 
-	stateRunasPath := filepath.Join(p.DefaultHome(), "state", "runas")
-	if data, err := os.ReadFile(stateRunasPath); err == nil {
-		if uName := strings.TrimSpace(string(data)); uName != "" {
-			if _, err := user.Lookup(uName); err == nil {
-				return uName, nil
-			}
-		}
-	}
-
+	// The caller must load state/runas from its selected home into cfg.RunAs.
+	// This interface has no home argument: never read another instance's state.
 	if sudoUser := strings.TrimSpace(os.Getenv("SUDO_USER")); sudoUser != "" && sudoUser != "root" {
 		if _, err := user.Lookup(sudoUser); err == nil {
 			return sudoUser, nil
@@ -42,7 +34,7 @@ func (p *stubPlatform) RunAsUser(cfg api.ControlCfg) (string, error) {
 	}
 
 	if os.Geteuid() == 0 {
-		return "", errors.New("platform: runas-not-found: running as root without user in controlRunAs, state/runas or SUDO_USER")
+		return "", errors.New("platform: runas-not-found: running as root without user in controlRunAs or SUDO_USER")
 	}
 
 	return "", errors.New("platform: runas-not-found: unable to determine user")
