@@ -10,16 +10,18 @@ import (
 	"os/user"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"remoteagents/internal/api"
 )
 
-type platformState struct{ releases sync.Map }
+type platformState struct{ releases *sync.Map }
 
 func newPlatformState() (platformState, error) {
-	return platformState{}, nil
+	return platformState{releases: &sync.Map{}}, nil
 }
 
 func (m *manager) terminatePlatform() {}
@@ -108,4 +110,40 @@ func (m *manager) releaseCmd(cmd *exec.Cmd) {
 	if v, ok := m.platform.releases.LoadAndDelete(cmd); ok {
 		close(v.(chan struct{}))
 	}
+}
+
+// processStarted uses the kernel birth time rather than the time Start returned.
+// Linux exports process starttime in USER_HZ (100 ticks per second).
+func processStarted(_ context.Context, cmd *exec.Cmd) (time.Time, error) {
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", cmd.Process.Pid))
+	if err != nil {
+		return time.Time{}, err
+	}
+	end := strings.LastIndexByte(string(stat), ')')
+	if end < 0 {
+		return time.Time{}, fmt.Errorf("invalid process stat")
+	}
+	fields := strings.Fields(string(stat[end+1:]))
+	if len(fields) < 20 {
+		return time.Time{}, fmt.Errorf("short process stat")
+	}
+	ticks, err := strconv.ParseInt(fields[19], 10, 64)
+	if err != nil {
+		return time.Time{}, err
+	}
+	system, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return time.Time{}, err
+	}
+	for _, line := range strings.Split(string(system), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && f[0] == "btime" {
+			boot, err := strconv.ParseInt(f[1], 10, 64)
+			if err != nil {
+				return time.Time{}, err
+			}
+			return time.Unix(boot+ticks/100, (ticks%100)*10000000).UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("missing boot time")
 }

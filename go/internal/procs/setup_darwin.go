@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"os/user"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	"remoteagents/internal/api"
 )
@@ -87,3 +89,14 @@ func (p *proc) hardKill() {
 }
 
 func (m *manager) releaseCmd(_ *exec.Cmd) {}
+
+func processStarted(ctx context.Context, cmd *exec.Cmd) (time.Time, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/bin/ps", "-p", strconv.Itoa(cmd.Process.Pid), "-o", "lstart=").Output()
+	if err != nil {
+		return time.Time{}, err
+	}
+	t, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", strings.TrimSpace(string(out)), time.Local)
+	return t.UTC(), err
+}

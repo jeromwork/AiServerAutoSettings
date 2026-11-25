@@ -32,7 +32,6 @@ type proc struct {
 	done     chan struct{}
 	mu       sync.Mutex
 	exitCode int
-	release  func()
 	stopMu   sync.Mutex
 }
 
@@ -164,7 +163,20 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		return nil, fmt.Errorf("procs: post-start-failed: %w", err)
 	}
 
-	started := time.Now().UTC()
+	started, err := processStarted(ctx, cmd)
+	if err != nil {
+		p := &proc{cmd: cmd, pid: cmd.Process.Pid}
+		p.hardKill()
+		_ = cmd.Wait()
+		m.releaseCmd(cmd)
+		if stdoutCloser != nil {
+			_ = stdoutCloser.Close()
+		}
+		if stderrCloser != nil {
+			_ = stderrCloser.Close()
+		}
+		return nil, fmt.Errorf("procs: identity-failed: %w", err)
+	}
 	pid := cmd.Process.Pid
 
 	if m.tr != nil {
