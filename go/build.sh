@@ -45,7 +45,7 @@ fi
 ldflags="-X main.version=$version -X main.releaseRepo=$repo -X main.pubKeys=$keys"
 
 exec 9>/tmp/heavy-tests.lock
-timeout 420 flock -x 9
+timeout --foreground 420 flock -x 9
 mkdir -p .tmp dist
 work=$(mktemp -d "$PWD/.tmp/build.XXXXXX")
 resource=''
@@ -64,13 +64,13 @@ for target in "${targets[@]}"; do
     name+=.exe
     candidate="cmd/remoteagents/rsrc_windows_$arch.syso"
     [[ ! -e $candidate ]] || fail "resource already exists: $candidate"
-    (cd cmd/remoteagents && timeout 420 go-winres make --in winres/winres.json \
+    (cd cmd/remoteagents && timeout --foreground 420 go-winres make --in winres/winres.json \
       --arch "$arch" --out "$work/rsrc")
     resource="cmd/remoteagents/rsrc_windows_$arch.syso"
     cp -- "$work/rsrc_windows_$arch.syso" "$resource"
   fi
   printf 'Building %s (%s)\n' "$target" "$version"
-  GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 timeout 420 go build \
+  GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 timeout --foreground 420 go build \
     -mod=readonly -trimpath -ldflags "$ldflags" -o "$work/$name" ./cmd/remoteagents
   if [[ -n $resource ]]; then
     rm -f -- "$resource"
