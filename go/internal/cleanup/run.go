@@ -479,13 +479,13 @@ func (c *Cleaner) validate(t api.Trace) error {
 	owned := func(s string) bool {
 		return s == tag || strings.HasPrefix(s, tag+"-") || strings.HasPrefix(s, "ra3_"+c.instance[:8])
 	}
-	// macOS assigns utun numbers itself. Only an applied trace belonging to
-	// this instance authorizes the otherwise untagged interface name.
+	// macOS assigns utun numbers itself. The adapter's applied trace provides
+	// its identity; route and DNS traces only carry the interface name.
 	ownedInterface := func(name string) bool {
 		if owned(name) {
 			return true
 		}
-		if runtime.GOOS != "darwin" || t.Instance != c.instance || t.Phase != "applied" || !strings.HasPrefix(name, "utun") {
+		if runtime.GOOS != "darwin" || t.Instance != c.instance || !strings.HasPrefix(name, "utun") {
 			return false
 		}
 		number := strings.TrimPrefix(name, "utun")
@@ -507,7 +507,20 @@ func (c *Cleaner) validate(t api.Trace) error {
 			}
 			return true
 		}
-		return t.Data["ifindex"] == strconv.Itoa(iface.Index)
+		if t.Kind == "adapter" {
+			return t.Phase == "applied" && t.Data["ifindex"] == strconv.Itoa(iface.Index)
+		}
+		adapters, err := c.activeTraces()
+		if err != nil {
+			return false
+		}
+		for _, adapter := range adapters {
+			if adapter.Kind == "adapter" && adapter.Instance == c.instance && adapter.Phase == "applied" &&
+				adapter.Data["name"] == name && adapter.Data["ifindex"] == strconv.Itoa(iface.Index) {
+				return true
+			}
+		}
+		return false
 	}
 	switch t.Kind {
 	case "adapter":
@@ -523,7 +536,7 @@ func (c *Cleaner) validate(t api.Trace) error {
 			return fmt.Errorf("cleanup: ownership: dns")
 		}
 	case "rule":
-		if t.Data["table"] != "ra3_"+c.instance[:8] || t.Data["prio"] == "" {
+		if t.Instance != c.instance || t.Data["table"] == "" || t.Data["prio"] == "" {
 			return fmt.Errorf("cleanup: ownership: rule")
 		}
 	case "firewall":
