@@ -92,7 +92,7 @@ func (d *Disk) makeIdentity(ctx context.Context) (string, error) {
 		if e := os.MkdirAll(state, 0700); e != nil {
 			return "", e
 		}
-		args := []string{"syncthing", "generate", "--home", state, "--no-port-probing"}
+		args := []string{"generate", "--home", state, "--no-port-probing"}
 		out, errout, code, e := d.command(ctx, "disk.identity", d.o.Exe, args, 60*time.Second)
 		if e == nil && code != 0 && bytes.Contains(bytes.ToLower(append(out, errout...)), []byte("unknown flag")) {
 			_, _, code, e = d.command(ctx, "disk.identity", d.o.Exe, args[:len(args)-1], 60*time.Second)

@@ -46,7 +46,7 @@ func (a *App) applyVPN(ctx context.Context) {
 			}
 		}
 	}
-	rc := api.RenderContext{Cfg: a.vpnCfg, Mode: a.f.Mode, GeoIPPath: filepath.Join(a.p.State, "geoip-ru.srs"), ExcludeIPs: excludes}
+	rc := api.RenderContext{Cfg: a.vpnCfg, Mode: a.f.Mode, GeoIPPath: filepath.Join(a.p.State, "vpn-geoip-ru.srs"), ExcludeIPs: excludes}
 	if a.fwd != nil && a.lanConfigured() {
 		rc.LANSocks = a.fwd.InternalSocks()
 	}

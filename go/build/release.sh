@@ -27,8 +27,8 @@ export DOTNET_NOLOGO=1
 export DOTNET_PROCESSOR_COUNT=${DOTNET_PROCESSOR_COUNT:-2}
 if [[ $target_os == windows ]]; then
   "${DOTNET:-dotnet}" publish internal/disk/explorer/disk-explorer.csproj --disable-build-servers \
-    -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true \
-    -p:IncludeNativeLibrariesForSelfExtract=true -p:NuGetAudit=false \
+    -c Release --self-contained false \
+    -p:NuGetAudit=false \
     -p:BaseIntermediateOutputPath="$out/obj/" \
     -p:BaseOutputPath="$out/dotnet-bin/" -o "$out/explorer"
 fi

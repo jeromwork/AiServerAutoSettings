@@ -3,7 +3,7 @@ using System.IO;
 using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
-using System.Text.Json;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using System.Reflection;
 using System.Threading;
@@ -99,7 +99,7 @@ namespace RemoteAgents.Lab
                 int at = Array.IndexOf(args, "--disk-shell");
                 using (var pipe = new NamedPipeClientStream(".", PipeName(), PipeDirection.Out)) {
                     pipe.Connect(750);
-                    var line = JsonSerializer.Serialize(new[] { args[at + 1], args[at + 2] });
+                    var line = new JavaScriptSerializer().Serialize(new[] { args[at + 1], args[at + 2] });
                     using (var writer = new StreamWriter(pipe, new System.Text.UTF8Encoding(false), 4096, true)) { writer.WriteLine(line); writer.Flush(); }
                 }
                 return 0;
@@ -117,7 +117,7 @@ namespace RemoteAgents.Lab
             var thread = new Thread(() => {
                 while (!stopped) {
                     try {
-                        using (var pipe = NamedPipeServerStreamAcl.Create(PipeName(), PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None, 4096, 4096, security)) {
+                        using (var pipe = new NamedPipeServerStream(PipeName(), PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None, 4096, 4096, security)) {
                             pipe.WaitForConnection();
                             string line; using (var reader = new StreamReader(pipe, new System.Text.UTF8Encoding(false), false, 4096, true)) {
                                 var buffer = new char[4097]; int n = 0, got;
@@ -125,7 +125,7 @@ namespace RemoteAgents.Lab
                                 if (n == 0 || n > 4096) continue;
                                 line = new string(buffer, 0, n).Trim();
                             }
-                            var parts = JsonSerializer.Deserialize<string[]>(line);
+                            var parts = new JavaScriptSerializer().Deserialize<string[]>(line);
                             if (parts == null || parts.Length != 2) continue;
                             var request = DiskShellRequest.Parse(new[] { "--disk-shell", parts[0], parts[1] });
                             var context = ui; if (context != null) context.Post(x => Submit(request), null);

@@ -176,7 +176,7 @@ func Run(ctx context.Context, f Flags) int {
 			a.start(ctx, a.fwd)
 		}
 		if a.cfg.Enabled("disk") {
-			a.disk = disk.New(disk.Options{Config: a.cfg, Installed: filepath.Dir(a.launcher()), Exe: bundle.Find(binaryName("syncthingtray")), ExplorerExe: bundle.Find("disk-explorer.exe"), Procs: a.pr, Channel: transport, Forward: a.fwd, Bus: a.bus, Log: log})
+			a.disk = disk.New(disk.Options{Config: a.cfg, Installed: filepath.Dir(a.launcher()), Exe: bundle.Find(binaryName("syncthing")), ExplorerExe: bundle.Find("disk-explorer.exe"), Procs: a.pr, Channel: transport, Forward: a.fwd, Bus: a.bus, Log: log})
 			a.start(ctx, a.disk)
 		}
 		a.start(ctx, a.sb)
