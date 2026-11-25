@@ -7,7 +7,7 @@ import (
 
 type ExecReq struct {
 	Cmd   string `json:"cmd"`
-	Shell string `json:"shell"` // powershell | cmd | sh; "" → powershell на Windows, sh иначе
+	Shell string `json:"shell"` // powershell | cmd | sh | /bin/sh; "" → powershell на Windows, /bin/sh иначе
 	Cwd   string `json:"cwd,omitempty"`
 	Wait  bool   `json:"wait,omitempty"`
 }

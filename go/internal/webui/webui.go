@@ -1,6 +1,5 @@
 // Package webui mirrors v2 webui.py: local control page on 127.0.0.1:<port>/?t=<token>.
-// Token and Host are checked on every request. Status lines come from the event bus; the page itself
-// refreshes in the browser (JS), not in our code.
+// Token and Host are checked on every request. Status changes arrive from the bus over SSE.
 package webui
 
 import (
@@ -58,29 +57,31 @@ else{document.getElementById("other").style.display="none";document.getElementBy
 document.getElementById("ctl").textContent=s.control?"разрешено":"запрещено";
 document.getElementById("ctlb").textContent=s.control?"Запретить":"Разрешить";
 document.getElementById("auto").checked=s.autostart}
-function poll(){fetch("/state?t="+T).then(function(r){return r.json()}).then(show).catch(function(){})}
 document.getElementById("other").onclick=function(){document.getElementById("cform").style.display=""};
 document.getElementById("revert").onclick=function(){post("/revert").then(function(r){msg(r)})};
-document.getElementById("ctlb").onclick=function(){post("/control",{on:S.control?"0":"1"}).then(poll)};
-document.getElementById("auto").onchange=function(){var x=this.checked;post("/autostart",{on:x?"1":"0"}).then(function(r){document.getElementById("amsg").textContent=r.problem||"";poll()})};
+document.getElementById("ctlb").onclick=function(){if(S)post("/control",{on:S.control?"0":"1"})};
+document.getElementById("auto").onchange=function(){var x=this.checked;post("/autostart",{on:x?"1":"0"}).then(function(r){document.getElementById("amsg").textContent=r.problem||""})};
 document.getElementById("chk").onclick=function(){document.getElementById("cres").textContent="Проверяю...";post("/check").then(function(r){document.getElementById("cres").textContent=r.items.length?r.items.join("\n"):"Чисто"})};
 function msg(r){var m=document.getElementById("cmsg");m.className=r.ok?"ok":"err";m.textContent=r.ok?"Конфиг принят, перезапускаю…":(r.problems||[]).join("\n");m.style.whiteSpace="pre-wrap"}
 document.getElementById("cform").onsubmit=function(e){e.preventDefault();var f=new FormData(this),d={};f.forEach(function(v,k){d[k]=v});post("/config",d).then(msg);return false};
-poll();setInterval(poll,3000);
+var events=new EventSource("/events?t="+T);events.onmessage=function(e){show(JSON.parse(e.data))};
 </script></body></html>`
 
 // UI is the web page server.
 type UI struct {
-	act    api.Actions
-	log    api.Logger
-	bus    *bus.Bus
-	exe    string
-	token  string
-	srv    *http.Server
-	ln     net.Listener
-	mu     sync.Mutex
-	events map[string]map[string]any
-	unsubs []func()
+	act     api.Actions
+	log     api.Logger
+	bus     *bus.Bus
+	exe     string
+	token   string
+	srv     *http.Server
+	ln      net.Listener
+	mu      sync.Mutex
+	events  map[string]map[string]any
+	changed chan struct{}
+	ctx     context.Context
+	cancel  context.CancelFunc
+	unsubs  []func()
 }
 
 // New creates the page. exe is the program path for autostart ("" disables the autostart switch).
@@ -89,7 +90,7 @@ func New(act api.Actions, log api.Logger, b *bus.Bus, exe string) (*UI, error) {
 	if _, err := rand.Read(buf); err != nil {
 		return nil, err
 	}
-	u := &UI{act: act, log: log, bus: b, exe: exe, events: map[string]map[string]any{}}
+	u := &UI{act: act, log: log, bus: b, exe: exe, events: map[string]map[string]any{}, changed: make(chan struct{})}
 	u.token = base64.RawURLEncoding.EncodeToString(buf)
 	log.Secret(u.token)
 	return u, nil
@@ -103,23 +104,31 @@ func (u *UI) Start(ctx context.Context) error {
 		return err
 	}
 	u.ln = ln
+	u.ctx, u.cancel = context.WithCancel(ctx)
+	// Subscribers may already be running while later topics are seeded.
+	u.mu.Lock()
 	for _, t := range statusTopics {
 		t := t
-		if d := u.bus.Last(t); d != nil {
-			u.events[t] = d
-		}
 		u.unsubs = append(u.unsubs, u.bus.Subscribe(t, func(ev bus.Event) {
 			u.mu.Lock()
 			u.events[t] = ev.Data
+			u.notifyLocked()
 			u.mu.Unlock()
 		}))
+		if d := u.bus.Last(t); d != nil {
+			u.events[t] = d
+		}
 	}
+	u.mu.Unlock()
 	u.srv = &http.Server{Handler: http.HandlerFunc(u.serve)}
 	go func() { _ = u.srv.Serve(ln) }()
 	return nil
 }
 
 func (u *UI) Stop(ctx context.Context) error {
+	if u.cancel != nil {
+		u.cancel() // active SSE handlers must finish before Shutdown can return
+	}
 	for _, f := range u.unsubs {
 		f()
 	}
@@ -179,12 +188,42 @@ func (u *UI) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case "/events":
+		u.stream(w, r)
 	case "/state":
 		u.json(w, u.state())
 	case "/":
 		u.reply(w, 200, "text/html; charset=utf-8", strings.ReplaceAll(page, "__T__", html.EscapeString(u.token)))
 	default:
 		u.reply(w, 404, text, "Нет такой страницы")
+	}
+}
+
+func (u *UI) notifyLocked() {
+	close(u.changed)
+	u.changed = make(chan struct{})
+}
+
+func (u *UI) stream(w http.ResponseWriter, r *http.Request) {
+	u.reply(w, 200, "text/event-stream; charset=utf-8", "")
+	for {
+		u.mu.Lock()
+		changed := u.changed
+		u.mu.Unlock()
+		data, _ := json.Marshal(u.state())
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			return
+		}
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			return
+		}
+		select {
+		case <-changed:
+		case <-r.Context().Done():
+			return
+		case <-u.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -227,6 +266,11 @@ func problems(err error) map[string]any {
 }
 
 func (u *UI) act_(ctx context.Context, path, text, password, on string) any {
+	defer func() {
+		u.mu.Lock()
+		u.notifyLocked()
+		u.mu.Unlock()
+	}()
 	switch path {
 	case "/config":
 		r := problems(u.act.ConfigApply(ctx, []byte(text), password))

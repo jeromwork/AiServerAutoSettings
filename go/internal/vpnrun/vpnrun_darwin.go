@@ -3,6 +3,7 @@
 package vpnrun
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/user"
@@ -62,8 +63,8 @@ func (r *Runner) start() error {
 	return err
 }
 
-func (r *Runner) stop() error {
-	_, err := run("sudo", "-n", "/bin/launchctl", "kill", "TERM", target)
+func (r *Runner) stop(ctx context.Context) error {
+	_, err := runContext(ctx, "sudo", "-n", "/bin/launchctl", "kill", "TERM", target)
 	return err
 }
 

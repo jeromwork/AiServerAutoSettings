@@ -5,7 +5,6 @@ package vpnrun
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"remoteagents/internal/api"
 )
@@ -48,15 +47,13 @@ func (r *Runner) start() error {
 	return nil
 }
 
-func (r *Runner) stop() error {
+func (r *Runner) stop(ctx context.Context) error {
 	r.mu.Lock()
 	p := r.proc
 	r.mu.Unlock()
 	if p == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	return p.Stop(ctx)
 }
 

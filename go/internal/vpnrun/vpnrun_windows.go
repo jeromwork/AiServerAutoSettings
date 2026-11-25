@@ -3,6 +3,7 @@
 package vpnrun
 
 import (
+	"context"
 	"encoding/xml"
 	"os"
 	"path/filepath"
@@ -69,7 +70,10 @@ func (r *Runner) Uninstall() error {
 
 // start/stop — без прав: задача уже создана с повышенными.
 func (r *Runner) start() error { _, err := run("schtasks.exe", "/Run", "/TN", label); return err }
-func (r *Runner) stop() error  { _, err := run("schtasks.exe", "/End", "/TN", label); return err }
+func (r *Runner) stop(ctx context.Context) error {
+	_, err := runContext(ctx, "schtasks.exe", "/End", "/TN", label)
+	return err
+}
 
 // Running: состояние задачи из PowerShell (значение enum не локализуется).
 func (r *Runner) Running() bool {

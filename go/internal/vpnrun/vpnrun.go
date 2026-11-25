@@ -96,6 +96,16 @@ func run(name string, args ...string) ([]byte, error) {
 	return out, err
 }
 
+func runContext(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = time.Second // bound output draining if the stop helper leaves descendants
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		err = fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return out, err
+}
+
 func badPath(ps ...string) error {
 	for _, p := range ps {
 		if p == "" || strings.ContainsAny(p, "\"'<>&\r\n$`") {
@@ -156,7 +166,9 @@ func (r *Runner) Stop() error {
 		r.cancel = nil
 	}
 	r.mu.Unlock()
-	return r.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return r.stop(ctx)
 }
 
 // Close — выключает сторожа (sing-box не трогает).
@@ -239,18 +251,29 @@ func (r *Runner) monitor(ctx context.Context, gen int) {
 		fails++
 		r.Bus.Publish("vpn.exited", map[string]any{"err": err.Error(), "fails": fails})
 		if fails >= maxFails {
-			r.Bus.Publish("vpn.gave_up", map[string]any{"fails": fails, "hint": "VPN упал 3 раза подряд; нужен ручной Start"})
+			r.giveUp(fails)
 			return
 		}
 		if err := r.start(); err != nil {
 			fails++
 			r.Log.Error("vpn.start", "err", err.Error(), "fails", fails)
 			if fails >= maxFails {
-				r.Bus.Publish("vpn.gave_up", map[string]any{"fails": fails})
+				r.giveUp(fails)
 				return
 			}
 		}
 	}
+}
+
+// Exhaustion must fail open: stop the VPN within one bounded action before
+// dropping supervision. A stop failure is reported, never presented as success.
+func (r *Runner) giveUp(fails int) {
+	data := map[string]any{"fails": fails, "hint": "VPN упал 3 раза подряд; нужен ручной Start"}
+	if err := r.Stop(); err != nil {
+		r.Log.Error("vpn.gave_up.stop", "err", err.Error())
+		data["stop_error"] = err.Error()
+	}
+	r.Bus.Publish("vpn.gave_up", data)
 }
 
 func (r *Runner) exitTag() string {

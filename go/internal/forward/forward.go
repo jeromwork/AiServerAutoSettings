@@ -186,8 +186,7 @@ func (f *fwd) channelUp(session int) {
 	sctx := f.sctx
 	f.cmu.Unlock()
 	f.mu.Lock()
-	// §5б исключение: у Windows нет события «порт освободился» (WinError 10013, Hyper-V/WSL); v2 повторял каждые 10 с,
-	// здесь повтор на каждом событии канала (up/down).
+	// v2 retried busy static ports every 10 s; retry here only on a new channel up.
 	f.retryStaticLocked()
 	f.restoreExposedLocked()
 	f.mu.Unlock()

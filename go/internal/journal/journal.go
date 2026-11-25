@@ -31,6 +31,7 @@ const (
 	recMax     = 16000
 	secretsMax = 2000
 	listMax    = 200
+	lineMax    = 8192 // v2 procs.LINE_MAX
 )
 
 // Masker is shared by every stream of the process (v2 has one global masker).
@@ -347,15 +348,26 @@ type lineWriter struct {
 }
 
 func (w *lineWriter) Write(p []byte) (int, error) {
-	w.buf = append(w.buf, p...)
-	for {
-		i := bytes.IndexByte(w.buf, '\n')
-		if i < 0 {
-			return len(p), nil
+	n := len(p)
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, '\n')
+		part := p
+		if i >= 0 {
+			part = p[:i]
 		}
-		w.put(w.buf[:i])
-		w.buf = w.buf[i+1:]
+		// Keep at most LINE_MAX bytes, as in v2; discard the rest of an
+		// oversized chunk rather than accumulating an unbounded line.
+		w.buf = append(w.buf, part[:min(len(part), lineMax-len(w.buf))]...)
+		if i >= 0 || len(w.buf) == lineMax {
+			w.put(w.buf)
+			w.buf = w.buf[:0]
+		}
+		if i < 0 {
+			break
+		}
+		p = p[i+1:]
 	}
+	return n, nil
 }
 
 func (w *lineWriter) put(b []byte) {

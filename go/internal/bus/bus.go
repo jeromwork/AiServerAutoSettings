@@ -32,16 +32,20 @@ type sub struct {
 type Bus struct {
 	log      api.Logger
 	q        chan Event
+	stop     chan struct{}
+	done     chan struct{}
 	mu       sync.Mutex
 	subs     map[string][]sub
 	last     map[string]map[string]any
 	nextID   int
 	overflow bool
+	closed   bool
 }
 
 // New starts the dispatcher. A nil logger is allowed.
 func New(log api.Logger) *Bus {
-	b := &Bus{log: log, q: make(chan Event, queueMax), subs: map[string][]sub{}, last: map[string]map[string]any{}}
+	b := &Bus{log: log, q: make(chan Event, queueMax), stop: make(chan struct{}), done: make(chan struct{}),
+		subs: map[string][]sub{}, last: map[string]map[string]any{}}
 	go b.run()
 	return b
 }
@@ -53,6 +57,10 @@ func (b *Bus) Publish(topic string, data map[string]any) {
 		return
 	}
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
 	if lastTopics[topic] {
 		b.last[topic] = data
 	}
@@ -72,6 +80,9 @@ func (b *Bus) Publish(topic string, data map[string]any) {
 func (b *Bus) Subscribe(topic string, fn func(Event)) (unsubscribe func()) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		return func() {}
+	}
 	b.nextID++
 	id := b.nextID
 	b.subs[topic] = append(b.subs[topic], sub{id, fn})
@@ -95,9 +106,35 @@ func (b *Bus) Last(topic string) map[string]any {
 	return b.last[topic]
 }
 
+// Close cancels dispatch and waits for the current callback to finish. Queued
+// events are discarded; Publish and Subscribe become no-ops. Call outside callbacks.
+func (b *Bus) Close() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	if !b.closed {
+		b.closed = true
+		close(b.stop)
+	}
+	b.mu.Unlock()
+	<-b.done
+}
+
 func (b *Bus) run() {
-	for ev := range b.q {
+	defer close(b.done)
+	for {
+		var ev Event
+		select {
+		case <-b.stop:
+			return
+		case ev = <-b.q:
+		}
 		b.mu.Lock()
+		if b.closed {
+			b.mu.Unlock()
+			return
+		}
 		if b.overflow && len(b.q) <= queueReset {
 			b.overflow = false
 		}
@@ -107,6 +144,11 @@ func (b *Bus) run() {
 			b.log.Info(ev.Topic, "data", ev.Data)
 		}
 		for _, s := range subs {
+			select {
+			case <-b.stop:
+				return
+			default:
+			}
 			b.safe(ev, s.fn)
 		}
 	}
