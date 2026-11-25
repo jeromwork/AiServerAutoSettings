@@ -1,15 +1,18 @@
 package procs
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +35,7 @@ type proc struct {
 	started  time.Time
 	done     chan struct{}
 	mu       sync.Mutex
+	retired  bool
 	exitCode int
 	stopOnce sync.Once
 	killOnce sync.Once
@@ -55,6 +59,14 @@ func New(log api.Logger, tr api.Traces) (api.Procs, error) {
 func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("procs: context-canceled: %w", err)
+	}
+
+	// A general Reader has no cancellation contract. Only pass bounded memory
+	// readers/files to os/exec; pipe readers are copied through an owned pipe.
+	switch s.Stdin.(type) {
+	case nil, *os.File, *bytes.Buffer, *bytes.Reader, *strings.Reader, *io.PipeReader:
+	default:
+		return nil, fmt.Errorf("procs: stdin-unsupported: reader cannot be canceled")
 	}
 
 	m.mu.Lock()
@@ -103,6 +115,15 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		}
 	}
 
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			if m.tr != nil {
+				_ = m.tr.Done("process", traceID)
+			}
+		}
+	}()
+
 	cmd := exec.CommandContext(ctx, path, s.Args...)
 	cmd.WaitDelay = time.Second
 	cmd.Dir = s.Dir
@@ -110,6 +131,34 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		cmd.Env = s.Env
 	}
 
+	// Keep a blocking PipeReader out of os/exec's internal copy goroutines:
+	// Wait must return before we close the source to interrupt its Read.
+	cmd.Stdin = s.Stdin
+	var input *io.PipeReader
+	var inputRead, inputWrite *os.File
+	var inputDone chan struct{}
+	if r, ok := s.Stdin.(*io.PipeReader); ok {
+		var err error
+		inputRead, inputWrite, err = os.Pipe()
+		if err != nil {
+			return nil, fmt.Errorf("procs: stdin-pipe: %w", err)
+		}
+		input = r
+		cmd.Stdin = inputRead
+		defer func() { _ = inputRead.Close() }()
+		defer func() {
+			if !handedOff {
+				_ = inputWrite.Close()
+			}
+		}()
+	}
+	defer func() {
+		if inputDone != nil && !handedOff {
+			_ = input.Close()
+			_ = inputWrite.Close()
+			<-inputDone
+		}
+	}()
 	var stdoutCloser, stderrCloser io.Closer
 	if s.Stdout != nil {
 		cmd.Stdout = s.Stdout
@@ -126,17 +175,6 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		cmd.Stderr = w
 		stderrCloser = w
 	}
-
-	// os/exec accepts every io.Reader; WaitDelay bounds waiting for its pipes.
-	cmd.Stdin = s.Stdin
-	handedOff := false
-	defer func() {
-		if !handedOff {
-			if m.tr != nil {
-				_ = m.tr.Done("process", traceID)
-			}
-		}
-	}()
 
 	if err := m.setupCmd(cmd, s); err != nil {
 		if stdoutCloser != nil {
@@ -157,6 +195,15 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 			_ = stderrCloser.Close()
 		}
 		return nil, fmt.Errorf("procs: start-failed: %w", err)
+	}
+
+	if input != nil {
+		inputDone = make(chan struct{})
+		go func() {
+			defer close(inputDone)
+			defer func() { _ = inputWrite.Close() }()
+			_, _ = io.Copy(inputWrite, input)
+		}()
 	}
 
 	if err := m.postStart(cmd); err != nil {
@@ -223,6 +270,11 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 
 	go func() {
 		err := cmd.Wait()
+		if inputDone != nil {
+			_ = input.Close()
+			_ = inputWrite.Close()
+			<-inputDone
+		}
 		// Serialize the last leader exiting with starts and other reapers, so
 		// Unix descendants cannot outlive the manager's final tracked process.
 		m.mu.Lock()
@@ -305,7 +357,6 @@ func (p *proc) Stop(ctx context.Context) error {
 	p.stopping.Store(true)
 	select {
 	case <-p.done:
-		p.killTree()
 		return nil
 	default:
 	}
@@ -314,14 +365,17 @@ func (p *proc) Stop(ctx context.Context) error {
 		p.killTree()
 		return fmt.Errorf("procs: stop-canceled: %w", ctx.Err())
 	}
-	p.stopOnce.Do(p.softStop)
+	p.mu.Lock()
+	if !p.retired {
+		p.stopOnce.Do(p.softStop)
+	}
+	p.mu.Unlock()
 
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 
 	select {
 	case <-p.done:
-		p.killTree()
 		return nil
 	case <-ctx.Done():
 	case <-timer.C:
@@ -329,7 +383,6 @@ func (p *proc) Stop(ctx context.Context) error {
 
 	select {
 	case <-p.done:
-		p.killTree()
 		return nil
 	default:
 	}
@@ -338,14 +391,17 @@ func (p *proc) Stop(ctx context.Context) error {
 
 	select {
 	case <-p.done:
-		p.killTree()
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("procs: stop-canceled: %w", ctx.Err())
 	}
 }
 
-// killTree also makes repeated Stop calls safe after the original group is gone.
+// Serialize signals with retirement so stale Process handles cannot kill siblings.
 func (p *proc) killTree() {
-	p.killOnce.Do(p.hardKill)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.retired {
+		p.killOnce.Do(p.hardKill)
+	}
 }

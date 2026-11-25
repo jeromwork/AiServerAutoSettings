@@ -126,9 +126,12 @@ func processStarted(ctx context.Context, cmd *exec.Cmd) (time.Time, error) {
 // Preserve siblings on ordinary exit, but clean the group on shutdown or when
 // its final managed leader exits. Called with the manager mutex held.
 func (p *proc) reapExited(cleanGroup bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if cleanGroup {
-		p.killTree()
+		p.killOnce.Do(p.hardKill)
 	}
+	p.retired = true
 }
 
 func (p *proc) groupID() int {
