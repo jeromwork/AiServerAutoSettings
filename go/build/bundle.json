@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "binaries": [
+    {
+      "name": "sing-box",
+      "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip",
+      "sha256": "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df",
+      "member": "sing-box-1.14.4-windows-amd64/sing-box.exe",
+      "memberSha256": "8f30682ee198855440d2a7fe070d5d3653793b2d01bb8c85eea88f93bbe7c8b9",
+      "target": "sing-box.exe",
+      "license": "sing-box-1.14.4-windows-amd64/LICENSE",
+      "os": "windows"
+    },
+    {
+      "name": "openssh-ssh",
+      "url": "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.5.0.0p1-Beta/OpenSSH-Win64.zip",
+      "sha256": "bd48fe985d400402c278c485db20e6a82bc4c7f7d8e0ef5a81128f523096530c",
+      "member": "OpenSSH-Win64/ssh.exe",
+      "memberSha256": "e41e50a22dffeae8bb13bce4cb47b6c4aa0de4cdecbd62ef79d5046adc05a8b1",
+      "target": "openssh/ssh.exe",
+      "license": "OpenSSH-Win64/LICENSE.txt",
+      "os": "windows"
+    },
+    {
+      "name": "openssh-keygen",
+      "url": "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.5.0.0p1-Beta/OpenSSH-Win64.zip",
+      "sha256": "bd48fe985d400402c278c485db20e6a82bc4c7f7d8e0ef5a81128f523096530c",
+      "member": "OpenSSH-Win64/ssh-keygen.exe",
+      "memberSha256": "9aad9250dc45eb289ef81187d54e9979090321cd1b854b4587990e731ac7dd84",
+      "target": "openssh/ssh-keygen.exe",
+      "os": "windows"
+    },
+    {
+      "name": "openssh-libcrypto",
+      "url": "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.5.0.0p1-Beta/OpenSSH-Win64.zip",
+      "sha256": "bd48fe985d400402c278c485db20e6a82bc4c7f7d8e0ef5a81128f523096530c",
+      "member": "OpenSSH-Win64/libcrypto.dll",
+      "memberSha256": "065d3a16b418dfe5647c56c8a1787ac540b13299bdf35f69e9980525804cb9ab",
+      "target": "openssh/libcrypto.dll",
+      "os": "windows"
+    },
+    {
+      "name": "syncthingtray",
+      "url": "https://github.com/Martchus/syncthingtray/releases/download/v2.1.9/syncthingtray-2.1.9-x86_64-w64-mingw32.exe.zip",
+      "sha256": "c20d74998cb84980b07cb00eca4c38d26643eaa69b8bef94f6841ded6c752cc5",
+      "member": "syncthingtray.exe",
+      "memberSha256": "6d0010a4b5233a1c393614546d9bcdbd1c4f1f425502bea22d163314c2ad7da7",
+      "target": "syncthingtray.exe",
+      "license": "syncthingtray-2.1.9-x86_64-w64-mingw32-LICENSES.md",
+      "os": "windows"
+    },
+    {
+      "name": "geoip-ru",
+      "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/66c864fcfe1535549e0658569cb514dbd35756ba/geoip-ru.srs",
+      "sha256": "55869c680cf6489991cbfdf62c2f5da77ea85bf571babddb6cd9c4941d84cbfa",
+      "member": null,
+      "memberSha256": "55869c680cf6489991cbfdf62c2f5da77ea85bf571babddb6cd9c4941d84cbfa",
+      "target": "rules/geoip-ru.srs"
+    },
+    {
+      "name": "wintun",
+      "os": "windows",
+      "url": "https://www.wintun.net/builds/wintun-0.14.1.zip",
+      "sha256": "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51",
+      "member": "wintun/bin/amd64/wintun.dll",
+      "memberSha256": "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce",
+      "target": "wintun.dll",
+      "license": "wintun/LICENSE.txt"
+    }
+  ],
+  "sing-box": {
+    "version": "1.14.4",
+    "sha256": {
+      "linux-amd64": "699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968",
+      "darwin-amd64": "eae86b9b033bba50b7c44ab719e4bfac0aca05efd28483390ed3aa510f32db25",
+      "darwin-arm64": "0d8c7f5ed5d587b0f1a5e9772a708ec3bfa4ac4c9329604b01d8d9c2ba406838"
+    }
+  },
+  "syncthing": {
+    "version": "2.1.7",
+    "sha256": {
+      "linux-amd64": "2edc416e7ed136b7c858ed5f3f02a3b8316589605e54c380228ceea7acbf0142",
+      "darwin-amd64": "b8be90176d0f24daebae7b5aaddac52ebfae395df6d99f5e0e54656db00868cb",
+      "darwin-arm64": "2df075b463231a307c91da657157beaed06383a941ba7ea04d33d536e3c4af38",
+      "windows-amd64": "3ce7da770f546a8d02b65b2e7ee31f2a3b8b7c3f990ede045590cca4172ecfe1"
+    }
+  }
+}

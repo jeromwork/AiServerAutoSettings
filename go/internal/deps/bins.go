@@ -157,13 +157,17 @@ func (b *Bundle) Prepare(home string, log api.Logger) (string, error) {
 	}
 	rt := filepath.Join(home, "runtime")
 	zp := filepath.Join(rt, "bin.zip")
-	st, err := os.Stat(zp)
-	b.strict = err == nil && st.Mode().IsRegular()
 	fail := func(message string) (string, error) {
 		b.why = message
 		b.report("why:"+message, message)
 		return "", errors.New(message)
 	}
+	b.strict = len(embeddedBundle) > 0
+	if err := installBundle(zp); err != nil {
+		return fail("Не удалось сохранить вшитые программы")
+	}
+	st, err := os.Stat(zp)
+	b.strict = b.strict || (err == nil && st.Mode().IsRegular())
 	if !b.strict {
 		b.why = "bin.zip не найден (EXE без вшитых программ)"
 		b.report("old-mode", "EXE без вшитых программ: ищу чужие, старый режим")

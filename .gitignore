@@ -49,3 +49,6 @@ contabo-support-request.txt
 !/release/
 !/release/*.exe
 !/release/Start.cmd
+
+# Go release payloads and build caches.
+/go/dist/
