@@ -56,7 +56,9 @@ if [[ ! -x "$AIR" ]]; then
   echo "dev: tool: air is missing at $AIR (S0 tool installation required)" >&2
   exit 1
 fi
-command -v setsid >/dev/null || { echo 'dev: tool: setsid required' >&2; exit 1; }
+for tool in setsid pkill pgrep; do
+  command -v "$tool" >/dev/null || { echo "dev: tool: $tool required" >&2; exit 1; }
+done
 mkdir -p .tmp
 work=$(mktemp -d "$PWD/.tmp/dev-XXXXXXXX")
 air_pid=''
@@ -64,13 +66,13 @@ cleanup() {
   local status=$?
   trap - EXIT INT TERM HUP
   if [[ -n "$air_pid" ]]; then
-    # Air, its build shell and every application generation share this private group.
-    kill -TERM -- "-$air_pid" 2>/dev/null || true
+    # Air creates child process groups; all remain in our private session.
+    pkill -TERM -s "$air_pid" 2>/dev/null || true
     for ((i=0; i<30; i++)); do
-      if ! kill -0 -- "-$air_pid" 2>/dev/null; then break; fi
+      if ! pgrep -s "$air_pid" >/dev/null 2>&1; then break; fi
       sleep 0.1
     done
-    kill -KILL -- "-$air_pid" 2>/dev/null || true
+    pkill -KILL -s "$air_pid" 2>/dev/null || true
     wait "$air_pid" 2>/dev/null || true
   fi
   rm -rf -- "$work"
