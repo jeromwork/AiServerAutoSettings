@@ -44,8 +44,12 @@ type tunnelWatch struct {
 	last    []string // последние 3 строки ошибок (только поток журнала)
 }
 
-func newTunnelWatch(exitTag string) *tunnelWatch {
-	return &tunnelWatch{tagRe: regexp.MustCompile(`outbound/[A-Za-z0-9_-]+\[` + regexp.QuoteMeta(exitTag) + `\]`)}
+func newTunnelWatch(exitTags []string) *tunnelWatch {
+	tags := make([]string, 0, len(exitTags))
+	for _, tag := range exitTags {
+		tags = append(tags, regexp.QuoteMeta(tag))
+	}
+	return &tunnelWatch{tagRe: regexp.MustCompile(`outbound/[A-Za-z0-9_-]+\[(?:` + strings.Join(tags, "|") + `)\]`)}
 }
 
 // feed разбирает одну строку журнала; true — это ошибка соединения через узел выхода и проверка ещё не идёт:

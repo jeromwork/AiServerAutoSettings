@@ -60,10 +60,25 @@ func (r *Runner) Install() error {
 	if _, err := run("schtasks.exe", "/Create", "/TN", label, "/XML", f, "/F"); err != nil {
 		return err
 	}
-	return nil
+	dnsPath := filepath.Join(filepath.Dir(r.Conf), "vpn-dns.ps1")
+	if err := os.WriteFile(dnsPath, []byte(dnsScript), 0600); err != nil {
+		return err
+	}
+	dx := strings.NewReplacer("{{CMD}}", esc("powershell.exe"), "{{ARGS}}", esc(`-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "`+dnsPath+`"`)).Replace(taskXML)
+	if err := writeUTF16(f, dx); err != nil {
+		return err
+	}
+	_, err := run("schtasks.exe", "/Create", "/TN", label+".dns", "/XML", f, "/F")
+	return err
 }
 
 func (r *Runner) Uninstall() error {
+	if err := r.ClearDNS(context.Background()); err != nil {
+		return err
+	}
+	if _, err := run("schtasks.exe", "/Delete", "/TN", label+".dns", "/F"); err != nil {
+		return err
+	}
 	_, err := run("schtasks.exe", "/Delete", "/TN", label, "/F")
 	return err
 }

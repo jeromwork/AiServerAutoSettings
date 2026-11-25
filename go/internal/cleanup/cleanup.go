@@ -12,6 +12,7 @@ import (
 
 // VPNIface — имя нашего TUN-интерфейса VPN (v2 vpn.py OWN_IFACES); его хвост после жёсткого убийства снимает уборка.
 const VPNIface = "RA2-VPN"
+const LANIface = "RA2-LAN"
 
 type Cleaner struct {
 	home    string

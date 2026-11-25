@@ -2,9 +2,7 @@ package forward
 
 import (
 	"encoding/json"
-	"fmt"
 	"net"
-	"path"
 	"strings"
 
 	"remoteagents/internal/api"
@@ -19,7 +17,35 @@ type lanNet struct {
 // parseNets: сети из lan[] (share) + happier-api (happier.viaChannel, по умолчанию api.happier.dev).
 func parseNets(cfg *api.Config) []lanNet {
 	var out []lanNet
-	for i, it := range cfg.LAN {
+	items := cfg.LAN
+	var rawLAN struct {
+		LAN     json.RawMessage `json:"lan"`
+		Profile struct {
+			LAN json.RawMessage `json:"lan"`
+		} `json:"profile"`
+	}
+	if json.Unmarshal(cfg.Raw, &rawLAN) == nil {
+		raw := rawLAN.LAN
+		if len(raw) == 0 || string(raw) == "null" {
+			raw = rawLAN.Profile.LAN
+		}
+		var rows []struct {
+			Name  string   `json:"name"`
+			Nets  []string `json:"nets"`
+			Share struct {
+				Enabled *bool    `json:"enabled"`
+				Subnets []string `json:"subnets"`
+				Domains []string `json:"domains"`
+			} `json:"share"`
+		}
+		if json.Unmarshal(raw, &rows) == nil {
+			items = nil
+			for _, r := range rows {
+				items = append(items, api.LANCfg{Name: r.Name, Share: api.LANShare{Enabled: r.Share.Enabled == nil || *r.Share.Enabled, Subnets: append(r.Share.Subnets, r.Nets...), Domains: r.Share.Domains}})
+			}
+		}
+	}
+	for i, it := range items {
 		if i >= 64 {
 			break
 		}
@@ -85,50 +111,4 @@ func withServer(nets []lanNet, cfg *api.Config) []lanNet {
 		return append(nets, lanNet{name: "server", nets: []*net.IPNet{x}})
 	}
 	return nets
-}
-
-// match -> имя сети или "". host — IP или домен.
-func match(nets []lanNet, host string) string {
-	h := strings.TrimRight(strings.ToLower(host), ".")
-	if ip := net.ParseIP(h); ip != nil {
-		for _, n := range nets {
-			for _, x := range n.nets {
-				if x.Contains(ip) {
-					return n.name
-				}
-			}
-		}
-		return ""
-	}
-	for _, n := range nets {
-		for _, d := range n.domains {
-			if ok, _ := path.Match(d, h); ok || (strings.HasPrefix(d, "*.") && h == d[2:]) {
-				return n.name
-			}
-		}
-	}
-	return ""
-}
-
-func pacText(nets []lanNet, port int) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "function FindProxyForURL(url, host) {\n  var P = \"PROXY 127.0.0.1:%d\";\n  host = host.toLowerCase();\n", port)
-	for _, n := range nets {
-		for _, d := range n.domains {
-			extra := ""
-			if strings.HasPrefix(d, "*.") {
-				extra = fmt.Sprintf(" || host == \"%s\"", d[2:])
-			}
-			fmt.Fprintf(&b, "  if (shExpMatch(host, \"%s\")%s) return P;\n", d, extra)
-		}
-	}
-	for _, n := range nets {
-		for _, x := range n.nets {
-			if x.IP.To4() != nil && len(x.Mask) == 4 {
-				fmt.Fprintf(&b, "  if (isInNet(host, \"%s\", \"%s\")) return P;\n", x.IP.To4(), net.IP(x.Mask))
-			}
-		}
-	}
-	b.WriteString("  return \"DIRECT\";\n}\n")
-	return b.String()
 }

@@ -30,7 +30,13 @@ type RenderContext struct {
 	Ports        map[string]int // отдельный direct-вход для каждого пути
 	ProxyPorts   []int          // обнаруженные платформой локальные SOCKS5
 	VPNInterface string         // обнаруженный платформой чужой VPN
+	LANDNS       []LANDNS       // домены клиники и их DNS; системные правила ставит только vpnrun
 	LANRoutes    []string       // готовый план tun.py, включая разрешённые /32 доменов
+}
+
+type LANDNS struct {
+	Domains []string
+	Servers []string
 }
 
 // Part — вклад части в конфиг sing-box.
