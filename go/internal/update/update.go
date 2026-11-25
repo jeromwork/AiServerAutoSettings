@@ -200,7 +200,7 @@ func (u *updater) ReceiveDev(ctx context.Context, body io.Reader, sha256Hex, ver
 	if actualSha != expectedSha {
 		return "", fail("sha256", fmt.Sprintf("checksum mismatch: got %s, want %s", actualSha, expectedSha))
 	}
-	if err := os.Chmod(candPath, 0755); err != nil {
+	if err := os.Chmod(candPath, 0700); err != nil { // #nosec G302 -- authenticated candidate requires owner execute permission.
 		return "", fail("chmod", err.Error())
 	}
 	success = true

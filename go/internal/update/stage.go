@@ -56,7 +56,7 @@ func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 	}
 
 	// 3. Execution permissions.
-	if err := os.Chmod(candidate, 0755); err != nil {
+	if err := os.Chmod(candidate, 0700); err != nil { // #nosec G302 -- authenticated candidate requires owner execute permission.
 		_ = os.Remove(candidate)
 		return fail("chmod", "cannot set candidate permissions: "+err.Error())
 	}
@@ -139,7 +139,7 @@ func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 	if err := moveOrCopyFile(candidate, destBin); err != nil {
 		return fail("io", "cannot move candidate to slot: "+err.Error())
 	}
-	if err := os.Chmod(destBin, 0755); err != nil {
+	if err := os.Chmod(destBin, 0700); err != nil { // #nosec G302 -- authenticated candidate requires owner execute permission.
 		return fail("chmod", "cannot set slot binary permissions: "+err.Error())
 	}
 
@@ -173,7 +173,7 @@ func moveOrCopyFile(src, dst string) error {
 		return err
 	}
 	defer func() { _ = in.Close() }()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
