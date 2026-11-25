@@ -305,7 +305,7 @@ func (a *Agent) handleRead(r *http.Request) response {
 		offset = 0
 	}
 
-	f, err := os.Open(path)
+	f, err := openRegular(path)
 	if err != nil {
 		return failure(404, fmt.Sprintf("%T: %s", err, truncate(err.Error(), 100)))
 	}

@@ -86,8 +86,22 @@ func New(d api.AgentDeps) (*Agent, error) {
 		parts:    make(map[string]struct{}),
 		started:  time.Now(),
 	}
-	// AgentDeps has no Traces dependency. Keep a private write-ahead journal
-	// so startup can remove uploads interrupted by a crash, including outside Home.
+	// Remove journal staging files left by a crash, even if the main journal
+	// has not been created yet. Only this component's reserved names qualify.
+	staging, err := filepath.Glob(filepath.Join(d.Paths.State, "agent-parts-*.ralab-tmp"))
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("agent: journal staging: %w", err)
+	}
+	for _, path := range staging {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			cancel()
+			return nil, fmt.Errorf("agent: journal staging: %w", err)
+		}
+	}
+	// TODO: AgentDeps needs a Traces dependency for Intent/Applied/Done.
+	// This private recovery journal does not satisfy the Traces contract; it
+	// only removes uploads interrupted by a crash, including outside Home.
 	data, err := os.ReadFile(a.partsJournal())
 	if err != nil && !os.IsNotExist(err) {
 		cancel()
