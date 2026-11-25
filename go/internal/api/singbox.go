@@ -31,6 +31,12 @@ type Part struct {
 	RouteExclude []string
 }
 
+// VPNPath — готовый путь paths.py для отдельного VPN-процесса; Via означает чужой VPN.
+type VPNPath struct {
+	Name, Kind, Via, Final string
+	Outs                   []map[string]any
+}
+
 type Singbox interface {
 	Component
 	Ready() <-chan struct{}
