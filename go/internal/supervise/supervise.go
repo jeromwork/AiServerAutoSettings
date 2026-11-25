@@ -165,8 +165,10 @@ func startProcess(ctx context.Context, pr api.Procs, exe string, args []string, 
 		return nil, nil, nil, err
 	}
 
-	started := time.Now()
-	traceErr := tr.Applied("process", id, map[string]string{"pid": strconv.Itoa(cmd.Process.Pid), "start": started.UTC().Format(time.RFC3339Nano)}, nil)
+	started, traceErr := processStarted(cmd)
+	if traceErr == nil {
+		traceErr = tr.Applied("process", id, map[string]string{"pid": strconv.Itoa(cmd.Process.Pid), "start": started.UTC().Format(time.RFC3339Nano)}, nil)
+	}
 	release, err := attachProcess(cmd)
 	if traceErr != nil {
 		if release != nil {

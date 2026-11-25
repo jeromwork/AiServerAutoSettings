@@ -6,6 +6,7 @@ import (
 	"golang.org/x/sys/windows"
 	"os/exec"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -47,4 +48,17 @@ func attachProcess(cmd *exec.Cmd) (func(), error) {
 		return nil, err
 	}
 	return func() { _ = windows.CloseHandle(job) }, nil
+}
+
+func processStarted(cmd *exec.Cmd) (time.Time, error) {
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(cmd.Process.Pid))
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer windows.CloseHandle(process)
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(process, &created, &exited, &kernel, &user); err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(0, created.Nanoseconds()), nil
 }

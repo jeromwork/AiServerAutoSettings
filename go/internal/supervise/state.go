@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -66,6 +67,14 @@ func (s *slots) exists(v string) bool {
 }
 
 func loadSlots(p api.Paths, self, embeddedVersion string, reset bool) (*slots, error) {
+	resolved, err := exec.LookPath(self)
+	if err != nil {
+		return nil, err
+	}
+	self, err = filepath.Abs(resolved)
+	if err != nil {
+		return nil, err
+	}
 	if embeddedVersion == "" {
 		embeddedVersion = "embedded"
 	}

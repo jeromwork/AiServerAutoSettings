@@ -3,8 +3,10 @@
 package supervise
 
 import (
+	"golang.org/x/sys/unix"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 func setSysProcAttr(cmd *exec.Cmd) {
@@ -24,3 +26,11 @@ func killProcessGroup(cmd *exec.Cmd) {
 }
 
 func attachProcess(cmd *exec.Cmd) (func(), error) { return func() {}, nil }
+
+func processStarted(cmd *exec.Cmd) (time.Time, error) {
+	info, err := unix.SysctlKinfoProc("kern.proc.pid", cmd.Process.Pid)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(info.Proc.P_starttime.Sec, int64(info.Proc.P_starttime.Usec)*1000), nil
+}
