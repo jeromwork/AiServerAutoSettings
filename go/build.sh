@@ -47,37 +47,43 @@ done < keys/allowed_signers
 ldflags="-X main.version=$version -X main.releaseRepo=$repo -X 'main.pubKeys=$keys'"
 
 exec 9>/tmp/heavy-tests.lock
-timeout --foreground 420 flock -x 9
-mkdir -p .tmp dist
-work=$(mktemp -d "$PWD/.tmp/build.XXXXXX")
-resource=''
-cleanup() {
-  [[ -z $resource ]] || rm -f -- "$resource"
-  rm -rf -- "$work"
+flock -x 9
+# One budget for all targets; waiting for the lock is outside that budget.
+build() {
+  mkdir -p .tmp dist
+  work=$(mktemp -d "$PWD/.tmp/build.XXXXXX")
+  resource=''
+  cleanup() {
+    [[ -z $resource ]] || rm -f -- "$resource"
+    rm -rf -- "$work"
+  }
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  for target in "$@"; do
+    os=${target%/*}
+    arch=${target#*/}
+    name="remoteagents-$os-$arch"
+    if [[ $os == windows ]]; then
+      name+=.exe
+      candidate="cmd/remoteagents/rsrc_windows_$arch.syso"
+      [[ ! -e $candidate ]] || fail "resource already exists: $candidate"
+      (cd cmd/remoteagents && go-winres make --in winres/winres.json \
+        --arch "$arch" --out "$work/rsrc")
+      resource="cmd/remoteagents/rsrc_windows_$arch.syso"
+      cp -- "$work/rsrc_windows_$arch.syso" "$resource"
+    fi
+    printf 'Building %s (%s)\n' "$target" "$version"
+    GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build \
+      -mod=readonly -trimpath -ldflags "$ldflags" -o "$work/$name" ./cmd/remoteagents
+    if [[ -n $resource ]]; then
+      rm -f -- "$resource"
+      resource=''
+    fi
+    mv -- "$work/$name" "dist/$name"
+  done
+  printf 'OK: %s asset(s) in dist/\n' "$#"
 }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-for target in "${targets[@]}"; do
-  os=${target%/*}
-  arch=${target#*/}
-  name="remoteagents-$os-$arch"
-  if [[ $os == windows ]]; then
-    name+=.exe
-    candidate="cmd/remoteagents/rsrc_windows_$arch.syso"
-    [[ ! -e $candidate ]] || fail "resource already exists: $candidate"
-    (cd cmd/remoteagents && timeout --foreground 420 go-winres make --in winres/winres.json \
-      --arch "$arch" --out "$work/rsrc")
-    resource="cmd/remoteagents/rsrc_windows_$arch.syso"
-    cp -- "$work/rsrc_windows_$arch.syso" "$resource"
-  fi
-  printf 'Building %s (%s)\n' "$target" "$version"
-  GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 timeout --foreground 420 go build \
-    -mod=readonly -trimpath -ldflags "$ldflags" -o "$work/$name" ./cmd/remoteagents
-  if [[ -n $resource ]]; then
-    rm -f -- "$resource"
-    resource=''
-  fi
-  mv -- "$work/$name" "dist/$name"
-done
-printf 'OK: %s asset(s) in dist/\n' "${#targets[@]}"
+export -f build fail
+export ldflags version
+timeout --kill-after=5 420 bash -euo pipefail -c 'build "$@"' bash "${targets[@]}"
