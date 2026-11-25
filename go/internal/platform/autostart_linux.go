@@ -17,28 +17,13 @@ func (p *stubPlatform) Autostart(binPath, home, inst8 string) api.AutostartSpec 
 		unitName = fmt.Sprintf("remoteagents3-%s.service", inst8)
 	}
 	unitPath := filepath.Join("/etc/systemd/system", unitName)
-
 	execStart := quoteSystemd(binPath) + " supervise --fallback " + quoteSystemd(binPath+".prev")
 	if home != "" {
 		execStart += " --home " + quoteSystemd(home)
 	}
-
-	content := strings.Join([]string{
-		"[Unit]",
-		"Description=RemoteAgents3 Service",
-		"After=network.target",
-		"",
-		"[Service]",
-		"Type=simple",
-		"ExecStart=" + execStart,
-		"Restart=on-failure",
-		"RestartSec=5",
-		"",
-		"[Install]",
-		"WantedBy=multi-user.target",
-		"",
-	}, "\n")
-
+	content := "[Unit]\nDescription=RemoteAgents3 Service\nAfter=network.target\n\n" +
+		"[Service]\nType=simple\nExecStart=" + execStart + "\nRestart=on-failure\nRestartSec=5\n\n" +
+		"[Install]\nWantedBy=multi-user.target\n"
 	return api.AutostartSpec{
 		Kind:    "systemd",
 		Path:    unitPath,
