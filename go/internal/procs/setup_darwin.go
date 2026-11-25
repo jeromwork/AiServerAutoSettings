@@ -9,9 +9,10 @@ import (
 	"os/exec"
 	"os/user"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"remoteagents/internal/api"
 )
@@ -31,13 +32,6 @@ func (m *manager) setupCmd(cmd *exec.Cmd, s api.ProcSpec) error {
 	cmd.SysProcAttr.Setpgid = true
 	// Each managed process owns its group; Stop must preserve siblings.
 	cmd.SysProcAttr.Pgid = 0
-	// CommandContext must cancel the group, including descendants which ignore
-	// SIGTERM, rather than killing only the direct child.
-	cmd.Cancel = func() error {
-		p := &proc{cmd: cmd, pid: cmd.Process.Pid}
-		p.killTree()
-		return nil
-	}
 
 	if s.RunAs != "" {
 		u, err := user.Lookup(s.RunAs)
@@ -97,23 +91,30 @@ func (p *proc) hardKill() {
 
 func (m *manager) releaseCmd(_ *exec.Cmd) {}
 
-func processStarted(ctx context.Context, cmd *exec.Cmd) (time.Time, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "/bin/ps", "-p", strconv.Itoa(cmd.Process.Pid), "-o", "lstart=").Output()
+func processStarted(_ context.Context, cmd *exec.Cmd) (time.Time, error) {
+	info, err := unix.SysctlKinfoProc("kern.proc.pid", cmd.Process.Pid)
 	if err != nil {
 		return time.Time{}, err
 	}
-	t, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", strings.TrimSpace(string(out)), time.Local)
-	return t.UTC(), err
+	return time.Unix(info.Proc.P_starttime.Sec, int64(info.Proc.P_starttime.Usec)*1000).UTC(), nil
 }
 
-// Reap descendants of this leader on every exit, without touching siblings.
-func (p *proc) reapExited(_ bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.killOnce.Do(p.hardKill)
-	p.retired = true
+// Darwin has no exported waitid wrapper in x/sys. Observe SZOMB through
+// sysctl without reaping, so PID/PGID cannot be reused before retirement.
+func waitExited(cmd *exec.Cmd) error {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		info, err := unix.SysctlKinfoProc("kern.proc.pid", cmd.Process.Pid)
+		if err != nil {
+			return err
+		}
+		const szomb = 5
+		if info.Proc.P_stat == szomb {
+			return nil
+		}
+		<-ticker.C
+	}
 }
 
 func (p *proc) groupID() int { return p.pid }

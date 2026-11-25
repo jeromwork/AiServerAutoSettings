@@ -131,8 +131,8 @@ func (p *proc) softStop() {
 }
 
 func (p *proc) hardKill() {
-	if p.cmd != nil && p.cmd.Cancel != nil {
-		_ = p.cmd.Cancel()
+	if p.platformKill != nil {
+		_ = p.platformKill()
 	}
 	if p.cmd != nil && p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
@@ -158,9 +158,14 @@ func processStarted(_ context.Context, cmd *exec.Cmd) (time.Time, error) {
 	return time.Unix(0, created.Nanoseconds()).UTC(), nil
 }
 
-func (p *proc) reapExited(_ bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.killOnce.Do(p.hardKill)
-	p.retired = true
+// The os.Process handle keeps the Windows PID reserved until cmd.Wait. Wait on
+// another handle first, then retire CTRL_BREAK and terminate only this Job.
+func waitExited(cmd *exec.Cmd) error {
+	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(cmd.Process.Pid))
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(h)
+	_, err = windows.WaitForSingleObject(h, windows.INFINITE)
+	return err
 }

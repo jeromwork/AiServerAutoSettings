@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"remoteagents/internal/api"
 )
 
@@ -35,13 +37,6 @@ func (m *manager) setupCmd(cmd *exec.Cmd, s api.ProcSpec) error {
 	cmd.SysProcAttr.Setpgid = true
 	// Each managed process owns its group; Stop must preserve siblings.
 	cmd.SysProcAttr.Pgid = 0
-	// CommandContext must cancel the group, including descendants which ignore
-	// SIGTERM, rather than killing only the direct child.
-	cmd.Cancel = func() error {
-		p := &proc{cmd: cmd, pid: cmd.Process.Pid}
-		p.killTree()
-		return nil
-	}
 	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
 
 	if s.RunAs != "" {
@@ -157,12 +152,15 @@ func processStarted(_ context.Context, cmd *exec.Cmd) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("missing boot time")
 }
 
-// Reap descendants of this leader on every exit, without touching siblings.
-func (p *proc) reapExited(_ bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.killOnce.Do(p.hardKill)
-	p.retired = true
+// WNOWAIT leaves the zombie leader reserved until group cleanup and retirement.
+func waitExited(cmd *exec.Cmd) error {
+	var info unix.Siginfo
+	for {
+		err := unix.Waitid(unix.P_PID, cmd.Process.Pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
+		if err != unix.EINTR {
+			return err
+		}
+	}
 }
 
 func (p *proc) groupID() int { return p.pid }
