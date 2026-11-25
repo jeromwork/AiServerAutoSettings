@@ -158,4 +158,9 @@ func processStarted(_ context.Context, cmd *exec.Cmd) (time.Time, error) {
 	return time.Unix(0, created.Nanoseconds()).UTC(), nil
 }
 
-func (p *proc) reapExited(_ bool) { p.killTree() }
+func (p *proc) reapExited(_ bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.killOnce.Do(p.hardKill)
+	p.retired = true
+}
