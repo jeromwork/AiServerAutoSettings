@@ -72,6 +72,12 @@ def main(argv):
         os.makedirs(os.path.join(home, d), exist_ok=True)
     journal.init(os.path.join(home, 'logs'))
 
+    try:
+        if v2config:
+            v2config.protect_existing(home)
+    except Exception as e:
+        journal.log('app', 'acl.failed', {'kind': e.__class__.__name__}, 'права файлов конфига v2 не исправлены')
+
     try:  # вшитые программы: до чтения настроек; ошибка не мешает запуску
         bins.prepare(home, lambda text: journal.log('app', 'bins', {}, text))
     except Exception:

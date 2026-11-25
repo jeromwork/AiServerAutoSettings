@@ -8,7 +8,9 @@
 Режим для сервера: python3 -m ralab.v2config seal <вход.json> <выход.json> | check <файл.json>
 Значения секретов нигде не печатаются и в журнал не пишутся.
 """
-import json, os, re, shutil, sys, time
+import csv, glob, json, os, re, shutil, subprocess, sys, time
+
+from . import journal
 
 try:
     from . import secretbox
@@ -29,6 +31,56 @@ def _dirs(home):
             os.path.join(home, 'private', 'v2'), os.path.join(home, 'private', 'v2.prev'))
 
 
+def _protect(path):
+    """Убрать наследование ACL секретного файла в Windows."""
+    if sys.platform != 'win32':
+        return
+
+    def failed(tool, **data):
+        try:
+            journal.log('v2config', 'acl.failed', dict(data, tool=tool, file=os.fspath(path)))
+        except Exception:
+            pass
+
+    options = dict(timeout=15, creationflags=0x08000000, stdin=subprocess.DEVNULL, capture_output=True)
+    user = os.environ.get('USERNAME', '')
+    try:
+        result = subprocess.run(['whoami', '/user', '/fo', 'csv', '/nh'], **options)
+        if result.returncode:
+            failed('whoami', code=result.returncode)
+        else:
+            row = next(csv.reader(result.stdout.decode('utf-8-sig', 'replace').splitlines()))
+            sid = row[1].strip()
+            if re.fullmatch(r'S-\d+(?:-\d+)+', sid):
+                user = '*' + sid
+            else:
+                failed('whoami', reason='invalid SID')
+    except Exception as e:
+        failed('whoami', kind=e.__class__.__name__)
+    try:
+        if not user:
+            failed('icacls', reason='no current user')
+            return
+        result = subprocess.run(['icacls', os.fspath(path), '/inheritance:r', '/grant:r',
+                                 '*S-1-5-18:F', '*S-1-5-32-544:F', user + ':F'], **options)
+        if result.returncode:
+            failed('icacls', code=result.returncode)
+    except Exception as e:
+        failed('icacls', kind=e.__class__.__name__)
+
+
+def protect_existing(home):
+    """Исправить права секретных файлов, записанных прежними версиями."""
+    if sys.platform != 'win32':
+        return
+    active, prev, v2, _ = _dirs(home)
+    paths = [os.path.join(v2, 'id_key'), os.path.join(v2, 'channel.json'), active, prev]
+    paths += glob.glob(os.path.join(v2, 'secrets', 'entries', '*.json'))
+    for path in paths:
+        if os.path.isfile(path):
+            _protect(path)
+
+
 def _write(path, text, secret=False):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + '.tmp'
@@ -44,6 +96,8 @@ def _write(path, text, secret=False):
     except OSError:
         _rm(tmp)
         raise
+    if secret:
+        _protect(path)
 
 
 def _write_bytes(path, data):
