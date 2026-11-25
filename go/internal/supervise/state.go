@@ -13,11 +13,13 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"remoteagents/internal/api"
 )
 
 var versionName = regexp.MustCompile(api.VersionRe)
+var errPendingInvalid = errors.New("supervise: pending-invalid: invalid candidate")
 
 type slotState struct {
 	Current        string `json:"current"`
@@ -134,7 +136,118 @@ func loadSlots(ctx context.Context, p api.Paths, self, embeddedVersion string, r
 		s.FailsBoot = 0
 		s.MemRestarts = 0
 	}
+	// Damaged counters must not overflow or bypass the finite restart limits.
+	for _, n := range []*int{&s.FailsGood, &s.FailsBoot, &s.MemRestarts} {
+		if *n < 0 {
+			*n = 0
+		} else if *n > 1000 {
+			*n = 1000
+		}
+	}
 	return s, s.save()
+}
+
+func initialize(ctx context.Context, p api.Paths, self string, mode api.Mode, reset bool) (*slots, error) {
+	unlock, err := lockOperation(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	// Resolve argv[0] before moving any executable. The installed pathname then
+	// refers to the promoted embedded binary; .prev retains its own identity.
+	self, err = exec.LookPath(self)
+	if err != nil {
+		return nil, err
+	}
+	self, err = filepath.Abs(self)
+	if err != nil {
+		return nil, err
+	}
+	if err := rotateSelfUpdate(ctx, p); err != nil {
+		return nil, err
+	}
+	embeddedVersion, err := binaryVersion(ctx, self)
+	if err != nil {
+		return nil, fmt.Errorf("supervise: embedded-version: %w", err)
+	}
+	s, err := loadSlots(ctx, p, self, embeddedVersion, reset)
+	if err != nil {
+		return nil, err
+	}
+	// Only a new supervisor invocation can change mode. Slot/config transitions
+	// use the in-memory value and never read mode from a candidate.
+	if err := writeJSON(filepath.Join(p.State, "mode.json"), mode); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *slots) resetMissing(ctx context.Context) error {
+	unlock, err := lockOperation(ctx, s.p)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if !s.exists(s.embedded) {
+		return fmt.Errorf("supervise: embedded-missing: no executable")
+	}
+	s.Current = s.embedded
+	s.FailsGood, s.FailsBoot, s.MemRestarts = 0, 0, 0
+	s.RollbackReason = ""
+	if !s.exists(s.LastGood) {
+		s.LastGood = ""
+	}
+	if !s.exists(s.PrevGood) {
+		s.PrevGood = ""
+	}
+	return s.save()
+}
+
+func (s *slots) confirmGood(ctx context.Context) error {
+	unlock, err := lockOperation(ctx, s.p)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	s.markGood()
+	if err := s.save(); err != nil {
+		return err
+	}
+	if s.Current != s.embedded {
+		return copyBinary(s.path(s.Current), filepath.Join(s.p.Bin, executableName()+".new"))
+	}
+	return nil
+}
+
+func (s *slots) clearFailures(ctx context.Context) error {
+	unlock, err := lockOperation(ctx, s.p)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	s.FailsGood = 0
+	return s.save()
+}
+
+func lockOperation(ctx context.Context, p api.Paths) (func(), error) {
+	// A core may still hold LockOp while finishing Stage/Apply. Do not lose a
+	// death or good event merely because it raced with that operation.
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		unlock, err := lockFile(filepath.Join(p.State, api.LockOp))
+		if !errors.Is(err, api.ErrBusy) {
+			return unlock, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("supervise: op-lock-timeout: %w", ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // archive preserves an embedded binary as a regular slot before its name is reused.
@@ -160,11 +273,7 @@ func (s *slots) archive(version, src string) error {
 }
 
 func (s *slots) discardSelfUpdate() error {
-	err := os.Remove(filepath.Join(s.p.Bin, executableName()+".new"))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return err
+	return removeFile(filepath.Join(s.p.Bin, executableName()+".new"))
 }
 
 func (s *slots) save() error {
@@ -178,9 +287,9 @@ func (s *slots) markGood() {
 		}
 		s.LastGood = s.Current
 		s.MemRestarts = 0
+		s.RollbackReason = ""
 	}
 	s.FailsBoot = 0
-	s.RollbackReason = ""
 }
 
 func (s *slots) pending() (string, error) {
@@ -195,16 +304,16 @@ func (s *slots) pending() (string, error) {
 	var v struct {
 		Dir string `json:"dir"`
 	}
-	if err := json.Unmarshal(b, &v); err != nil || !s.exists(v.Dir) {
-		return "", fmt.Errorf("supervise: pending-invalid: invalid candidate")
+	if err := json.Unmarshal(b, &v); err != nil || !versionName.MatchString(v.Dir) {
+		return "", errPendingInvalid
 	}
 	return v.Dir, nil
 }
 
-func (s *slots) transition(code int, silence, rollback bool, reason string) error {
+func (s *slots) transition(ctx context.Context, code int, silence, rollback bool, reason string) error {
 	// Serialize manual/automatic rollback and pending-slot promotion with Stage
 	// and uninstall. A failed lock must leave both memory and disk unchanged.
-	unlock, err := lockFile(filepath.Join(s.p.State, api.LockOp))
+	unlock, err := lockOperation(ctx, s.p)
 	if err != nil {
 		return fmt.Errorf("supervise: op-lock: %w", err)
 	}
@@ -223,6 +332,9 @@ func (s *slots) transition(code int, silence, rollback bool, reason string) erro
 			if err := s.discardSelfUpdate(); err != nil {
 				return err
 			}
+			if err := s.removePending(); err != nil {
+				return err
+			}
 			s.Current = next
 			s.RollbackReason = reason
 			s.FailsGood = 0
@@ -231,7 +343,10 @@ func (s *slots) transition(code int, silence, rollback bool, reason string) erro
 			return s.save()
 		}
 		next, err := s.pending()
-		if err == nil && next != "" && next != s.Current {
+		if err != nil && !errors.Is(err, errPendingInvalid) {
+			return err
+		}
+		if err == nil && next != "" && next != s.Current && s.exists(next) {
 			s.Current = next
 			s.FailsGood = 0
 			s.FailsBoot = 0
@@ -240,8 +355,10 @@ func (s *slots) transition(code int, silence, rollback bool, reason string) erro
 			if err := s.save(); err != nil {
 				return err
 			}
-			_ = os.Remove(filepath.Join(s.p.Versions, "pending.json"))
-			return nil
+			return s.removePending()
+		}
+		if err := s.removePending(); err != nil {
+			return err
 		}
 		if s.Current == s.LastGood {
 			return s.save()
@@ -287,6 +404,10 @@ func (s *slots) transition(code int, silence, rollback bool, reason string) erro
 	return s.save()
 }
 
+func (s *slots) removePending() error {
+	return removeFile(filepath.Join(s.p.Versions, "pending.json"))
+}
+
 func (s *slots) prune() error {
 	// Keep the pending snapshot valid until deletion finishes: Stage and
 	// pending-slot promotion use the same operation lock.
@@ -297,7 +418,7 @@ func (s *slots) prune() error {
 	defer unlock()
 
 	pending, err := s.pending()
-	if err != nil {
+	if err != nil && !errors.Is(err, errPendingInvalid) {
 		return err
 	}
 	entries, err := os.ReadDir(s.p.Versions)

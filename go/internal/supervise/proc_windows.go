@@ -11,7 +11,8 @@ import (
 )
 
 func setSysProcAttr(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+	// Attach the Job before any user code can spawn children or exit.
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_SUSPENDED}
 }
 
 func stopProcessGroup(cmd *exec.Cmd) {
@@ -43,6 +44,9 @@ func attachProcess(cmd *exec.Cmd) (func(), error) {
 			_ = windows.CloseHandle(process)
 		}
 	}
+	if err == nil {
+		err = resumeProcess(cmd.Process.Pid)
+	}
 	if err != nil {
 		_ = windows.CloseHandle(job)
 		return nil, err
@@ -50,12 +54,35 @@ func attachProcess(cmd *exec.Cmd) (func(), error) {
 	return func() { _ = windows.CloseHandle(job) }, nil
 }
 
+func resumeProcess(pid int) error {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(snapshot) }()
+	entry := windows.ThreadEntry32{}
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	for err = windows.Thread32First(snapshot, &entry); err == nil; err = windows.Thread32Next(snapshot, &entry) {
+		if entry.OwnerProcessID != uint32(pid) {
+			continue
+		}
+		thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
+		if err != nil {
+			return err
+		}
+		_, err = windows.ResumeThread(thread)
+		_ = windows.CloseHandle(thread)
+		return err
+	}
+	return err
+}
+
 func processStarted(cmd *exec.Cmd) (time.Time, error) {
 	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(cmd.Process.Pid))
 	if err != nil {
 		return time.Time{}, err
 	}
-	defer windows.CloseHandle(process)
+	defer func() { _ = windows.CloseHandle(process) }()
 	var created, exited, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(process, &created, &exited, &kernel, &user); err != nil {
 		return time.Time{}, err

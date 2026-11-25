@@ -2,6 +2,7 @@ package supervise
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"time"
@@ -15,6 +16,7 @@ func NewSimulationProcs() api.Procs { return &simProcs{} }
 type simProcs struct{}
 type simProcess struct {
 	cmd     *exec.Cmd
+	tree    *commandTree
 	done    chan struct{}
 	started time.Time
 	code    int
@@ -23,26 +25,28 @@ type simProcess struct {
 func (*simProcs) Start(ctx context.Context, spec api.ProcSpec) (api.Process, error) {
 	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
 	cmd.Dir, cmd.Stdout, cmd.Stderr = spec.Dir, spec.Stdout, spec.Stderr
-	cmd.WaitDelay = time.Second
-	setSysProcAttr(cmd)
-	cmd.Cancel = func() error { killProcessGroup(cmd); return cmd.Process.Kill() }
+	tree := prepareCommand(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	release, err := attachProcess(cmd)
+	err := tree.attach(cmd)
 	if err != nil {
-		killProcessGroup(cmd)
+		tree.kill(cmd)
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return nil, err
 	}
-	p := &simProcess{cmd: cmd, done: make(chan struct{}), started: time.Now()}
+	p := &simProcess{cmd: cmd, tree: tree, done: make(chan struct{}), started: time.Now()}
 	go func() {
-		if cmd.Wait() != nil {
-			p.code = 1
+		if err := cmd.Wait(); err != nil {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				p.code = exit.ExitCode()
+			} else {
+				p.code = 1
+			}
 		}
-		release()
-		killProcessGroup(cmd)
+		tree.kill(cmd)
 		close(p.done)
 	}()
 	return p, nil
@@ -58,7 +62,7 @@ func (p *simProcess) Stop(ctx context.Context) error {
 		return nil
 	default:
 	}
-	killProcessGroup(p.cmd)
+	p.tree.kill(p.cmd)
 	_ = p.cmd.Process.Kill()
 	select {
 	case <-p.done:

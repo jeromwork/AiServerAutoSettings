@@ -37,7 +37,20 @@ func replaceFile(from, to string) error {
 	if err := os.Rename(from, to); err != nil {
 		return err
 	}
-	d, err := os.Open(filepath.Dir(to))
+	return syncParent(to)
+}
+
+func removeFile(path string) error {
+	if err := os.Remove(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return syncParent(path)
+}
+
+func syncParent(path string) error {
+	d, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return err
 	}

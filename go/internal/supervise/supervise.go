@@ -2,6 +2,7 @@ package supervise
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ import (
 
 type execProcess struct {
 	cmd          *exec.Cmd
+	tree         *commandTree
 	started      time.Time
 	done         chan struct{}
 	exitCode     int
@@ -73,7 +75,7 @@ func (p *execProcess) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 
-	killProcessGroup(p.cmd)
+	p.tree.kill(p.cmd)
 	_ = p.cmd.Process.Kill()
 	_ = p.stdoutWriter.Close()
 	_ = p.stderrWriter.Close()
@@ -101,7 +103,10 @@ func startProcess(ctx context.Context, pr api.Procs, log api.Logger, exe string,
 		p, err := pr.Start(ctx, spec)
 		if err == nil {
 			go func() {
-				<-p.Done()
+				select {
+				case <-p.Done():
+				case <-ctx.Done():
+				}
 				_ = stdoutW.Close()
 				_ = stderrW.Close()
 			}()
@@ -132,11 +137,16 @@ func startProcess(ctx context.Context, pr api.Procs, log api.Logger, exe string,
 	}
 
 	cmd := exec.CommandContext(ctx, exe, args...)
-	cmd.WaitDelay = time.Second
+	tree := prepareCommand(cmd)
+	cmd.Cancel = func() error {
+		tree.kill(cmd)
+		_ = stdoutW.Close()
+		_ = stderrW.Close()
+		return cmd.Process.Kill()
+	}
 	cmd.Dir = dir
 	cmd.Stdout = stdoutW
 	cmd.Stderr = stderrW
-	setSysProcAttr(cmd)
 
 	if err := cmd.Start(); err != nil {
 		_ = tr.Done("process", id)
@@ -151,15 +161,12 @@ func startProcess(ctx context.Context, pr api.Procs, log api.Logger, exe string,
 	if traceErr == nil {
 		traceErr = tr.Applied("process", id, map[string]string{"pid": strconv.Itoa(cmd.Process.Pid), "start": started.UTC().Format(time.RFC3339Nano)}, nil)
 	}
-	release, err := attachProcess(cmd)
+	err = tree.attach(cmd)
 	if traceErr != nil {
-		if release != nil {
-			release()
-		}
 		err = traceErr
 	}
 	if err != nil {
-		killProcessGroup(cmd)
+		tree.kill(cmd)
 		_ = cmd.Process.Kill()
 		_ = stdoutR.Close()
 		_ = stderrR.Close()
@@ -172,6 +179,7 @@ func startProcess(ctx context.Context, pr api.Procs, log api.Logger, exe string,
 
 	ep := &execProcess{
 		cmd:          cmd,
+		tree:         tree,
 		started:      started,
 		done:         make(chan struct{}),
 		stdoutWriter: stdoutW,
@@ -180,8 +188,7 @@ func startProcess(ctx context.Context, pr api.Procs, log api.Logger, exe string,
 
 	go func() {
 		err := cmd.Wait()
-		release()
-		killProcessGroup(cmd)
+		tree.kill(cmd)
 		_ = stdoutW.Close()
 		_ = stderrW.Close()
 		ep.mu.Lock()
@@ -206,25 +213,39 @@ func startProcess(ctx context.Context, pr api.Procs, log api.Logger, exe string,
 func rotateSelfUpdate(ctx context.Context, p api.Paths) error {
 	target := filepath.Join(p.Bin, executableName())
 	candidate := target + ".new"
-	if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
+	if st, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {
 		return err
+	} else if !st.Mode().IsRegular() {
+		return fmt.Errorf("supervise: self-update-invalid: candidate is not a regular file")
+	}
+	if _, err := binaryVersion(ctx, candidate); err != nil {
+		return fmt.Errorf("supervise: self-update-version: %w", err)
 	}
 	// Preserve the old embedded under its version before .prev can be replaced.
-	version, err := binaryVersion(ctx, target)
+	source := target
+	previous := target + ".prev"
+	if _, err := os.Lstat(target); errors.Is(err, os.ErrNotExist) {
+		// Resume a rotation interrupted between target -> .prev and .new -> target.
+		source = previous
+	} else if err != nil {
+		return err
+	}
+	version, err := binaryVersion(ctx, source)
 	if err != nil {
 		return fmt.Errorf("supervise: archive-version: %w", err)
 	}
 	archive := &slots{p: p}
-	if err := archive.archive(version, target); err != nil {
+	if err := archive.archive(version, source); err != nil {
 		return err
 	}
 	// Free the installed name: Windows cannot replace a running executable,
 	// but can rename it. Keep that executable as the fallback until promotion.
-	previous := target + ".prev"
-	if err := replaceFile(target, previous); err != nil {
-		return err
+	if source == target {
+		if err := replaceFile(target, previous); err != nil {
+			return err
+		}
 	}
 	if err := replaceFile(candidate, target); err != nil {
 		if restoreErr := replaceFile(previous, target); restoreErr != nil {
@@ -238,31 +259,96 @@ func rotateSelfUpdate(ctx context.Context, p api.Paths) error {
 func binaryVersion(parent context.Context, self string) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, self, "version").Output()
+	cmd := exec.CommandContext(ctx, self, "version")
+	tree := prepareCommand(cmd)
+	// A broken executable must not consume unlimited memory or keep inherited
+	// pipes open beyond the command deadline and WaitDelay.
+	var out versionOutput
+	cmd.Stdout = &out
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	err := tree.attach(cmd)
+	if err != nil {
+		tree.kill(cmd)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return "", err
+	}
+	err = cmd.Wait()
+	tree.kill(cmd)
 	if err != nil {
 		return "", err
 	}
-	v := strings.TrimSpace(string(out))
+	v := strings.TrimSpace(out.String())
 	if !versionName.MatchString(v) {
 		return "", fmt.Errorf("supervise: version: invalid version")
 	}
 	return v, nil
 }
 
-func getEmbeddedVersion(parent context.Context, self string) string {
-	if v, err := binaryVersion(parent, self); err == nil {
-		return v
+type versionOutput struct{ buf bytes.Buffer }
+
+func (b *versionOutput) String() string { return b.buf.String() }
+
+func (b *versionOutput) Write(p []byte) (int, error) {
+	if len(p) > 256-b.buf.Len() {
+		return 0, fmt.Errorf("supervise: version-size: excessive output")
 	}
-	if fi, err := os.Stat(self); err == nil {
-		return fmt.Sprintf("build-%d", fi.ModTime().Unix())
+	return b.buf.Write(p)
+}
+
+// commandTree also closes the Windows Job on cancellation, rather than waiting
+// for inherited stdout/stderr handles to close before terminating descendants.
+type commandTree struct {
+	mu      sync.Mutex
+	release func()
+	killed  bool
+}
+
+func prepareCommand(cmd *exec.Cmd) *commandTree {
+	tree := &commandTree{}
+	setSysProcAttr(cmd)
+	cmd.WaitDelay = time.Second
+	cmd.Cancel = func() error { tree.kill(cmd); return cmd.Process.Kill() }
+	return tree
+}
+
+func (t *commandTree) attach(cmd *exec.Cmd) error {
+	release, err := attachProcess(cmd)
+	if err != nil {
+		return err
 	}
-	return "embedded"
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.release = sync.OnceFunc(release)
+	if t.killed {
+		t.release()
+	}
+	return nil
+}
+
+func (t *commandTree) kill(cmd *exec.Cmd) {
+	t.mu.Lock()
+	t.killed = true
+	if t.release != nil {
+		t.release()
+	}
+	t.mu.Unlock()
+	killProcessGroup(cmd)
 }
 
 func runCleanup(ctx context.Context, p api.Paths, log api.Logger, reason string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	cl, err := cleanup.New(p, log, platform.Current())
 	if err == nil && cl != nil {
-		_ = cl.Run(ctx, reason)
+		if issues := cl.Run(ctx, reason); len(issues) != 0 {
+			log.Warn("supervise: cleanup-incomplete", "issues", issues)
+		}
+	} else if err != nil {
+		log.Warn("supervise: cleanup-unavailable", "err", err)
 	}
 }
 
@@ -287,6 +373,9 @@ func checkSwitchExpire(p api.Paths, log api.Logger) (bool, error) {
 	if err := json.Unmarshal(b, &sw); err != nil {
 		return false, err
 	}
+	if !versionName.MatchString(sw.To) || (sw.From != "" && !versionName.MatchString(sw.From)) {
+		return false, fmt.Errorf("supervise: switch-invalid: invalid generation")
+	}
 	// Commit writes lastgood before removing switch.json. Finish an interrupted
 	// commit before considering expiry, so a confirmed generation is not reverted.
 	lastGood, err := os.ReadFile(filepath.Join(p.Config, "lastgood"))
@@ -294,7 +383,7 @@ func checkSwitchExpire(p api.Paths, log api.Logger) (bool, error) {
 		return false, err
 	}
 	if sw.To != "" && sw.To == strings.TrimSpace(string(lastGood)) {
-		if err := os.Remove(path); err != nil {
+		if err := removeFile(path); err != nil {
 			return false, err
 		}
 		return false, nil
@@ -305,21 +394,15 @@ func checkSwitchExpire(p api.Paths, log api.Logger) (bool, error) {
 	if time.Now().Before(sw.Deadline) {
 		return false, nil
 	}
-	if sw.From != "" && !versionName.MatchString(sw.From) {
-		return false, fmt.Errorf("supervise: switch-invalid: invalid generation")
-	}
 	if sw.From == "" {
-		err = os.Remove(filepath.Join(p.Config, "current"))
-		if errors.Is(err, os.ErrNotExist) {
-			err = nil
-		}
+		err = removeFile(filepath.Join(p.Config, "current"))
 	} else {
 		err = atomicWrite(filepath.Join(p.Config, "current"), []byte(sw.From), 0600)
 	}
 	if err != nil {
 		return false, err
 	}
-	if err = os.Remove(path); err != nil {
+	if err = removeFile(path); err != nil {
 		return false, err
 	}
 	log.Warn("supervise: config switch expired")
@@ -349,43 +432,65 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 	lockPath := filepath.Join(p.State, api.LockRun)
 	unlock, err := lockFile(lockPath)
 	if err != nil {
-		log.Error("supervise: already-running", "path", lockPath, "err", err)
-		return api.SupExitRunning
-	}
-	defer unlock()
-
-	if err := rotateSelfUpdate(ctx, p); err != nil {
-		log.Error("supervise: self-update", "err", err)
+		if errors.Is(err, api.ErrBusy) {
+			log.Error("supervise: already-running", "path", lockPath)
+			return api.SupExitRunning
+		}
+		log.Error("supervise: run-lock", "err", err)
 		return 1
 	}
+	defer unlock()
 
 	reset := false
 	fast := false
 	var coreArgs []string
-	for _, arg := range args {
-		switch arg {
-		case "--reset":
-			reset = true
-		case "--fast":
-			fast = true
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			coreArgs = append(coreArgs, arg)
+			continue
+		}
+		name, value, assigned := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		switch name {
+		case "reset", "fast":
+			on := !assigned || value == "true"
+			if name == "reset" {
+				reset = on
+			} else {
+				fast = on
+			}
+		case "safe", "no-tun", "no-channel", "no-singbox":
+			// The Mode argument is authoritative for every child, including rollback.
+		case "home", "rollback-reason":
+			if !assigned {
+				i++
+			}
 		default:
 			coreArgs = append(coreArgs, arg)
 		}
 	}
 
 	silenceTimeout := time.Duration(api.SilenceUnverifiedSec) * time.Second
+	aliveTimeout := time.Duration(api.SilenceVerifiedSec) * time.Second
 	if fast {
 		silenceTimeout = 3 * time.Second
+		aliveTimeout = 3 * time.Second
 	}
 
-	embeddedVersion := getEmbeddedVersion(ctx, self)
-	s, err := loadSlots(ctx, p, self, embeddedVersion, reset)
+	// Serialize every startup write with Stage, rollback and uninstall, including
+	// executable rotation and the mode fixed for this supervisor's lifetime.
+	s, err := initialize(ctx, p, self, mode, reset)
 	if err != nil {
+		if ctx.Err() != nil {
+			return api.SupExitDone
+		}
 		log.Error("supervise: load slots failed", "err", err)
 		return 1
 	}
 
-	_ = s.prune()
+	if err := s.prune(); err != nil {
+		log.Warn("supervise: prune", "err", err)
+	}
 
 	if s.Stopped != "" {
 		log.Warn(fmt.Sprintf("supervise: stopped: %s", s.Stopped))
@@ -405,13 +510,24 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		}
 
 		if _, err := checkSwitchExpire(p, log); err != nil {
-			log.Warn("supervise: switch-check", "err", err)
+			if errors.Is(err, api.ErrBusy) {
+				select {
+				case <-ctx.Done():
+					return api.SupExitDone
+				case <-time.After(100 * time.Millisecond):
+					continue
+				}
+			}
+			log.Error("supervise: switch-check", "err", err)
+			return 1
 		}
 
 		if !s.exists(s.Current) {
 			log.Warn(fmt.Sprintf("supervise: slot %s missing from disk, resetting to embedded", s.Current))
-			s.Current = s.embedded
-			_ = s.save()
+			if err := s.resetMissing(ctx); err != nil {
+				log.Error("supervise: slot-reset", "err", err)
+				return 1
+			}
 		}
 
 		exe := s.path(s.Current)
@@ -430,25 +546,22 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		if mode.NoSingbox {
 			cmdArgs = append(cmdArgs, "--no-singbox")
 		}
-		for i := 0; i < len(coreArgs); i++ {
-			arg := coreArgs[i]
-			if arg == "--rollback-reason" {
-				i++
-				continue
-			}
-			if strings.HasPrefix(arg, "--rollback-reason=") {
-				continue
-			}
-			cmdArgs = append(cmdArgs, arg)
-		}
+		cmdArgs = append(cmdArgs, coreArgs...)
 		if s.RollbackReason != "" {
 			cmdArgs = append(cmdArgs, "--rollback-reason", s.RollbackReason)
 		}
 
-		proc, stdoutReader, stderrReader, err := startProcess(ctx, pr, log, exe, cmdArgs, p.Home)
+		childCtx, childCancel := context.WithCancel(ctx)
+		proc, stdoutReader, stderrReader, err := startProcess(childCtx, pr, log, exe, cmdArgs, p.Home)
 		if err != nil {
+			childCancel()
+			if ctx.Err() != nil {
+				runCleanup(ctx, p, log, "exit")
+				return api.SupExitDone
+			}
 			log.Error("supervise: failed to start core process", "err", err, "exe", exe)
-			if err := s.transition(1, false, false, "core start failed"); err != nil {
+			runCleanup(ctx, p, log, "crash")
+			if err := s.transition(ctx, 1, false, false, "core start failed"); err != nil {
 				log.Error("supervise: state-write", "err", err)
 				return 1
 			}
@@ -482,6 +595,18 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		}
 		messages := make(chan message, 64)
 		readCtx, readCancel := context.WithCancel(ctx)
+		var protocolErr error
+		stop := func() {
+			stopCtx, stopCancel := context.WithTimeout(ctx, 7*time.Second)
+			defer stopCancel()
+			if err := proc.Stop(stopCtx); err != nil {
+				protocolErr = fmt.Errorf("supervise: core-stop: %w", err)
+				childCancel()
+				readCancel()
+				_ = stdoutReader.Close()
+				_ = stderrReader.Close()
+			}
+		}
 		stdoutDone := make(chan struct{})
 		go func() {
 			defer close(stdoutDone)
@@ -503,25 +628,27 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 				log.Error("supervise: stdout-read", "err", err)
 			}
 		}()
-		var protocolErr error
 		handle := func(msg message) {
+			if silenceFired || configRestart || protocolErr != nil {
+				return
+			}
 			switch msg.T {
 			case api.MsgGood:
+				if msg.Version != s.Current {
+					log.Warn("supervise: good-version-mismatch")
+					return
+				}
 				if !goodSeen {
 					goodSeen = true
 					startTime = time.Now()
-					s.markGood()
-					protocolErr = s.save()
-					if s.Current != s.embedded && protocolErr == nil {
-						protocolErr = copyBinary(s.path(s.Current), filepath.Join(p.Bin, executableName()+".new"))
-					}
+					protocolErr = s.confirmGood(ctx)
 					log.Info("supervise: good", "version", msg.Version)
+					lastSignalTime = time.Now()
 				}
-				lastSignalTime = time.Now()
 			case api.MsgAlive:
 				lastSignalTime = time.Now()
 			case api.MsgExit:
-				exitFinal = msg.Final
+				exitFinal = exitFinal || msg.Final
 			case api.MsgRollback:
 				rollbackMsg = true
 				rollbackReasonStr = msg.Reason
@@ -541,11 +668,27 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 				log.Error("supervise: stderr-read", "err", err)
 			}
 		}()
-		// Readers are closed after every child, including descendants retaining pipes.
+		// Allow EOF and buffered protocol messages to drain after exit. A producer
+		// retaining pipes cannot keep these readers alive indefinitely.
+		readersDone := make(chan struct{})
 		go func() {
+			defer close(readersDone)
 			select {
 			case <-proc.Done():
+				timer := time.NewTimer(time.Second)
+				defer timer.Stop()
+				select {
+				case <-stdoutDone:
+					select {
+					case <-stderrDone:
+					case <-timer.C:
+					case <-readCtx.Done():
+					}
+				case <-timer.C:
+				case <-readCtx.Done():
+				}
 			case <-ctx.Done():
+			case <-readCtx.Done():
 			}
 			_ = stderrReader.Close()
 			_ = stdoutReader.Close()
@@ -564,6 +707,10 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 			case msg, ok := <-messages:
 				if ok {
 					handle(msg)
+					if protocolErr != nil {
+						stop()
+						break processLoop
+					}
 				} else {
 					messages = nil
 				}
@@ -571,13 +718,15 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 				break processLoop
 			case <-ctx.Done():
 				ticker.Stop()
-				_ = proc.Stop(ctx)
+				stop()
+				childCancel()
 				readCancel()
 				_ = stdoutReader.Close()
 				_ = stderrReader.Close()
 				<-stdoutDone
 				<-stderrDone
-				runCleanup(context.WithoutCancel(ctx), p, log, "exit")
+				<-readersDone
+				runCleanup(ctx, p, log, "exit")
 				return api.SupExitDone
 			case <-ticker.C:
 				now := time.Now()
@@ -585,30 +734,39 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 					if now.Sub(startTime) > silenceTimeout {
 						silenceFired = true
 						log.Warn(fmt.Sprintf("тишина %d с: версия %s не прислала good за %d с", int(silenceTimeout.Seconds()), s.Current, int(silenceTimeout.Seconds())))
-						_ = proc.Stop(ctx)
+						stop()
 						break processLoop
 					}
 				} else {
-					if now.Sub(lastSignalTime) > silenceTimeout {
+					if now.Sub(lastSignalTime) > aliveTimeout {
 						silenceFired = true
-						log.Warn(fmt.Sprintf("тишина %d с: версия %s не прислала alive за %d с", int(silenceTimeout.Seconds()), s.Current, int(silenceTimeout.Seconds())))
-						_ = proc.Stop(ctx)
+						log.Warn(fmt.Sprintf("тишина %d с: версия %s не прислала alive за %d с", int(aliveTimeout.Seconds()), s.Current, int(aliveTimeout.Seconds())))
+						stop()
 						break processLoop
 					}
 				}
 
 				if goodSeen && !ranLong && now.Sub(startTime) >= time.Duration(api.LongRunSec)*time.Second {
 					ranLong = true
-					s.FailsGood = 0
-					_ = s.save()
+					protocolErr = s.clearFailures(ctx)
+					if protocolErr != nil {
+						stop()
+						break processLoop
+					}
 				}
 
 				switchTick++
 				if fast || switchTick%5 == 0 {
-					if expired, _ := checkSwitchExpire(p, log); expired {
+					expired, err := checkSwitchExpire(p, log)
+					if err != nil && !errors.Is(err, api.ErrBusy) {
+						protocolErr = err
+						stop()
+						break processLoop
+					}
+					if expired {
 						configRestart = true
 						log.Warn("supervise: config switch deadline expired, stopping core for restart")
-						_ = proc.Stop(ctx)
+						stop()
 						break processLoop
 					}
 				}
@@ -625,14 +783,23 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		readCancel()
 		_ = stdoutReader.Close()
 		<-stderrDone
+		<-readersDone
+		childCancel()
+		if ctx.Err() != nil {
+			runCleanup(ctx, p, log, "exit")
+			return api.SupExitDone
+		}
+		if goodSeen && !ranLong && time.Since(startTime) >= time.Duration(api.LongRunSec)*time.Second && protocolErr == nil {
+			protocolErr = s.clearFailures(ctx)
+		}
 		if protocolErr != nil {
-			runCleanup(context.WithoutCancel(ctx), p, log, "crash")
+			runCleanup(ctx, p, log, "crash")
 			log.Error("supervise: state-write", "err", protocolErr)
 			return 1
 		}
 		exitCode := proc.ExitCode()
 
-		if exitFinal && exitCode == api.ExitOK {
+		if !silenceFired && !configRestart && exitFinal && exitCode == api.ExitOK {
 			runCleanup(ctx, p, log, "exit")
 			log.Info("supervise: final exit requested by core")
 			return api.SupExitDone
@@ -645,8 +812,12 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 
 		var reason string
 		if silenceFired {
-			reason = fmt.Sprintf("version %s did not bring the channel up in %d s", s.Current, int(silenceTimeout.Seconds()))
-		} else if rollbackMsg {
+			if s.Current == s.LastGood {
+				reason = fmt.Sprintf("version %s did not send alive in %d s", s.Current, int(aliveTimeout.Seconds()))
+			} else {
+				reason = fmt.Sprintf("version %s did not bring the channel up in %d s", s.Current, int(silenceTimeout.Seconds()))
+			}
+		} else if rollbackMsg && exitCode == api.ExitRestart {
 			reason = rollbackReasonStr
 		} else if exitCode == api.ExitOK {
 			reason = fmt.Sprintf("version %s exited with code 0 unrequested", s.Current)
@@ -658,7 +829,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		prevLastGood := s.LastGood
 		unverifiedBefore := (s.Current != s.LastGood)
 
-		if err := s.transition(exitCode, silenceFired, rollbackMsg, reason); err != nil {
+		if err := s.transition(ctx, exitCode, silenceFired, rollbackMsg, reason); err != nil {
 			log.Error("supervise: transition error", "err", err)
 			return 1
 		}
@@ -671,6 +842,8 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 			return api.SupExitDone
 		}
 
-		_ = s.prune()
+		if err := s.prune(); err != nil {
+			log.Warn("supervise: prune", "err", err)
+		}
 	}
 }
