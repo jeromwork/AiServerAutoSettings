@@ -10,7 +10,7 @@ import (
 )
 
 // RunAutostartDev only writes a temporary specification; it never installs it.
-func RunAutostartDev(ctx context.Context, args []string) int {
+func RunAutostartDev(ctx context.Context, args []string) (code int) {
 	if len(args) != 2 || args[0] != "autostart" || args[1] != runtime.GOOS {
 		fmt.Fprintln(os.Stderr, "usage: dev platform autostart "+runtime.GOOS)
 		return 2
@@ -25,7 +25,12 @@ func RunAutostartDev(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	defer os.RemoveAll(dir)
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			code = 1
+		}
+	}()
 	spec := Current().Autostart(bin, filepath.Join(dir, "home"), "12345678")
 	path := filepath.Join(dir, filepath.Base(spec.Path))
 	if err := os.WriteFile(path, []byte(spec.Content), 0600); err != nil {
