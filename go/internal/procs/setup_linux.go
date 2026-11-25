@@ -20,23 +20,12 @@ import (
 	"remoteagents/internal/api"
 )
 
-type platformState struct {
-	releases *sync.Map
-}
-
-func newPlatformState() (platformState, error) {
-	return platformState{releases: &sync.Map{}}, nil
-}
-
-func (m *manager) terminatePlatform() {}
-
 func (m *manager) setupCmd(cmd *exec.Cmd, s api.ProcSpec) error {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
-	// Each managed process owns its group; Stop must preserve siblings.
-	cmd.SysProcAttr.Pgid = 0
+	cmd.SysProcAttr.Pgid = m.platform.pgid
 	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
 
 	if s.RunAs != "" {
@@ -95,61 +84,80 @@ func (m *manager) startCmd(cmd *exec.Cmd, _ context.Context) error {
 
 func (m *manager) postStart(_ *exec.Cmd) error { return nil }
 
-func (p *proc) softStop() {
-	if p.pid > 0 {
-		_ = syscall.Kill(-p.groupID(), syscall.SIGTERM)
-	}
-}
-
-func (p *proc) hardKill() {
-	if p.pid > 0 {
-		_ = syscall.Kill(-p.groupID(), syscall.SIGKILL)
-	}
-	if p.cmd != nil && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-	}
-}
-
 func (m *manager) releaseCmd(cmd *exec.Cmd) {
 	if v, ok := m.platform.releases.LoadAndDelete(cmd); ok {
 		close(v.(chan struct{}))
 	}
 }
 
-// processStarted uses the kernel birth time rather than the time Start returned.
-// Linux exports process starttime in USER_HZ (100 ticks per second).
-func processStarted(_ context.Context, cmd *exec.Cmd) (time.Time, error) {
-	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", cmd.Process.Pid))
-	if err != nil {
-		return time.Time{}, err
-	}
-	end := strings.LastIndexByte(string(stat), ')')
-	if end < 0 {
-		return time.Time{}, fmt.Errorf("invalid process stat")
-	}
-	fields := strings.Fields(string(stat[end+1:]))
-	if len(fields) < 20 {
-		return time.Time{}, fmt.Errorf("short process stat")
-	}
-	ticks, err := strconv.ParseInt(fields[19], 10, 64)
-	if err != nil {
-		return time.Time{}, err
-	}
+// Linux exports process birth time in USER_HZ (100 ticks per second).
+var bootTime = sync.OnceValues(func() (int64, error) {
 	system, err := os.ReadFile("/proc/stat")
 	if err != nil {
-		return time.Time{}, err
+		return 0, err
 	}
 	for _, line := range strings.Split(string(system), "\n") {
 		f := strings.Fields(line)
 		if len(f) == 2 && f[0] == "btime" {
-			boot, err := strconv.ParseInt(f[1], 10, 64)
-			if err != nil {
-				return time.Time{}, err
-			}
-			return time.Unix(boot+ticks/100, (ticks%100)*10000000).UTC(), nil
+			return strconv.ParseInt(f[1], 10, 64)
 		}
 	}
-	return time.Time{}, fmt.Errorf("missing boot time")
+	return 0, fmt.Errorf("missing boot time")
+})
+
+func inspectProcess(pid int) (processIdentity, error) {
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return processIdentity{}, err
+	}
+	end := strings.LastIndexByte(string(stat), ')')
+	if end < 0 {
+		return processIdentity{}, fmt.Errorf("invalid process stat")
+	}
+	fields := strings.Fields(string(stat[end+1:]))
+	if len(fields) < 50 {
+		return processIdentity{}, fmt.Errorf("short process stat")
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return processIdentity{}, err
+	}
+	ticks, err := strconv.ParseInt(fields[19], 10, 64)
+	if err != nil {
+		return processIdentity{}, err
+	}
+	status, err := strconv.Atoi(fields[49])
+	if err != nil {
+		return processIdentity{}, err
+	}
+	boot, err := bootTime()
+	if err != nil {
+		return processIdentity{}, err
+	}
+	return processIdentity{pid: pid, ppid: ppid, status: status,
+		live:    fields[0] != "Z" && fields[0] != "X",
+		started: time.Unix(boot+ticks/100, (ticks%100)*10000000).UTC()}, nil
+}
+
+func processStarted(_ context.Context, cmd *exec.Cmd) (time.Time, error) {
+	identity, err := inspectProcess(cmd.Process.Pid)
+	return identity.started, err
+}
+
+func processTable() []processIdentity {
+	entries, _ := os.ReadDir("/proc")
+	var table []processIdentity
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		identity, err := inspectProcess(pid)
+		if err == nil {
+			table = append(table, identity)
+		}
+	}
+	return table
 }
 
 // WNOWAIT leaves the zombie leader reserved until group cleanup and retirement.
@@ -162,5 +170,3 @@ func waitExited(cmd *exec.Cmd) error {
 		}
 	}
 }
-
-func (p *proc) groupID() int { return p.pid }

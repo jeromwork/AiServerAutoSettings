@@ -169,3 +169,18 @@ func waitExited(cmd *exec.Cmd) error {
 	_, err = windows.WaitForSingleObject(h, windows.INFINITE)
 	return err
 }
+
+func (m *manager) publishCmd(_ *exec.Cmd) {}
+
+func (m *manager) collectCmd(cmd *exec.Cmd) int {
+	_ = cmd.Wait()
+	m.releaseCmd(cmd)
+	if cmd.ProcessState != nil {
+		return cmd.ProcessState.ExitCode()
+	}
+	return -1
+}
+
+func (m *manager) reapLeader(_ *exec.Cmd) {}
+
+func (p *proc) cleanupExited() { p.killOnce.Do(p.hardKill) }
