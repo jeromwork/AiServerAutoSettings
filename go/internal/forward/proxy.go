@@ -33,10 +33,25 @@ func (rc *readerConn) CloseWrite() error {
 	return rc.Close()
 }
 
-func pipe(c1, c2 net.Conn) {
+func pipe(ctx context.Context, c1, c2 net.Conn) {
+	stop := context.AfterFunc(ctx, func() { _ = c1.Close(); _ = c2.Close() })
+	defer stop()
+	defer func() { _ = c1.Close(); _ = c2.Close() }()
 	var wg sync.WaitGroup
 	wg.Add(2)
-	cp := func(dst, src net.Conn) { defer wg.Done(); _, _ = io.Copy(dst, src); _ = c1.Close(); _ = c2.Close() }
+	cp := func(dst, src net.Conn) {
+		defer wg.Done()
+		if _, err := io.Copy(dst, src); err != nil {
+			_ = c1.Close()
+			_ = c2.Close()
+			return
+		}
+		if cw, ok := dst.(closeWriter); ok {
+			_ = cw.CloseWrite()
+		} else {
+			_ = dst.Close()
+		}
+	}
 	go cp(c1, c2)
 	go cp(c2, c1)
 	wg.Wait()
@@ -128,13 +143,15 @@ func serveSOCKS5(ctx context.Context, r io.Reader, conn net.Conn, dialer func(ct
 		_, _ = conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // Connection refused
 		return
 	}
+	stop := context.AfterFunc(ctx, func() { _ = up.Close() })
+	defer stop()
 	defer func() { _ = up.Close() }()
 
 	if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 		return
 	}
 
-	pipe(&readerConn{Conn: conn, r: r}, up)
+	pipe(ctx, &readerConn{Conn: conn, r: r}, up)
 }
 
 func serveDualProxy(ctx context.Context, conn net.Conn, pacBytes []byte, dialer func(ctx context.Context, target string) (net.Conn, error)) {
@@ -180,13 +197,15 @@ func serveDualProxy(ctx context.Context, conn net.Conn, pacBytes []byte, dialer 
 			_, _ = conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
 			return
 		}
+		stop := context.AfterFunc(ctx, func() { _ = up.Close() })
+		defer stop()
 		defer func() { _ = up.Close() }()
 
 		if _, err := conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); err != nil {
 			return
 		}
 
-		pipe(&readerConn{Conn: conn, r: br}, up)
+		pipe(ctx, &readerConn{Conn: conn, r: br}, up)
 		return
 	}
 
@@ -212,6 +231,8 @@ func serveDualProxy(ctx context.Context, conn net.Conn, pacBytes []byte, dialer 
 		_, _ = conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
 		return
 	}
+	stop := context.AfterFunc(ctx, func() { _ = up.Close() })
+	defer stop()
 	defer func() { _ = up.Close() }()
 
 	req.Header.Del("Proxy-Connection")
@@ -223,5 +244,5 @@ func serveDualProxy(ctx context.Context, conn net.Conn, pacBytes []byte, dialer 
 		return
 	}
 
-	pipe(&readerConn{Conn: conn, r: br}, up)
+	pipe(ctx, &readerConn{Conn: conn, r: br}, up)
 }

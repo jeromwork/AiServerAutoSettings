@@ -675,7 +675,7 @@ func (f *Forwarder) serveForwardConn(entry *listenerEntry, toHost string, toPort
 
 			f.registerChConn(c, up)
 			defer f.unregisterConn(up)
-			pipe(c, up)
+			pipe(f.ctx, c, up)
 		}(conn)
 	}
 }
@@ -912,3 +912,11 @@ type trackedConn struct {
 }
 
 func (c *trackedConn) Close() error { c.f.unregisterConn(c.Conn); return c.Conn.Close() }
+
+// Preserve TCP half-close through the connection tracking wrapper.
+func (c *trackedConn) CloseWrite() error {
+	if cw, ok := c.Conn.(closeWriter); ok {
+		return cw.CloseWrite()
+	}
+	return c.Close()
+}
