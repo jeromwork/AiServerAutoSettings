@@ -1,15 +1,18 @@
 package procs
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -124,11 +127,8 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		stderrCloser = w
 	}
 
-	if s.Stdin != nil {
-		cmd.Stdin = s.Stdin
-	}
-
-	if err := m.setupCmd(cmd, s); err != nil {
+	closeInput, err := prepareStdin(cmd, s.Stdin)
+	if err != nil {
 		if stdoutCloser != nil {
 			_ = stdoutCloser.Close()
 		}
@@ -137,6 +137,25 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		}
 		if m.tr != nil {
 			_ = m.tr.Done("process", traceID)
+		}
+		return nil, fmt.Errorf("procs: stdin-failed: %w", err)
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			closeInput()
+			if m.tr != nil {
+				_ = m.tr.Done("process", traceID)
+			}
+		}
+	}()
+
+	if err := m.setupCmd(cmd, s); err != nil {
+		if stdoutCloser != nil {
+			_ = stdoutCloser.Close()
+		}
+		if stderrCloser != nil {
+			_ = stderrCloser.Close()
 		}
 		return nil, fmt.Errorf("procs: setup-failed: %w", err)
 	}
@@ -148,9 +167,6 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		}
 		if stderrCloser != nil {
 			_ = stderrCloser.Close()
-		}
-		if m.tr != nil {
-			_ = m.tr.Done("process", traceID)
 		}
 		return nil, fmt.Errorf("procs: start-failed: %w", err)
 	}
@@ -215,9 +231,11 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 	}
 
 	m.procs[pid] = p
+	handedOff = true
 
 	go func() {
 		err := cmd.Wait()
+		closeInput()
 		// Reap descendants even when the group leader exits first.
 		p.hardKill()
 		m.releaseCmd(cmd)
@@ -332,4 +350,45 @@ func (p *proc) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return fmt.Errorf("procs: stop-canceled: %w", ctx.Err())
 	}
+}
+
+// prepareStdin keeps exec.Wait independent of a potentially blocked input Read.
+// Files are borrowed directly. Other streams transfer ownership and must unblock
+// Read when Close is called; memory readers need no cancellation. An arbitrary
+// io.Reader has no cancellation operation and cannot safely be pumped here.
+func prepareStdin(cmd *exec.Cmd, input io.Reader) (func(), error) {
+	noop := func() {}
+	if input == nil {
+		return noop, nil
+	}
+	if file, ok := input.(*os.File); ok {
+		cmd.Stdin = file
+		return noop, nil
+	}
+	var source io.ReadCloser
+	switch r := input.(type) {
+	case io.ReadCloser:
+		source = r
+	case *bytes.Buffer, *bytes.Reader, *strings.Reader:
+		source = io.NopCloser(r)
+	default:
+		return nil, fmt.Errorf("stdin must be a file, memory reader, or ReadCloser whose Close interrupts Read")
+	}
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stdin = readEnd
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = io.Copy(writeEnd, source)
+		_ = writeEnd.Close()
+	}()
+	return func() {
+		_ = readEnd.Close()
+		_ = writeEnd.Close()
+		_ = source.Close()
+		<-done
+	}, nil
 }
