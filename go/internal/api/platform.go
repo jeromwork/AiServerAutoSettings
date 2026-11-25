@@ -1,15 +1,5 @@
 package api
 
-type AutostartSpec struct {
-	Kind    string   // schtasks | systemd | launchd
-	Path    string   // путь файла задания/unit/plist
-	Content string   // текст (для schtasks — XML задачи)
-	Install []string // argv
-	Remove  []string // argv
-	Enable  []string // argv включить (без запуска)
-	Disable []string // argv выключить
-}
-
 type Iface struct {
 	Name         string
 	Up           bool
@@ -24,7 +14,6 @@ type Platform interface {
 	IsAdmin() bool
 	NewShell(log Logger, pr Procs) Shell
 	OpenBrowser(url string) error
-	Autostart(binPath, home string, inst8 string) AutostartSpec
 	Interfaces() ([]Iface, error)
 }
 
