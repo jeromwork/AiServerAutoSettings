@@ -7,15 +7,16 @@ import (
 )
 
 type ProcSpec struct {
-	Name   string
-	Path   string
-	Args   []string
-	Dir    string
-	Env    []string
-	Stream string    // поток журнала, если Stdout/Stderr == nil
-	Stdin  io.Reader // nil — пусто
-	Stdout io.Writer // nil — в журнал Stream
-	Stderr io.Writer
+	Name    string
+	Path    string
+	Args    []string
+	CmdLine string // Windows: готовая командная строка вместо Args (как v2 `cmd.exe /d /s /c "..."`); на других ОС игнорируется
+	Dir     string
+	Env     []string
+	Stream  string    // поток журнала, если Stdout/Stderr == nil
+	Stdin   io.Reader // nil — пусто
+	Stdout  io.Writer // nil — в журнал Stream
+	Stderr  io.Writer
 }
 
 type Process interface {

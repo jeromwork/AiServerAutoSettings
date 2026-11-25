@@ -53,6 +53,7 @@ func (m *manager) Start(_ context.Context, s api.ProcSpec) (api.Process, error) 
 	if p.basket, err = newBasket(cmd); err != nil {
 		return nil, err
 	}
+	setCmdLine(cmd, s.CmdLine)
 	ready := make(chan error, 1)
 	go func() {
 		if runtime.GOOS == "linux" { // Pdeathsig is tied to the thread that started the child
