@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"remoteagents/internal/api"
 	"remoteagents/internal/supervise"
@@ -158,7 +160,7 @@ func runDevSupervise(ctx context.Context, args []string) int {
 	if fast {
 		superArgs1 = append(superArgs1, "--fast")
 	}
-	if code := supervise.Run(ctx, p1, logger, nil, self1, api.Mode{Safe: true}, superArgs1); code != api.SupExitDone {
+	if code := supervise.Run(ctx, p1, logger, &simProcs{}, self1, api.Mode{Safe: true}, superArgs1); code != api.SupExitDone {
 		fmt.Fprintf(os.Stderr, "scenario 1 returned code %d, expected %d\n", code, api.SupExitDone)
 		return 1
 	}
@@ -195,7 +197,7 @@ func runDevSupervise(ctx context.Context, args []string) int {
 	if fast {
 		superArgs2 = append(superArgs2, "--fast")
 	}
-	if code := supervise.Run(ctx, p2, logger, nil, self2, api.Mode{Safe: true}, superArgs2); code != api.SupExitDone {
+	if code := supervise.Run(ctx, p2, logger, &simProcs{}, self2, api.Mode{Safe: true}, superArgs2); code != api.SupExitDone {
 		fmt.Fprintf(os.Stderr, "scenario 2 returned code %d, expected %d\n", code, api.SupExitDone)
 		return 1
 	}
@@ -233,11 +235,58 @@ func runDevSupervise(ctx context.Context, args []string) int {
 
 	// For test speed, scenario 3 always uses fast unless caller explicitly passed another home without fast
 	superArgs3 := []string{"--home", home3, "--fast"}
-	if code := supervise.Run(ctx, p3, logger, nil, self3, api.Mode{Safe: true}, superArgs3); code != api.SupExitDone {
+	if code := supervise.Run(ctx, p3, logger, &simProcs{}, self3, api.Mode{Safe: true}, superArgs3); code != api.SupExitDone {
 		fmt.Fprintf(os.Stderr, "scenario 3 returned code %d, expected %d\n", code, api.SupExitDone)
 		return 1
 	}
 
 	fmt.Println("=== ALL SUPERVISE SIMULATIONS OK ===")
 	return 0
+}
+
+// simProcs is confined to the driver and runs only its temporary slot scripts.
+type simProcs struct{}
+type simProcess struct {
+	cmd     *exec.Cmd
+	done    chan struct{}
+	started time.Time
+	code    int
+}
+
+func (*simProcs) Start(ctx context.Context, spec api.ProcSpec) (api.Process, error) {
+	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
+	cmd.Dir, cmd.Stdout, cmd.Stderr = spec.Dir, spec.Stdout, spec.Stderr
+	cmd.WaitDelay = time.Second
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	p := &simProcess{cmd: cmd, done: make(chan struct{}), started: time.Now()}
+	go func() {
+		if cmd.Wait() != nil {
+			p.code = 1
+		}
+		close(p.done)
+	}()
+	return p, nil
+}
+func (*simProcs) KillAll(context.Context) error { return nil }
+func (p *simProcess) PID() int                  { return p.cmd.Process.Pid }
+func (p *simProcess) Started() time.Time        { return p.started }
+func (p *simProcess) Done() <-chan struct{}     { return p.done }
+func (p *simProcess) ExitCode() int             { <-p.done; return p.code }
+func (p *simProcess) Stop(ctx context.Context) error {
+	select {
+	case <-p.done:
+		return nil
+	default:
+	}
+	_ = p.cmd.Process.Kill()
+	select {
+	case <-p.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(2 * time.Second):
+		return fmt.Errorf("sim: stop-timeout")
+	}
 }

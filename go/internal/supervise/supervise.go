@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +72,11 @@ func (p *execProcess) ExitCode() int {
 }
 
 func (p *execProcess) Stop(ctx context.Context) error {
+	select {
+	case <-p.done:
+		return nil
+	default:
+	}
 	if p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
@@ -87,8 +93,14 @@ func (p *execProcess) Stop(ctx context.Context) error {
 
 	killProcessGroup(p.cmd)
 	_ = p.cmd.Process.Kill()
-	<-p.done
-	return nil
+	_ = p.stdoutWriter.Close()
+	_ = p.stderrWriter.Close()
+	select {
+	case <-p.done:
+		return nil
+	case <-time.After(2 * time.Second):
+		return fmt.Errorf("supervise: stop-timeout: process did not exit")
+	}
 }
 
 func startProcess(ctx context.Context, pr api.Procs, exe string, args []string, dir string) (api.Process, io.ReadCloser, io.ReadCloser, error) {
@@ -120,8 +132,22 @@ func startProcess(ctx context.Context, pr api.Procs, exe string, args []string, 
 		return nil, nil, nil, err
 	}
 
-	stdoutR, stdoutW = io.Pipe()
-	stderrR, stderrW = io.Pipe()
+	tr, err := cleanup.New(api.NewPaths(dir), &defaultLogger{}, platform.Current())
+	if err != nil {
+		stdoutR.Close()
+		stdoutW.Close()
+		stderrR.Close()
+		stderrW.Close()
+		return nil, nil, nil, err
+	}
+	id := fmt.Sprintf("core-%d", time.Now().UnixNano())
+	if err := tr.Intent(api.Trace{Kind: "process", ID: id, Instance: tr.Instance(), Owner: "supervise", Data: map[string]string{"exe": exe, "home": dir}}); err != nil {
+		stdoutR.Close()
+		stdoutW.Close()
+		stderrR.Close()
+		stderrW.Close()
+		return nil, nil, nil, err
+	}
 
 	cmd := exec.CommandContext(ctx, exe, args...)
 	cmd.WaitDelay = time.Second
@@ -131,15 +157,30 @@ func startProcess(ctx context.Context, pr api.Procs, exe string, args []string, 
 	setSysProcAttr(cmd)
 
 	if err := cmd.Start(); err != nil {
+		_ = tr.Done("process", id)
+		_ = stdoutR.Close()
+		_ = stderrR.Close()
 		_ = stdoutW.Close()
 		_ = stderrW.Close()
 		return nil, nil, nil, err
 	}
 
+	started := time.Now()
+	traceErr := tr.Applied("process", id, map[string]string{"pid": strconv.Itoa(cmd.Process.Pid), "start": started.UTC().Format(time.RFC3339Nano)}, nil)
 	release, err := attachProcess(cmd)
+	if traceErr != nil {
+		if release != nil {
+			release()
+		}
+		err = traceErr
+	}
 	if err != nil {
+		killProcessGroup(cmd)
 		_ = cmd.Process.Kill()
+		_ = stdoutR.Close()
+		_ = stderrR.Close()
 		_ = cmd.Wait()
+		_ = tr.Done("process", id)
 		_ = stdoutW.Close()
 		_ = stderrW.Close()
 		return nil, nil, nil, err
@@ -147,7 +188,7 @@ func startProcess(ctx context.Context, pr api.Procs, exe string, args []string, 
 
 	ep := &execProcess{
 		cmd:          cmd,
-		started:      time.Now(),
+		started:      started,
 		done:         make(chan struct{}),
 		stdoutWriter: stdoutW,
 		stderrWriter: stderrW,
@@ -171,6 +212,7 @@ func startProcess(ctx context.Context, pr api.Procs, exe string, args []string, 
 			ep.exitCode = 0
 		}
 		ep.mu.Unlock()
+		_ = tr.Done("process", id)
 		close(ep.done)
 	}()
 
@@ -413,6 +455,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		go func() {
 			defer close(stdoutDone)
 			defer close(messages)
+			defer stdoutReader.Close()
 			scanner := bufio.NewScanner(stdoutReader)
 			for scanner.Scan() {
 				var msg message
@@ -424,6 +467,9 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 				case <-readCtx.Done():
 					return
 				}
+			}
+			if err := scanner.Err(); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+				log.Error("supervise: stdout-read", "err", err)
 			}
 		}()
 		var protocolErr error
@@ -451,17 +497,28 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 			}
 		}
 
+		stderrDone := make(chan struct{})
 		go func() {
+			defer close(stderrDone)
+			defer stderrReader.Close()
 			scanner := bufio.NewScanner(stderrReader)
 			for scanner.Scan() {
 				line := scanner.Text()
 				log.Info("core stderr: " + line)
 			}
+			if err := scanner.Err(); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+				log.Error("supervise: stderr-read", "err", err)
+			}
 		}()
-
-		stderrDone := make(chan struct{})
 		// Readers are closed after every child, including descendants retaining pipes.
-		go func() { <-proc.Done(); _ = stderrReader.Close(); close(stderrDone) }()
+		go func() {
+			select {
+			case <-proc.Done():
+			case <-ctx.Done():
+			}
+			_ = stderrReader.Close()
+			_ = stdoutReader.Close()
+		}()
 		procDone := proc.Done()
 		tickInterval := 1000 * time.Millisecond
 		if fast {
@@ -484,11 +541,11 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 			case <-ctx.Done():
 				ticker.Stop()
 				_ = proc.Stop(ctx)
-				<-procDone
 				readCancel()
 				_ = stdoutReader.Close()
 				_ = stderrReader.Close()
 				<-stdoutDone
+				<-stderrDone
 				runCleanup(context.WithoutCancel(ctx), p, log, "exit")
 				return api.SupExitDone
 			case <-ticker.C:
@@ -498,7 +555,6 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 						silenceFired = true
 						log.Warn(fmt.Sprintf("тишина %d с: версия %s не прислала good за %d с", int(silenceTimeout.Seconds()), s.Current, int(silenceTimeout.Seconds())))
 						_ = proc.Stop(ctx)
-						<-procDone
 						break processLoop
 					}
 				} else {
@@ -506,7 +562,6 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 						silenceFired = true
 						log.Warn(fmt.Sprintf("тишина %d с: версия %s не прислала alive за %d с", int(silenceTimeout.Seconds()), s.Current, int(silenceTimeout.Seconds())))
 						_ = proc.Stop(ctx)
-						<-procDone
 						break processLoop
 					}
 				}
@@ -523,7 +578,6 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 						configRestart = true
 						log.Warn("supervise: config switch deadline expired, stopping core for restart")
 						_ = proc.Stop(ctx)
-						<-procDone
 						break processLoop
 					}
 				}
@@ -541,6 +595,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		_ = stdoutReader.Close()
 		<-stderrDone
 		if protocolErr != nil {
+			runCleanup(context.WithoutCancel(ctx), p, log, "crash")
 			log.Error("supervise: state-write", "err", protocolErr)
 			return 1
 		}

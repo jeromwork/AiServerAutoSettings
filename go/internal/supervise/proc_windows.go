@@ -5,14 +5,17 @@ package supervise
 import (
 	"golang.org/x/sys/windows"
 	"os/exec"
+	"syscall"
 	"unsafe"
 )
 
-func setSysProcAttr(cmd *exec.Cmd) {}
+func setSysProcAttr(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+}
 
 func stopProcessGroup(cmd *exec.Cmd) {
 	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+		_ = windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(cmd.Process.Pid))
 	}
 }
 
