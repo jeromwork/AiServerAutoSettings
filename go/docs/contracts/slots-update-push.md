@@ -20,17 +20,21 @@
 - **Именование версий**: regex `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` (`lab/exe/CodeSlots.cs:20, 116`).
 - **Точка входа скрипта**: `<Home>\code\<name>\run_lab.py` (`lab/exe/CodeSlots.cs:28-29`).
 
+- **Загрузка:** новый embedded, пустое или повреждённое состояние либо исчезнувшая текущая папка возвращают текущий слот к embedded и сбрасывают счётчики; отсутствующая папка lastGood обнуляет lastGood. При повреждённом JSON lastGood также обнуляется (`lab/exe/CodeSlots.cs:31-50`).
+
 ### 1.2 Константы и пороги
 - `MaxFailsGood = 3`: лимит падений проверенной версии до перехода в `Stop` (`lab/exe/CodeSlots.cs:21, 108`).
 - `MaxMemRestarts = 3`: лимит перезапусков по памяти до перехода в `Stop` (`lab/exe/CodeSlots.cs:21, 97`).
-- `LongRunSeconds = 600.0`: время непрерывной работы после `good`, сбрасывающее `failsGood = 0` (`lab/exe/CodeSlots.cs:22, 106`).
-- `PythonSilenceFuseSeconds = 120`: таймер В; предельное время ожидания сигнала `good` до принудительного `Terminate()` (`lab/exe/LabMain.cs:116, 139-145`).
+- `LongRunSeconds = 600.0`: время от старта Python для сброса `failsGood` при выходе, если был `good` (`lab/exe/CodeSlots.cs:22, 106`).
+- `PythonSilenceFuseSeconds = 120`: таймер В; предельное время ожидания сигнала `good` до принудительного `Terminate()`; таймер запускается только для непроверенного слота (`lab/exe/LabMain.cs:277`) (`lab/exe/LabMain.cs:116, 139-145`).
 - `RestartGraceSeconds = 45`: ожидание мягкого выхода Python при перезапуске (`lab/exe/LabMain.cs:114, 484`).
 - `FinalExitGraceSeconds = 80`: ожидание мягкого выхода и очистки при полном закрытии (`lab/exe/LabMain.cs:115, 484`).
 
 ### 1.3 Сигнал Good и проверка версии
 - Строка от Python в stdout: `{"t":"good","version":"<str>"}` (`lab/exe/LabMain.cs:20, 423-428`, `lab/ralab/link.py:4`).
 - При получении `good`: сторож останавливает таймер В (`lab/exe/LabMain.cs:424`), вызывает `Slots.MarkGood()`: `lastGood = Current`, `failsGood = 0`, `memRestarts = 0`, `rollbackReason = null`, сохраняет `state.json` (`lab/exe/CodeSlots.cs:68`, `lab/exe/LabMain.cs:427`).
+
+- `good` отправляется на первом `channel.up` (`lab/ralab/link.py:125-129`). `noconfig` останавливает таймер, последующий `config-ok` снова запускает его для непроверенного слота (`lab/exe/LabMain.cs:370-384`).
 
 ### 1.4 Реакция на завершение процесса (OnExit)
 - **Запуск Python**: аргументы `-X utf8 -u "<ScriptPath>" --home "<Home>" --exe-version "<Version>" [--rollback-reason "<Reason>"]` (`lab/exe/LabMain.cs:253-254`). Переменные окружения: `RA_EXE`, `RA_EXE_VERSION`; удаляются `PYTHONPATH`, `PYTHONHOME` (`lab/exe/LabMain.cs:260-261`).
@@ -44,8 +48,8 @@
   - Формирование англоязычной причины `whyEn`: `"version <ver> did not bring the channel up in 120 s"`, `"version <ver> exited with code 0 unrequested"`, или `"version <ver> crashed, exit code <code>"` (`lab/exe/CodeSlots.cs:100-102`).
   - Для непроверенной версии (`Current != LastGood`):
     - При наличии `lastGood`: `Current = lastGood`, `rollbackReason = whyEn`, сброс счетчиков, `SlotAction.Restart` (`lab/exe/CodeSlots.cs:104`).
-    - Иначе при наличии `embedded`: `Current = embedded`, `rollbackReason = whyEn`, сброс счетчиков, `SlotAction.Restart` (`lab/exe/CodeSlots.cs:105`).
-  - Для проверенной версии: `failsGood++`; если `>= 3` -> `SlotAction.Stop`, иначе `SlotAction.Restart` (`lab/exe/CodeSlots.cs:107-109`).
+    - Иначе при наличии `embedded`, если он отличается от текущего слота: `Current = embedded`, `rollbackReason = whyEn`, сброс счетчиков, `SlotAction.Restart` (`lab/exe/CodeSlots.cs:105`).
+  - Для проверенной версии или непроверенной версии без доступного слота отката: `failsGood++`; если `>= 3` -> `SlotAction.Stop`, иначе `SlotAction.Restart` (`lab/exe/CodeSlots.cs:107-109`).
 
 ---
 
@@ -57,14 +61,14 @@
   - Метод: `POST /code` (`lab/server/ra_lab.py:481`, `lab/ralab/agent.py:298`).
   - Заголовки: `Content-Type: application/zip`, `X-Sha256: <hex sha256 zip>` (`lab/server/ra_lab.py:481`).
   - Тело: бинарный zip (`lab/server/ra_lab.py:481`).
-- Опция `--wait` / `-w`: ожидает сообщение о подъёме канала новой версии до `--deadline` (секунды) (`lab/server/ra_lab.py:479-494`).
+- `--wait` принимает первое сообщение о подъёме канала. `--deadline` по умолчанию 90 с. При отличии версии выводится несовпадение, поэтому сообщение само по себе не подтверждает успешную проверку отправленного кода (`lab/server/ra_lab.py:181-182,479-494,586`).
 
 ### 2.2 Валидация и распаковка на агенте
 - **Ограничения архива** (`lab/ralab/updater.py:13, 43-44`):
   - `FILES_MAX = 500`: максимум 500 файлов в zip.
   - `FILE_MAX = 1 МБ` (1 048 576 байт): максимальный размер одного файла.
   - `TOTAL_MAX = 20 МБ` (20 971 520 байт): суммарный размер распакованных файлов.
-  - Предел тела запроса агента: 5 МБ для `/code` (`lab/ralab/agent.py:5`).
+  - Предел тела запроса агента: 5 МиБ для `/code`, превышение даёт HTTP 413 (`lab/ralab/agent.py:16,149-151`). `X-Sha256` проверяется, если передано непустое значение (`lab/ralab/updater.py:35-37`).
 - **Проверка путей в zip** (`lab/ralab/updater.py:14, 48-50`):
   - Регулярное выражение: `^(run_lab\.py|code-version\.txt|ralab/[A-Za-z0-9_./-]*\.py)$`.
   - Запрещены: начальный `/`, символ `\`, `:`, сегмент `..`.
@@ -80,6 +84,8 @@
   - После ответа: публикация события `app.restart` -> выход Python с кодом 3 (`lab/ralab/agent.py:302`, `lab/ralab/app.py:156`).
 
 ---
+
+`POST /restart` очищает `pending.json` перед ответом и перезапуском (`lab/ralab/agent.py:304-306`).
 
 ## 3. Обновление и откат EXE-файла
 
@@ -100,8 +106,10 @@
 - Ограничения: размер <= 400 МБ (`MAX_SIZE = 400 * 1024 * 1024`), URL строго с `https://github.com/` (`lab/ralab/update.py:11, 51-54`).
 - Сверка контрольной суммы: SHA-256 файла должен совпасть с SHA-256 из описания релиза (`lab/ralab/update.py:47-49, 170-172`).
 
+- При наличии digest ассета с префиксом `sha256:` сверяется его соответствие SHA из описания. При ненулевом заявленном размере сверяется число скачанных байт. Релиз с равной или более ранней версией не устанавливается (`lab/ralab/update.py:47-49,82-83,145-147`).
+
 ### 3.3 Ротация файлов EXE
-- **Имена путей**: `<exe>`, `<base>.prev.exe`, `<base>.new`, `<base>.tmp` (`lab/ralab/update.py:88-89`, `lab/exe/LabMain.cs:521, 537`).
+- **Имена путей**: `<exe>`, `<base>.prev.exe`, `<base>.new`, `<exe>.tmp` (`lab/ralab/update.py:88-89`, `lab/exe/LabMain.cs:521, 537`).
 - **Установка нового EXE из Python (`update.py:175-189`)**:
   1. `_rm(prev)`
   2. `os.replace(exe, prev)`
@@ -115,4 +123,4 @@
     2. `Move(prev, exe)`
     3. `Move(tmp, prev)`
   - При ошибке на шаге 1 или 2: откат перемещений (`lab/exe/LabMain.cs:553-556`).
-- **Перезапуск сторожа**: на `{"t":"restart-exe"}` сторож устанавливает `RestartExeRequested = true`, закрывает форму, освобождает мьютекс `Local\RemoteAgents-Lab` и запускает обновленный EXE (`lab/exe/LabMain.cs:29-32, 47-50, 449-456`).
+- **Перезапуск сторожа**: на `{"t":"restart-exe"}` сторож устанавливает `RestartExeRequested = true`, закрывает форму, освобождает мьютекс `Local\RemoteAgents-Lab` и запускает обновлённый EXE. При ошибке запуска пробует `.prev.exe`, если он существует и отличается от уже испробованного пути (`lab/exe/LabMain.cs:29-32,47-64,449-456`).
