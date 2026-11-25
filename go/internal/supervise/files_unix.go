@@ -3,10 +3,13 @@
 package supervise
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 
 	"golang.org/x/sys/unix"
+
+	"remoteagents/internal/api"
 )
 
 func lockFile(path string) (func(), error) {
@@ -19,6 +22,9 @@ func lockFile(path string) (func(), error) {
 	}
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = f.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, api.ErrBusy
+		}
 		return nil, err
 	}
 	return func() {

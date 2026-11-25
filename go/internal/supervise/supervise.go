@@ -572,7 +572,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 				return api.SupExitDone
 			case <-ticker.C:
 				now := time.Now()
-				if !goodSeen {
+				if s.Current != s.LastGood {
 					if now.Sub(startTime) > silenceTimeout {
 						silenceFired = true
 						log.Warn(fmt.Sprintf("тишина %d с: версия %s не прислала good за %d с", int(silenceTimeout.Seconds()), s.Current, int(silenceTimeout.Seconds())))

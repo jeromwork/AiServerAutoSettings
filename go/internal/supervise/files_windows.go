@@ -3,10 +3,13 @@
 package supervise
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 
 	"golang.org/x/sys/windows"
+
+	"remoteagents/internal/api"
 )
 
 func lockFile(path string) (func(), error) {
@@ -20,6 +23,9 @@ func lockFile(path string) (func(), error) {
 	var o windows.Overlapped
 	if err := windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &o); err != nil {
 		_ = f.Close()
+		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			return nil, api.ErrBusy
+		}
 		return nil, err
 	}
 	return func() {

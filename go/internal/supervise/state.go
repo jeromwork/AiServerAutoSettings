@@ -155,6 +155,14 @@ func (s *slots) pending() (string, error) {
 }
 
 func (s *slots) transition(code int, silence, rollback bool, reason string) error {
+	// Serialize manual/automatic rollback and pending-slot promotion with Stage
+	// and uninstall. A failed lock must leave both memory and disk unchanged.
+	unlock, err := lockFile(filepath.Join(s.p.State, api.LockOp))
+	if err != nil {
+		return fmt.Errorf("supervise: op-lock: %w", err)
+	}
+	defer unlock()
+
 	if !silence && code == api.ExitRestart {
 		if rollback {
 			next := s.LastGood
