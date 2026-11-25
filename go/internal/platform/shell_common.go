@@ -144,10 +144,6 @@ func (p *execProc) Truncated() bool {
 
 func (p *execProc) Kill() error {
 	p.mu.Lock()
-	if p.exited {
-		p.mu.Unlock()
-		return nil
-	}
 	p.killRequested = true
 	kill := p.killFn
 	p.mu.Unlock()
@@ -241,6 +237,9 @@ func NewShell(log api.Logger, pr api.Procs, runAs string) api.Shell {
 }
 
 func (s *shellImpl) Start(ctx context.Context, r api.ExecReq) (api.ExecProc, error) {
+	if s.pr == nil {
+		return nil, errors.New("shell: process-manager-required: traced process manager is required")
+	}
 	if r.Cmd == "" {
 		return nil, errors.New("shell: empty-command: command is required")
 	}
@@ -279,10 +278,10 @@ func (s *shellImpl) Start(ctx context.Context, r api.ExecReq) (api.ExecProc, err
 	s.mu.Unlock()
 
 	if s.log != nil {
-		s.log.Info("shell.start", "id", id, "shell", r.Shell, "cmd", r.Cmd, "dir", cwd)
+		s.log.Info("shell.start", "id", id, "shell", r.Shell, "dir", cwd)
 	}
 
-	if err := startProc(ctx, s.pr, s.runAs, path, args, cwd, r, proc); err != nil {
+	if err := startProc(ctx, s.pr, s.runAs, path, args, cwd, proc); err != nil {
 		s.mu.Lock()
 		for i, oid := range s.order {
 			if oid == id {
@@ -348,4 +347,39 @@ func (s *shellImpl) KillAll() error {
 		}
 	}
 	return firstErr
+}
+
+// startProc delegates ownership, tracing and tree cleanup to api.Procs.
+func startProc(ctx context.Context, pr api.Procs, runAs, path string, args []string, cwd string, proc *execProc) error {
+	p, err := pr.Start(ctx, api.ProcSpec{
+		Name: "exec:" + proc.id, Path: path, Args: args[1:], Dir: cwd,
+		RunAs: runAs, Stdout: &streamWriter{proc: proc, stream: "out"},
+		Stderr: &streamWriter{proc: proc, stream: "err"}, Stream: api.StreamShell,
+	})
+	if err != nil {
+		return fmt.Errorf("shell: start-failed: %w", err)
+	}
+	proc.setKill(func() error {
+		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		return p.Stop(stopCtx)
+	})
+	go func() {
+		select {
+		case <-p.Done():
+		case <-ctx.Done():
+		}
+		// Stop owns the whole tree, including children outliving the shell.
+		if err := proc.Kill(); err != nil {
+			proc.finish(-1)
+			return
+		}
+		select {
+		case <-p.Done():
+			proc.finish(p.ExitCode())
+		case <-ctx.Done():
+			proc.finish(-1)
+		}
+	}()
+	return nil
 }

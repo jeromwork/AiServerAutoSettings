@@ -9,7 +9,9 @@ import (
 
 	"remoteagents/internal/api"
 	"remoteagents/internal/api/fake"
+	"remoteagents/internal/cleanup"
 	"remoteagents/internal/platform"
+	"remoteagents/internal/procs"
 )
 
 func init() {
@@ -36,7 +38,25 @@ func runDevShell(ctx context.Context, args []string) int {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	sh := platform.Current().NewShell(&fake.Logger{}, nil, "")
+	log := &fake.Logger{}
+	// Do not substitute a fake trace journal for a live process manager.
+	home, err := os.MkdirTemp("", "ra-shell-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "shell: temporary-home-failed")
+		return 1
+	}
+	defer os.RemoveAll(home)
+	traces, err := cleanup.New(api.NewPaths(home), log, platform.Current())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	manager, err := procs.New(log, traces)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	sh := platform.Current().NewShell(log, manager, "")
 	defer func() { _ = sh.KillAll() }()
 	req := api.ExecReq{
 		Shell: shellType,
