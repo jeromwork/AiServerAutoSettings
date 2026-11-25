@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"remoteagents/internal/api"
+	"remoteagents/internal/bus"
 )
 
 const label = "ru.remoteagents.vpn" // служба (Mac) / задача (Windows)
@@ -24,10 +25,11 @@ const label = "ru.remoteagents.vpn" // служба (Mac) / задача (Window
 type Runner struct {
 	Procs  api.Procs // нужен только на Linux (запуск обычным ребёнком)
 	Log    api.Logger
-	Sing   string // путь к sing-box: <home>/runtime/<имя exe> (как в v2)
-	Conf   string // путь к конфигу: <home>/private/vpn.json (как в v2)
-	API    string // clash_api.external_controller из конфига VPN, напр. 127.0.0.1:9090
-	Secret string // clash_api.secret
+	Bus    *bus.Bus // vpn.exited / vpn.gave_up (may be nil)
+	Sing   string   // путь к sing-box: <home>/runtime/<имя exe> (как в v2)
+	Conf   string   // путь к конфигу: <home>/private/vpn.json (как в v2)
+	API    string   // clash_api.external_controller из конфига VPN, напр. 127.0.0.1:9090
+	Secret string   // clash_api.secret
 
 	mu         sync.Mutex
 	proc       api.Process
@@ -38,13 +40,13 @@ type Runner struct {
 }
 
 // New: пути постоянные, как в v2 (vpn.py), ничего не запоминается в файле.
-func New(home string, procs api.Procs, log api.Logger, apiAddr, secret string) *Runner {
+func New(home string, procs api.Procs, log api.Logger, b *bus.Bus, apiAddr, secret string) *Runner {
 	exe := "ra2-vpn"
 	if runtime.GOOS == "windows" {
 		exe = "RA2-VPN.exe"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Runner{Procs: procs, Log: log, API: apiAddr, Secret: secret, ctx: ctx, rootCancel: cancel,
+	return &Runner{Procs: procs, Log: log, Bus: b, API: apiAddr, Secret: secret, ctx: ctx, rootCancel: cancel,
 		Sing: filepath.Join(home, "runtime", exe), Conf: filepath.Join(home, "private", "vpn.json")}
 }
 
@@ -182,16 +184,16 @@ func (r *Runner) monitor(ctx context.Context, gen int) {
 			return // остановлен нами
 		}
 		fails++
-		r.Log.Warn("vpn.down", "err", err.Error(), "fails", fails)
+		r.Bus.Publish("vpn.exited", map[string]any{"err": err.Error(), "fails": fails})
 		if fails >= maxFails {
-			r.Log.Error("vpn.gave_up", "fails", fails, "hint", "VPN упал 3 раза подряд; нужен ручной Start")
+			r.Bus.Publish("vpn.gave_up", map[string]any{"fails": fails, "hint": "VPN упал 3 раза подряд; нужен ручной Start"})
 			return
 		}
 		if err := r.start(); err != nil {
 			fails++
 			r.Log.Error("vpn.start", "err", err.Error(), "fails", fails)
 			if fails >= maxFails {
-				r.Log.Error("vpn.gave_up", "fails", fails)
+				r.Bus.Publish("vpn.gave_up", map[string]any{"fails": fails})
 				return
 			}
 		}

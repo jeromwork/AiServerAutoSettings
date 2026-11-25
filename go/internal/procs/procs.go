@@ -10,13 +10,16 @@ import (
 	"os/exec"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"remoteagents/internal/api"
+	"remoteagents/internal/bus"
 )
 
 type manager struct {
 	log   api.Logger
+	bus   *bus.Bus
 	mu    sync.Mutex
 	procs map[*proc]struct{}
 }
@@ -27,11 +30,13 @@ type proc struct {
 	started time.Time
 	done    chan struct{}
 	code    int
+	name    string
+	killed  atomic.Bool
 }
 
-// New creates a manager.
-func New(log api.Logger) api.Procs {
-	return &manager{log: log, procs: map[*proc]struct{}{}}
+// New creates a manager; b (may be nil) receives proc.exited events.
+func New(log api.Logger, b *bus.Bus) api.Procs {
+	return &manager{log: log, bus: b, procs: map[*proc]struct{}{}}
 }
 
 func (m *manager) Start(_ context.Context, s api.ProcSpec) (api.Process, error) {
@@ -43,7 +48,7 @@ func (m *manager) Start(_ context.Context, s api.ProcSpec) (api.Process, error) 
 			*w = m.log.Writer(s.Stream, s.Name)
 		}
 	}
-	p := &proc{cmd: cmd, done: make(chan struct{}), code: -1}
+	p := &proc{cmd: cmd, done: make(chan struct{}), code: -1, name: s.Name}
 	var err error
 	if p.basket, err = newBasket(cmd); err != nil {
 		return nil, err
@@ -75,6 +80,7 @@ func (m *manager) Start(_ context.Context, s api.ProcSpec) (api.Process, error) 
 		delete(m.procs, p)
 		m.mu.Unlock()
 		close(p.done)
+		m.bus.Publish("proc.exited", map[string]any{"name": p.name, "code": p.code, "pid": cmd.Process.Pid, "killed": p.killed.Load()})
 	}()
 	if err := <-ready; err != nil {
 		return nil, fmt.Errorf("procs: start: %w", err)
@@ -121,6 +127,7 @@ func (p *proc) Stop(ctx context.Context) error {
 		return nil
 	default:
 	}
+	p.killed.Store(true)
 	p.basket.soft(p.cmd)
 	t := time.NewTimer(5 * time.Second)
 	defer t.Stop()
