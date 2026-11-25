@@ -1,19 +1,17 @@
 package procs
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"remoteagents/internal/api"
@@ -36,6 +34,8 @@ type proc struct {
 	mu       sync.Mutex
 	exitCode int
 	stopOnce sync.Once
+	killOnce sync.Once
+	stopping atomic.Bool
 }
 
 // New creates a new Procs manager.
@@ -127,23 +127,11 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		stderrCloser = w
 	}
 
-	closeInput, err := prepareStdin(cmd, s.Stdin)
-	if err != nil {
-		if stdoutCloser != nil {
-			_ = stdoutCloser.Close()
-		}
-		if stderrCloser != nil {
-			_ = stderrCloser.Close()
-		}
-		if m.tr != nil {
-			_ = m.tr.Done("process", traceID)
-		}
-		return nil, fmt.Errorf("procs: stdin-failed: %w", err)
-	}
+	// os/exec accepts every io.Reader; WaitDelay bounds waiting for its pipes.
+	cmd.Stdin = s.Stdin
 	handedOff := false
 	defer func() {
 		if !handedOff {
-			closeInput()
 			if m.tr != nil {
 				_ = m.tr.Done("process", traceID)
 			}
@@ -187,7 +175,7 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 	started, err := processStarted(ctx, cmd)
 	if err != nil {
 		p := &proc{cmd: cmd, pid: cmd.Process.Pid}
-		p.hardKill()
+		p.killTree()
 		_ = cmd.Wait()
 		m.releaseCmd(cmd)
 		if stdoutCloser != nil {
@@ -209,7 +197,7 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		}
 		if err := m.tr.Applied("process", traceID, appliedData, nil); err != nil {
 			p := &proc{cmd: cmd, pid: pid}
-			p.hardKill()
+			p.killTree()
 			_ = cmd.Wait()
 			m.releaseCmd(cmd)
 			if stdoutCloser != nil {
@@ -235,9 +223,12 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 
 	go func() {
 		err := cmd.Wait()
-		closeInput()
-		// Reap a private Windows Job; Unix children share one group.
-		p.reapExited()
+		// Serialize the last leader exiting with starts and other reapers, so
+		// Unix descendants cannot outlive the manager's final tracked process.
+		m.mu.Lock()
+		p.reapExited(len(m.procs) == 1 || p.stopping.Load() || ctx.Err() != nil)
+		delete(m.procs, pid)
+		m.mu.Unlock()
 		m.releaseCmd(cmd)
 
 		p.mu.Lock()
@@ -262,9 +253,6 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		if m.tr != nil {
 			_ = m.tr.Done("process", traceID)
 		}
-		m.mu.Lock()
-		delete(m.procs, pid)
-		m.mu.Unlock()
 		close(p.done)
 	}()
 
@@ -314,14 +302,16 @@ func (p *proc) ExitCode() int {
 }
 
 func (p *proc) Stop(ctx context.Context) error {
+	p.stopping.Store(true)
 	select {
 	case <-p.done:
+		p.killTree()
 		return nil
 	default:
 	}
 
 	if ctx.Err() != nil {
-		p.hardKill()
+		p.killTree()
 		return fmt.Errorf("procs: stop-canceled: %w", ctx.Err())
 	}
 	p.stopOnce.Do(p.softStop)
@@ -331,6 +321,7 @@ func (p *proc) Stop(ctx context.Context) error {
 
 	select {
 	case <-p.done:
+		p.killTree()
 		return nil
 	case <-ctx.Done():
 	case <-timer.C:
@@ -338,68 +329,23 @@ func (p *proc) Stop(ctx context.Context) error {
 
 	select {
 	case <-p.done:
+		p.killTree()
 		return nil
 	default:
 	}
 
-	p.hardKill()
+	p.killTree()
 
 	select {
 	case <-p.done:
+		p.killTree()
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("procs: stop-canceled: %w", ctx.Err())
 	}
 }
 
-// prepareStdin borrows files and finite in-memory readers. Arbitrary Readers
-// cannot be canceled through io.Reader, so reject them before starting a copier.
-func prepareStdin(cmd *exec.Cmd, input io.Reader) (func(), error) {
-	noop := func() {}
-	if input == nil {
-		return noop, nil
-	}
-	if file, ok := input.(*os.File); ok {
-		cmd.Stdin = file
-		return noop, nil
-	}
-	switch input.(type) {
-	case *bytes.Buffer, *bytes.Reader, *strings.Reader:
-	default:
-		return nil, fmt.Errorf("unsupported stdin reader: use *os.File or an in-memory reader")
-	}
-	readEnd, writeEnd, err := os.Pipe()
-	if err != nil {
-		return nil, err
-	}
-	cmd.Stdin = readEnd
-	stop := make(chan struct{})
-	var once sync.Once
-	go func() {
-		defer func() { _ = writeEnd.Close() }()
-		buf := make([]byte, 32*1024)
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			n, err := input.Read(buf)
-			if n > 0 {
-				if _, writeErr := writeEnd.Write(buf[:n]); writeErr != nil {
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-	return func() {
-		once.Do(func() {
-			close(stop)
-			_ = readEnd.Close()
-			_ = writeEnd.Close()
-		})
-	}, nil
+// killTree also makes repeated Stop calls safe after the original group is gone.
+func (p *proc) killTree() {
+	p.killOnce.Do(p.hardKill)
 }

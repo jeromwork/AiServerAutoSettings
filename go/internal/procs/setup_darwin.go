@@ -41,6 +41,13 @@ func (m *manager) setupCmd(cmd *exec.Cmd, s api.ProcSpec) error {
 		m.platform.pgid = 0
 	}
 	cmd.SysProcAttr.Pgid = m.platform.pgid
+	// CommandContext must cancel the group, including descendants which ignore
+	// SIGTERM, rather than killing only the direct child.
+	cmd.Cancel = func() error {
+		p := &proc{cmd: cmd, pid: cmd.Process.Pid}
+		p.killTree()
+		return nil
+	}
 
 	if s.RunAs != "" {
 		u, err := user.Lookup(s.RunAs)
@@ -116,8 +123,13 @@ func processStarted(ctx context.Context, cmd *exec.Cmd) (time.Time, error) {
 	return t.UTC(), err
 }
 
-// Do not kill the shared group merely because one member has exited.
-func (p *proc) reapExited() {}
+// Preserve siblings on ordinary exit, but clean the group on shutdown or when
+// its final managed leader exits. Called with the manager mutex held.
+func (p *proc) reapExited(cleanGroup bool) {
+	if cleanGroup {
+		p.killTree()
+	}
+}
 
 func (p *proc) groupID() int {
 	if p.cmd != nil && p.cmd.SysProcAttr != nil && p.cmd.SysProcAttr.Pgid > 0 {
