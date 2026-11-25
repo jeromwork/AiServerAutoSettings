@@ -96,7 +96,7 @@ func parseRunFlags(args []string, supervised bool) (core.Flags, error) {
 		case "home", "config", "password-file", "pc", "dev-assets", "pprof", "exit-after", "rollback-reason", "release-base":
 			if strings.HasPrefix(arg, "-") && (i+1 >= len(args) || strings.HasPrefix(args[i+1], "-")) {
 				err := fmt.Errorf("missing value for %s", arg)
-				fmt.Fprintln(flags.Output(), err)
+				_, _ = fmt.Fprintln(flags.Output(), err) // Best-effort diagnostic; return the parse error below.
 				return f, err
 			}
 		}
@@ -106,7 +106,7 @@ func parseRunFlags(args []string, supervised bool) (core.Flags, error) {
 	}
 	if flags.NArg() != 0 {
 		err := fmt.Errorf("unexpected argument: %s", flags.Arg(0))
-		fmt.Fprintln(flags.Output(), err)
+		_, _ = fmt.Fprintln(flags.Output(), err) // Best-effort diagnostic; return the parse error below.
 		return f, err
 	}
 	return f, nil

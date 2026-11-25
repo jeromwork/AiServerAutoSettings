@@ -7,17 +7,18 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"remoteagents/internal/api"
 )
 
-// Logger is a no-op api.Logger that prints to stderr with a "fake" prefix.
+// Logger is a no-op api.Logger.
 type Logger struct{}
 
-func (l *Logger) Info(event string, kv ...any)                { fmt.Fprintf(io.Discard, "fake: info %s\n", event) }
+func (l *Logger) Info(event string, kv ...any)                {}
 func (l *Logger) Warn(event string, kv ...any)                {}
-func (l *Logger) Error(event string, kv ...any)               { fmt.Fprintf(io.Discard, "fake: error %s\n", event) }
+func (l *Logger) Error(event string, kv ...any)               {}
 func (l *Logger) With(component string) api.Logger            { return l }
 func (l *Logger) Secret(value string)                         {}
 func (l *Logger) Writer(stream, source string) io.WriteCloser { return discardWC{} }
@@ -92,7 +93,8 @@ func (c *Channel) State() api.ChannelState {
 }
 func (c *Channel) Subscribe() (<-chan api.ChannelState, func()) {
 	ch := make(chan api.ChannelState)
-	return ch, func() { close(ch) }
+	var once sync.Once
+	return ch, func() { once.Do(func() { close(ch) }) }
 }
 func (c *Channel) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	return nil, errors.New("fake: channel: not-implemented")
