@@ -72,7 +72,8 @@ func New(act api.Actions, log api.Logger, devAssets string) (*UI, error) {
 	token := base64.RawURLEncoding.EncodeToString(tokBytes)
 	log.Secret(token)
 
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	lc := net.ListenConfig{}
+	l, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("webui: bind-failed: %w", err)
 	}
@@ -120,10 +121,16 @@ func (u *UI) Start(ctx context.Context) error {
 		return errors.New("webui: no-listener: listener is nil")
 	}
 	if err := ctx.Err(); err != nil {
+		_ = u.listener.Close()
+		u.stopped = true
 		return fmt.Errorf("webui: start-canceled: %w", err)
 	}
 	u.started = true
-	u.stopWatch = context.AfterFunc(ctx, func() { _ = u.srv.Close() })
+	u.stopWatch = context.AfterFunc(ctx, func() {
+		// Serve may not have registered the listener with the server yet.
+		_ = u.listener.Close()
+		_ = u.srv.Close()
+	})
 
 	go func() {
 		if err := u.srv.Serve(u.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -439,13 +446,13 @@ func (u *UI) handleExit(w http.ResponseWriter, req *http.Request) {
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(req.Context()), 30*time.Second)
+	go func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		if err := u.act.Exit(ctx); err != nil {
 			u.log.Error("webui: exit-failed", "err", err)
 		}
-	}()
+	}(context.WithoutCancel(req.Context()))
 }
 
 func parseForm(w http.ResponseWriter, req *http.Request) bool {

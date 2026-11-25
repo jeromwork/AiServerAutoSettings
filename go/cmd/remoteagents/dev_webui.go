@@ -57,7 +57,7 @@ func runDevWebUI(ctx context.Context, args []string) int {
 	act := &devActions{}
 	log := &fake.Logger{}
 
-	ui, err := webui.New(act, log, devAssets)
+	ui, err := webui.New(act, log, devAssets) //nolint:contextcheck // The agreed constructor has no context; Start owns cancellation.
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "webui: init failed: %v\n", err)
 		return 1
