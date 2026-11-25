@@ -9,6 +9,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/kolesnikovae/go-winjob"
 	"golang.org/x/sys/windows"
@@ -43,7 +44,7 @@ func (m *manager) setupCmd(cmd *exec.Cmd, s api.ProcSpec) error {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
-	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_SUSPENDED
 	job, err := winjob.Create("", winjob.WithKillOnJobClose())
 	if err != nil {
 		return err
@@ -87,10 +88,37 @@ func (m *manager) postStart(cmd *exec.Cmd) error {
 			return err
 		}
 		if v, ok := m.platform.jobs.Load(cmd); ok {
-			return v.(*processJob).job.Assign(cmd.Process)
+			if err := v.(*processJob).job.Assign(cmd.Process); err != nil {
+				return err
+			}
+			return resumeProcess(cmd.Process.Pid)
 		}
 	}
 	return nil
+}
+
+// CREATE_SUSPENDED prevents child code from running outside our Jobs.
+// The initial thread is the only thread until we resume it after assignment.
+func resumeProcess(pid int) error {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(snapshot)
+	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
+	for err = windows.Thread32First(snapshot, &entry); err == nil; err = windows.Thread32Next(snapshot, &entry) {
+		if entry.OwnerProcessID != uint32(pid) {
+			continue
+		}
+		thread, openErr := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
+		if openErr != nil {
+			return openErr
+		}
+		_, resumeErr := windows.ResumeThread(thread)
+		_ = windows.CloseHandle(thread)
+		return resumeErr
+	}
+	return fmt.Errorf("initial thread not found: %w", err)
 }
 
 func (p *proc) softStop() {
