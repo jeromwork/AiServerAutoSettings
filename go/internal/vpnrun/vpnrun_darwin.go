@@ -57,12 +57,12 @@ func (r *Runner) Uninstall() error {
 	return err
 }
 
-func (r *Runner) Start() error {
+func (r *Runner) start() error {
 	_, err := run("sudo", "-n", "/bin/launchctl", "kickstart", "-k", target)
 	return err
 }
 
-func (r *Runner) Stop() error {
+func (r *Runner) stop() error {
 	_, err := run("sudo", "-n", "/bin/launchctl", "kill", "TERM", target)
 	return err
 }
@@ -72,3 +72,6 @@ func (r *Runner) Running() bool {
 	out, err := run("launchctl", "print", target)
 	return err == nil && strings.Contains(string(out), "state = running")
 }
+
+// exited: sing-box здесь не наш ребёнок — события выхода нет, о смерти узнаём по обрыву API.
+func (r *Runner) exited() <-chan struct{} { return nil }

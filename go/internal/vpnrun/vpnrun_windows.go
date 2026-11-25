@@ -67,12 +67,15 @@ func (r *Runner) Uninstall() error {
 	return err
 }
 
-// Start/Stop — без прав: задача уже создана с повышенными.
-func (r *Runner) Start() error { _, err := run("schtasks.exe", "/Run", "/TN", label); return err }
-func (r *Runner) Stop() error  { _, err := run("schtasks.exe", "/End", "/TN", label); return err }
+// start/stop — без прав: задача уже создана с повышенными.
+func (r *Runner) start() error { _, err := run("schtasks.exe", "/Run", "/TN", label); return err }
+func (r *Runner) stop() error  { _, err := run("schtasks.exe", "/End", "/TN", label); return err }
 
 // Running: состояние задачи из PowerShell (значение enum не локализуется).
 func (r *Runner) Running() bool {
 	out, err := run("powershell.exe", "-NoProfile", "-Command", "(Get-ScheduledTask -TaskName '"+label+"').State")
 	return err == nil && strings.TrimSpace(string(out)) == "Running"
 }
+
+// exited: sing-box здесь не наш ребёнок — события выхода нет, о смерти узнаём по обрыву API.
+func (r *Runner) exited() <-chan struct{} { return nil }

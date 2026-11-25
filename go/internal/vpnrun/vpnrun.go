@@ -5,6 +5,9 @@ package vpnrun
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -17,23 +20,31 @@ import (
 
 const label = "ru.remoteagents.vpn" // служба (Mac) / задача (Windows)
 
-// Runner: Install — одноразово; Uninstall; Start; Stop; Running; Reset (методы — в файлах по ОС).
+// Runner: Install/Uninstall/start/stop/Running — в файлах по ОС; Start/Stop/Reset — общие (со сторожем).
 type Runner struct {
-	Procs api.Procs // нужен только на Linux (запуск обычным ребёнком)
-	Log   api.Logger
-	Sing  string // путь к sing-box: <home>/runtime/<имя exe> (как в v2)
-	Conf  string // путь к конфигу: <home>/private/vpn.json (как в v2)
-	mu    sync.Mutex
-	proc  api.Process
+	Procs  api.Procs // нужен только на Linux (запуск обычным ребёнком)
+	Log    api.Logger
+	Sing   string // путь к sing-box: <home>/runtime/<имя exe> (как в v2)
+	Conf   string // путь к конфигу: <home>/private/vpn.json (как в v2)
+	API    string // clash_api.external_controller из конфига VPN, напр. 127.0.0.1:9090
+	Secret string // clash_api.secret
+
+	mu         sync.Mutex
+	proc       api.Process
+	gen        int
+	cancel     context.CancelFunc
+	ctx        context.Context
+	rootCancel context.CancelFunc
 }
 
 // New: пути постоянные, как в v2 (vpn.py), ничего не запоминается в файле.
-func New(home string, procs api.Procs, log api.Logger) *Runner {
+func New(home string, procs api.Procs, log api.Logger, apiAddr, secret string) *Runner {
 	exe := "ra2-vpn"
 	if runtime.GOOS == "windows" {
 		exe = "RA2-VPN.exe"
 	}
-	return &Runner{Procs: procs, Log: log,
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Runner{Procs: procs, Log: log, API: apiAddr, Secret: secret, ctx: ctx, rootCancel: cancel,
 		Sing: filepath.Join(home, "runtime", exe), Conf: filepath.Join(home, "private", "vpn.json")}
 }
 
@@ -66,55 +77,123 @@ func badPath(ps ...string) error {
 	return nil
 }
 
-// Watch — сторож как в v2: проверка раз в 3 с; упал — повтор через 60 с; 3 сбоя подряд — сдаёмся
-// (пока не позовут Start вручную/не сбросят); 5 минут стабильной работы обнуляют счётчик.
-// want() — нужен ли сейчас VPN (режим включён).
-func (r *Runner) Watch(ctx context.Context, want func() bool) {
-	const (
-		check, retry, stable, maxFails = 3 * time.Second, 60 * time.Second, 5 * time.Minute, 3
-	)
-	var (
-		wasUp   bool
-		upSince time.Time
-		next    time.Time
-		fails   int
-	)
-	t := time.NewTicker(check)
-	defer t.Stop()
+// Конфиг VPN (<home>/private/vpn.json) ОБЯЗАН содержать
+//
+//	"experimental": {"clash_api": {"external_controller": "<API>", "secret": "<Secret>"}}
+//
+// с теми же адресом (127.0.0.1:<порт>) и секретом, что переданы в New. Это делает генератор конфига.
+// Через этот API мы держим одно постоянное соединение (GET /traffic): оборвалось — sing-box умер.
+
+const (
+	startWait = 10 * time.Second // сколько ждём, пока sing-box поднимет API после запуска
+	maxFails  = 3                // падений подряд, после которых сдаёмся
+)
+
+// Start — ручной запуск: обнуляет счётчик падений, запускает sing-box и следит за ним событием
+// (обрыв соединения с API). Упал сам — сразу перезапуск; maxFails подряд — стоп и ошибка в лог.
+func (r *Runner) Start() error {
+	r.mu.Lock()
+	r.gen++
+	gen := r.gen
+	if r.cancel != nil {
+		r.cancel()
+	}
+	ctx, cancel := context.WithCancel(r.ctx)
+	r.cancel = cancel
+	r.mu.Unlock()
+	if err := r.start(); err != nil {
+		cancel()
+		return err
+	}
+	go r.monitor(ctx, gen)
+	return nil
+}
+
+// Stop — намеренная остановка: сторож отпускается и перезапуска не будет.
+func (r *Runner) Stop() error {
+	r.mu.Lock()
+	r.gen++
+	if r.cancel != nil {
+		r.cancel()
+		r.cancel = nil
+	}
+	r.mu.Unlock()
+	return r.stop()
+}
+
+// Close — выключает сторожа (sing-box не трогает).
+func (r *Runner) Close() { r.rootCancel() }
+
+func (r *Runner) current(gen int) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.gen == gen && r.ctx.Err() == nil
+}
+
+// connect открывает поток /traffic. Повторы — только в рамках одного ожидания старта (startWait):
+// API появляется не сразу после запуска. exited (если есть) прерывает ожидание, когда процесс уже умер.
+func (r *Runner) connect(ctx context.Context) (io.ReadCloser, error) {
+	exited := r.exited()
+	ctx2, stop := context.WithTimeout(ctx, startWait)
+	defer stop()
+	cl := &http.Client{Transport: &http.Transport{
+		Proxy:                 nil,
+		DialContext:           (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
+		ResponseHeaderTimeout: 3 * time.Second,
+	}}
+	var last error
 	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+r.API+"/traffic", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+r.Secret)
+		resp, err := cl.Do(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			return resp.Body, nil
+		}
+		if err == nil {
+			resp.Body.Close()
+			err = fmt.Errorf("api status %d", resp.StatusCode)
+		}
+		last = err
 		select {
-		case <-ctx.Done():
+		case <-ctx2.Done():
+			return nil, fmt.Errorf("vpnrun: api not available: %w", last)
+		case <-exited:
+			return nil, fmt.Errorf("vpnrun: process exited: %w", last)
+		case <-time.After(200 * time.Millisecond): // пауза между попытками внутри одного ожидания старта
+		}
+	}
+}
+
+// monitor — один цикл на запуск: соединились → ждём обрыва → перезапуск, пока не набралось maxFails.
+func (r *Runner) monitor(ctx context.Context, gen int) {
+	fails := 0
+	for {
+		body, err := r.connect(ctx)
+		if err == nil {
+			r.Log.Info("vpn.up")
+			_, _ = io.Copy(io.Discard, body) // блокируется до обрыва: это и есть событие «умер»
+			body.Close()
+			err = fmt.Errorf("connection lost")
+		}
+		if ctx.Err() != nil || !r.current(gen) {
+			return // остановлен нами
+		}
+		fails++
+		r.Log.Warn("vpn.down", "err", err.Error(), "fails", fails)
+		if fails >= maxFails {
+			r.Log.Error("vpn.gave_up", "fails", fails, "hint", "VPN упал 3 раза подряд; нужен ручной Start")
 			return
-		case <-t.C:
 		}
-		now := time.Now()
-		if r.Running() {
-			if !wasUp {
-				wasUp, upSince = true, now
-			}
-			if fails > 0 && now.Sub(upSince) > stable {
-				fails = 0
-			}
-			continue
-		}
-		if wasUp {
-			wasUp = false
-			if want() { // упал сам, а не остановлен нами
-				fails++
-				next = now.Add(retry)
-				r.Log.Warn("vpn.down", "fails", fails)
-			}
-		}
-		if !want() || fails >= maxFails || now.Before(next) {
-			continue
-		}
-		if err := r.Start(); err != nil {
+		if err := r.start(); err != nil {
 			fails++
-			next = now.Add(retry)
 			r.Log.Error("vpn.start", "err", err.Error(), "fails", fails)
-			continue
+			if fails >= maxFails {
+				r.Log.Error("vpn.gave_up", "fails", fails)
+				return
+			}
 		}
-		wasUp, upSince = true, now
-		r.Log.Info("vpn.started")
 	}
 }

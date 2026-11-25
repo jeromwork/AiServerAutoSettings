@@ -29,8 +29,8 @@ func (r *Runner) Uninstall() error {
 	return err
 }
 
-// Start: обычный ребёнок через procs (корзина, умрёт вместе с программой).
-func (r *Runner) Start() error {
+// start: обычный ребёнок через procs (корзина, умрёт вместе с программой).
+func (r *Runner) start() error {
 	if r.Running() {
 		return nil
 	}
@@ -48,7 +48,7 @@ func (r *Runner) Start() error {
 	return nil
 }
 
-func (r *Runner) Stop() error {
+func (r *Runner) stop() error {
 	r.mu.Lock()
 	p := r.proc
 	r.mu.Unlock()
@@ -58,6 +58,16 @@ func (r *Runner) Stop() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return p.Stop(ctx)
+}
+
+// exited: событие выхода процесса (канал из procs) — обрывает ожидание API, если sing-box умер при старте.
+func (r *Runner) exited() <-chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.proc == nil {
+		return nil
+	}
+	return r.proc.Done()
 }
 
 func (r *Runner) Running() bool {
