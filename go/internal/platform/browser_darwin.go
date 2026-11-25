@@ -23,6 +23,14 @@ func (p *stubPlatform) OpenBrowser(url, runAs string) error {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "open", url)
 	cmd.WaitDelay = time.Second
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// Reap descendants even when the desktop opener exits before its children.
+	defer func() {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}()
 	if runAs != "" {
 		u, err := user.Lookup(runAs)
 		if err != nil {
@@ -52,7 +60,7 @@ func (p *stubPlatform) OpenBrowser(url, runAs string) error {
 				}
 				credential.Groups = append(credential.Groups, uint32(id))
 			}
-			cmd.SysProcAttr = &syscall.SysProcAttr{Credential: credential}
+			cmd.SysProcAttr.Credential = credential
 		}
 		cmd.Env = append(os.Environ(), "HOME="+u.HomeDir, "USER="+u.Username, "LOGNAME="+u.Username)
 		cmd.Dir = u.HomeDir
