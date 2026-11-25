@@ -73,8 +73,8 @@
 ### `POST /code`
 - **Обработчик:** `agent.py:298-303`. Сырое тело (макс. 5 МиБ `CODE_MAX`), заголовок `X-Sha256` (`agent.py:149,299`).
 - **Действие:** вызов `ctx.updater.install(body, sha)` (`agent.py:299`).
-- **Ошибки:** валидация не прошла (`not res['ok']`) -> HTTP 422 `res` (`agent.py:301`).
-- **Ответ:** HTTP 200 `res`, после ответа отправка события `app.restart` в шину (`agent.py:302`).
+- **Ошибки:** валидация не прошла (`not res['ok']`) -> HTTP 422 `{"ok": false, "errors": [str]}` (до 20 ошибок; `agent.py:301`, `updater.py:31-34`).
+- **Ответ:** HTTP 200 `{"ok": true, "dir": str, "files": int}`, после ответа отправка события `app.restart` в шину (`agent.py:302`, `updater.py:82`).
 
 ### `POST /restart`
 - **Обработчик:** `agent.py:304-307`. Сброс `ctx.updater.clear_pending()` (`agent.py:305`).
@@ -102,7 +102,7 @@
 
 ### `GET /exposed`
 - **Обработчик:** `agent.py:191-193`.
-- **Ответ:** HTTP 200 `{"exposed": ctx.forward.exposed_status(), "channel": bool}` (`agent.py:192`).
+- **Ответ:** HTTP 200 `{"exposed": [{"name": str, "serverPort": int, "pcPort": int, "listening": bool, "url": str}], "channel": bool}` (`agent.py:192`, `forward.py:260-264,286`).
 
 ---
 
