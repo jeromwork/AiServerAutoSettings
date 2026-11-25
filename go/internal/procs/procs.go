@@ -1,7 +1,6 @@
 package procs
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -12,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -352,10 +350,9 @@ func (p *proc) Stop(ctx context.Context) error {
 	}
 }
 
-// prepareStdin keeps exec.Wait independent of a potentially blocked input Read.
-// Files are borrowed directly. Other streams transfer ownership and must unblock
-// Read when Close is called; memory readers need no cancellation. An arbitrary
-// io.Reader has no cancellation operation and cannot safely be pumped here.
+// prepareStdin borrows input without closing it. A private pipe keeps Wait
+// independent of input.Read. io.Reader has no cancellation contract: if Read
+// blocks forever, its caller must arrange to unblock it; cleanup never waits.
 func prepareStdin(cmd *exec.Cmd, input io.Reader) (func(), error) {
 	noop := func() {}
 	if input == nil {
@@ -365,30 +362,38 @@ func prepareStdin(cmd *exec.Cmd, input io.Reader) (func(), error) {
 		cmd.Stdin = file
 		return noop, nil
 	}
-	var source io.ReadCloser
-	switch r := input.(type) {
-	case io.ReadCloser:
-		source = r
-	case *bytes.Buffer, *bytes.Reader, *strings.Reader:
-		source = io.NopCloser(r)
-	default:
-		return nil, fmt.Errorf("stdin must be a file, memory reader, or ReadCloser whose Close interrupts Read")
-	}
 	readEnd, writeEnd, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
 	cmd.Stdin = readEnd
-	done := make(chan struct{})
+	stop := make(chan struct{})
+	var once sync.Once
 	go func() {
-		defer close(done)
-		_, _ = io.Copy(writeEnd, source)
-		_ = writeEnd.Close()
+		defer func() { _ = writeEnd.Close() }()
+		buf := make([]byte, 32*1024)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			n, err := input.Read(buf)
+			if n > 0 {
+				if _, writeErr := writeEnd.Write(buf[:n]); writeErr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
 	}()
 	return func() {
-		_ = readEnd.Close()
-		_ = writeEnd.Close()
-		_ = source.Close()
-		<-done
+		once.Do(func() {
+			close(stop)
+			_ = readEnd.Close()
+			_ = writeEnd.Close()
+		})
 	}, nil
 }
