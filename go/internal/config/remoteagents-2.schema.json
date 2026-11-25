@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "remoteagents-2",
+  "title": "RemoteAgents remoteagents-2 (v2 = v3). Схема — стадия 'schema'. Стадия 'semantic' (код P2a, go-v3-api.md C2) дополнительно: размер файла <= 1 MiB; >= 1 рабочий путь (включённый entry с секретом, channel, relay/hop/cdn/ws); forwards.listen только порт; нет поля servers. Неизвестные поля верхнего уровня допускаются (как v2) и сохраняются.",
+  "type": "object",
+  "required": ["format", "name", "server", "paths"],
+  "not": { "required": ["servers"] },
+  "$defs": {
+    "enc1": { "type": "string", "pattern": "^enc1:[A-Za-z0-9+/]{64,}={0,2}$" },
+    "pathName": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$" },
+    "text": { "type": "string", "pattern": "\\S" },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+  },
+  "properties": {
+    "format": { "const": "remoteagents-2" },
+    "name": { "$ref": "#/$defs/text", "maxLength": 80 },
+    "server": {
+      "type": "object",
+      "required": ["host", "user", "hostKey", "key"],
+      "properties": {
+        "host": { "$ref": "#/$defs/text" },
+        "port": { "$ref": "#/$defs/port", "default": 22 },
+        "user": { "$ref": "#/$defs/text" },
+        "hostKey": { "$ref": "#/$defs/text" },
+        "key": { "$ref": "#/$defs/enc1" }
+      }
+    },
+    "paths": {
+      "type": "object",
+      "properties": {
+        "entries": { "type": "array", "items": { "anyOf": [
+          { "$ref": "#/$defs/pathName" },
+          { "type": "object", "required": ["name"], "properties": {
+              "name": { "$ref": "#/$defs/pathName" },
+              "enabled": { "type": "boolean", "default": true },
+              "kinds": { "type": "array", "items": { "enum": ["hy2", "hy2obfs", "tuic", "trojan", "reality", "shadowtls", "ws-direct", "ws-cdn"] } } } } ] } },
+        "relays": { "type": "array", "items": { "type": "object" }, "default": [] },
+        "hops": { "type": "array", "items": { "type": "object" }, "default": [] },
+        "cdn": { "type": "array", "items": { "type": "object" }, "default": [] },
+        "wsEntries": { "type": "array", "items": { "type": "object" }, "default": [] },
+        "secrets": { "type": "object",
+          "propertyNames": { "$ref": "#/$defs/pathName" },
+          "additionalProperties": { "$ref": "#/$defs/enc1" } },
+        "channel": { "$ref": "#/$defs/enc1" }
+      }
+    },
+    "vpn": { "type": "object", "properties": {
+      "mode": { "enum": ["off", "auto", "only"], "default": "off" },
+      "bridges": { "type": "array", "items": { "$ref": "#/$defs/pathName" } },
+      "direct": { "type": "object", "properties": {
+        "domains": { "type": "array", "items": { "$ref": "#/$defs/text" } },
+        "geoip": {} } } } },
+    "control": { "type": "boolean", "default": true },
+    "controlRunAs": { "type": "string", "description": "v3: пользователь для команд моста на Linux/Mac" },
+    "autostart": { "type": "boolean", "default": true },
+    "lan": { "type": "array", "items": { "type": "object", "required": ["name", "host"], "properties": {
+      "name": { "$ref": "#/$defs/text" }, "host": { "$ref": "#/$defs/text" },
+      "port": { "$ref": "#/$defs/port", "default": 22 },
+      "testHost": { "type": "string" }, "testPort": { "$ref": "#/$defs/port" },
+      "share": { "type": "object", "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "subnets": { "type": "array", "items": { "type": "string" } },
+        "domains": { "type": "array", "items": { "type": "string" } } } } } } },
+    "tun": { "type": "object", "properties": {
+      "enabled": { "type": "boolean", "default": false },
+      "address": { "type": "string", "default": "172.19.0.1/30" } } },
+    "happier": { "type": "object", "properties": {
+      "localWeb": { "type": "object", "properties": {
+        "enabled": { "type": "boolean" }, "port": { "$ref": "#/$defs/port" }, "serverPort": { "$ref": "#/$defs/port" } } } } },
+    "forwards": { "type": "array", "maxItems": 16, "items": { "type": "object", "required": ["listen", "to"], "properties": {
+      "listen": { "anyOf": [ { "$ref": "#/$defs/port" }, { "type": "string", "pattern": "^[0-9]{1,5}$" } ] },
+      "to": { "type": "string", "pattern": "^[^\\s:]+:[0-9]{1,5}$" } } } },
+    "lanProxy": { "type": "object", "properties": { "port": { "$ref": "#/$defs/port" } } },
+    "disk": { "type": "object", "description": "v2 Диск; v3 сохраняет как есть" },
+    "syncPort": { "type": "integer" },
+    "update": { "type": "object", "properties": {
+      "auto": { "type": "boolean", "default": true },
+      "channel": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", "default": "v3-latest" } } },
+    "kdf": { "type": "object", "required": ["iterations", "salt"], "properties": {
+      "iterations": { "type": "integer", "minimum": 1, "maximum": 5000000 },
+      "salt": { "$ref": "#/$defs/text" } } },
+    "check": { "$ref": "#/$defs/enc1" }
+  }
+}
