@@ -1,14 +1,15 @@
 package api
 
-// Ядро → сторож: JSON-строки в stdout ядра. Других строк в stdout ядро не пишет.
+// Ядро → сторож: JSON-строки в stdout ядра (v2: LabMain.OnLine). Других строк в stdout ядро не пишет.
+// Сторож → ядро: в stdin {"t":"exit","final":true}; конец stdin = выход.
 const (
-	MsgGood     = "good"     // {"t":"good","version":"<v>"}
-	MsgAlive    = "alive"    // {"t":"alive"} каждые 10 с
-	MsgExit     = "exit"     // {"t":"exit","final":true}
-	MsgRollback = "rollback" // {"t":"rollback","reason":"…"}
+	MsgGood     = "good"      // {"t":"good","version":"<v>"} первый channel.up: версия проверена
+	MsgExit     = "exit"      // {"t":"exit","final":true} ядро завершается по просьбе владельца
+	MsgNoConfig = "noconfig"  // {"t":"noconfig"} конфига нет: сторож останавливает таймер молчания
+	MsgConfigOK = "config-ok" // {"t":"config-ok"} конфиг появился: таймер молчания снова идёт
 )
 
-// Коды выхода ядра (как v2): 0 без MsgExit = падение; 3 = перезапуск/новый слот; 4 = память; иное = падение.
+// Коды выхода ядра (как v2): 0 без MsgExit = падение; 3 = перезапуск (есть Versions/pending.json — новая версия); 4 = память; иное = падение.
 const (
 	ExitOK      = 0
 	ExitRestart = 3
@@ -24,12 +25,9 @@ const (
 )
 
 const (
-	SilenceUnverifiedSec = 120
-	SilenceVerifiedSec   = 120
+	SilenceUnverifiedSec = 120 // v2 «таймер В»: непроверенная версия обязана сказать good за это время
 	MaxFailsGood         = 3
-	MaxFailsBoot         = 3 // v3: падения embedded без lastGood до остановки
 	MaxMemRestarts       = 3
 	LongRunSec           = 600
 	MaxSlots             = 5
-	ConfigSwitchSec      = 120
 )
