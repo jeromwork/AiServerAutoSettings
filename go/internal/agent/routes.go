@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -371,6 +372,14 @@ func (a *Agent) handleWrite(body []byte) response {
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
 	part := req.Path + ".ralab-part"
+	// Reserve both ends of every active upload. A destination must not replace
+	// another upload's part, and a new part must not occupy its destination.
+	for activePart := range a.parts {
+		if sameUploadPath(req.Path, activePart) ||
+			sameUploadPath(part, strings.TrimSuffix(activePart, ".ralab-part")) {
+			return failure(409, "agent: upload: path conflicts with an active upload")
+		}
+	}
 	if _, owned := a.parts[part]; !owned && req.Offset > 0 {
 		return failure(409, "нет начала файла (offset > 0 без предыдущих кусков)")
 	}
@@ -447,6 +456,19 @@ func (a *Agent) handleWrite(body []byte) response {
 		"written": len(data),
 		"done":    done,
 	})
+}
+
+func sameUploadPath(a, b string) bool {
+	if a == b || (runtime.GOOS == "windows" && strings.EqualFold(a, b)) {
+		return true
+	}
+	// Existing aliases (including symlinks and hard links) share ownership too.
+	first, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	second, err := os.Stat(b)
+	return err == nil && os.SameFile(first, second)
 }
 
 func (a *Agent) handleFiles(r *http.Request) response {
