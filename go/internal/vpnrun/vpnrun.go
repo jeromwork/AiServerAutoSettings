@@ -25,14 +25,15 @@ const label = "ru.remoteagents.vpn" // служба (Mac) / задача (Window
 
 // Runner: Install/Uninstall/start/stop/Running — в файлах по ОС; Start/Stop/Reset — общие (со сторожем).
 type Runner struct {
-	Procs  api.Procs // нужен только на Linux (запуск обычным ребёнком)
-	Log    api.Logger
-	Bus    *bus.Bus // vpn.exited / vpn.gave_up (may be nil)
-	Sing   string   // путь к sing-box: <home>/runtime/<имя exe> (как в v2)
-	Conf   string   // путь к конфигу: <home>/private/vpn.json (как в v2)
-	API    string   // clash_api.external_controller из конфига VPN, напр. 127.0.0.1:9090
-	Secret string   // clash_api.secret
-	Exit   string   // тег outbound узла выхода в конфиге VPN (по нему ищем ошибки соединений); пусто = "proxy"
+	Procs    api.Procs // нужен только на Linux (запуск обычным ребёнком)
+	Log      api.Logger
+	Bus      *bus.Bus // vpn.exited / vpn.gave_up (may be nil)
+	Sing     string   // путь к sing-box: <home>/runtime/<имя exe> (как в v2)
+	Conf     string   // путь к конфигу: <home>/private/vpn.json (как в v2)
+	API      string   // clash_api.external_controller из конфига VPN, напр. 127.0.0.1:9090
+	Secret   string   // clash_api.secret
+	ProbeURL string   // адрес контрольной проверки (ровно 65536 байт); пусто = DefaultProbeURL
+	Exit     string   // тег outbound узла выхода в конфиге VPN (по нему ищем ошибки соединений); пусто = "proxy"
 
 	mu         sync.Mutex
 	proc       api.Process
@@ -226,9 +227,8 @@ func (r *Runner) monitor(ctx context.Context, gen int) {
 				if json.Unmarshal(sc.Bytes(), &m) != nil || !w.feed(m.Payload) {
 					continue
 				}
-				body.Close()
-				r.tunnelDead(gen, w)
-				return
+				// Ошибка соединения — повод для ОДНОЙ проверки; чтение журнала не блокируем.
+				go r.checkTunnel(ctx, gen, w, append([]string(nil), w.last...))
 			}
 			body.Close()
 			err = fmt.Errorf("connection lost")
@@ -260,9 +260,26 @@ func (r *Runner) exitTag() string {
 	return r.Exit
 }
 
+// checkTunnel: контрольная проверка по событию; провал = туннель мёртв.
+func (r *Runner) checkTunnel(ctx context.Context, gen int, w *tunnelWatch, errs []string) {
+	url := r.ProbeURL
+	if url == "" {
+		url = DefaultProbeURL
+	}
+	err := probe(ctx, url)
+	if err == nil {
+		w.probing.Store(false) // жив: ничего не делаем
+		return
+	}
+	if ctx.Err() != nil || !r.current(gen) {
+		return // остановлены нами, проверка недействительна
+	}
+	r.tunnelDead(gen, "probe failed: "+err.Error(), errs)
+}
+
 // tunnelDead: sing-box жив, узел выхода молчит. Останавливаем VPN (интернет идёт напрямую, fail-open),
 // сообщаем в шину; дальше — только net.changed (retryAfterDead) или ручной Start.
-func (r *Runner) tunnelDead(gen int, w *tunnelWatch) {
+func (r *Runner) tunnelDead(gen int, reason string, errs []string) {
 	r.mu.Lock()
 	if r.gen != gen || r.ctx.Err() != nil {
 		r.mu.Unlock()
@@ -271,7 +288,6 @@ func (r *Runner) tunnelDead(gen int, w *tunnelWatch) {
 	r.deadN++
 	n := r.deadN
 	r.mu.Unlock()
-	reason := fmt.Sprintf("%d connection errors via exit node in a row, no success", w.n)
 	r.Log.Warn("vpn.dead", "reason", reason, "n", n)
 	if err := r.Stop(); err != nil {
 		r.Log.Error("vpn.dead.stop", "err", err.Error())
@@ -279,5 +295,5 @@ func (r *Runner) tunnelDead(gen int, w *tunnelWatch) {
 	r.mu.Lock()
 	r.dead = true // после Stop (он сбрасывает флаг)
 	r.mu.Unlock()
-	r.Bus.Publish("vpn.dead", map[string]any{"reason": reason, "errors": w.last, "n": n, "gave_up": n >= maxFails})
+	r.Bus.Publish("vpn.dead", map[string]any{"reason": reason, "errors": errs, "n": n, "gave_up": n >= maxFails})
 }
