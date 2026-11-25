@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "binaries": [
+    {
+      "name": "sing-box",
+      "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip",
+      "sha256": "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df",
+      "member": "sing-box-1.14.4-windows-amd64/sing-box.exe",
+      "memberSha256": "8f30682ee198855440d2a7fe070d5d3653793b2d01bb8c85eea88f93bbe7c8b9",
+      "target": "sing-box.exe",
+      "license": "sing-box-1.14.4-windows-amd64/LICENSE"
+    },
+    {
+      "name": "openssh-ssh",
+      "url": "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.5.0.0p1-Beta/OpenSSH-Win64.zip",
+      "sha256": "bd48fe985d400402c278c485db20e6a82bc4c7f7d8e0ef5a81128f523096530c",
+      "member": "OpenSSH-Win64/ssh.exe",
+      "memberSha256": "e41e50a22dffeae8bb13bce4cb47b6c4aa0de4cdecbd62ef79d5046adc05a8b1",
+      "target": "openssh/ssh.exe",
+      "license": "OpenSSH-Win64/LICENSE.txt"
+    },
+    {
+      "name": "openssh-keygen",
+      "url": "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.5.0.0p1-Beta/OpenSSH-Win64.zip",
+      "sha256": "bd48fe985d400402c278c485db20e6a82bc4c7f7d8e0ef5a81128f523096530c",
+      "member": "OpenSSH-Win64/ssh-keygen.exe",
+      "memberSha256": "9aad9250dc45eb289ef81187d54e9979090321cd1b854b4587990e731ac7dd84",
+      "target": "openssh/ssh-keygen.exe"
+    },
+    {
+      "name": "openssh-libcrypto",
+      "url": "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.5.0.0p1-Beta/OpenSSH-Win64.zip",
+      "sha256": "bd48fe985d400402c278c485db20e6a82bc4c7f7d8e0ef5a81128f523096530c",
+      "member": "OpenSSH-Win64/libcrypto.dll",
+      "memberSha256": "065d3a16b418dfe5647c56c8a1787ac540b13299bdf35f69e9980525804cb9ab",
+      "target": "openssh/libcrypto.dll"
+    },
+    {
+      "name": "syncthingtray",
+      "url": "https://github.com/Martchus/syncthingtray/releases/download/v2.1.9/syncthingtray-2.1.9-x86_64-w64-mingw32.exe.zip",
+      "sha256": "c20d74998cb84980b07cb00eca4c38d26643eaa69b8bef94f6841ded6c752cc5",
+      "member": "syncthingtray.exe",
+      "memberSha256": "6d0010a4b5233a1c393614546d9bcdbd1c4f1f425502bea22d163314c2ad7da7",
+      "target": "syncthingtray/syncthingtray.exe",
+      "license": "syncthingtray-2.1.9-x86_64-w64-mingw32-LICENSES.md"
+    },
+    {
+      "name": "geoip-ru",
+      "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/66c864fcfe1535549e0658569cb514dbd35756ba/geoip-ru.srs",
+      "sha256": "55869c680cf6489991cbfdf62c2f5da77ea85bf571babddb6cd9c4941d84cbfa",
+      "member": null,
+      "memberSha256": "55869c680cf6489991cbfdf62c2f5da77ea85bf571babddb6cd9c4941d84cbfa",
+      "target": "rules/geoip-ru.srs"
+    }
+  ]
+}

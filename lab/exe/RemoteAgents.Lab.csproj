@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- По образцу app/launcher/RemoteAgents.Launcher.csproj: net48, C# 7.3, WinForms. Собирает lab/build.sh. -->
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <StartupObject>RemoteAgents.Lab.LabMain</StartupObject>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <!-- Права администратора сразу (решение владельца 23.11.2026): один UAC при запуске. -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Prefer32Bit>false</Prefer32Bit>
+    <ProductName>RemoteAgents-Lab</ProductName>
+    <AssemblyName>RemoteAgents-Lab</AssemblyName>
+    <RootNamespace>RemoteAgents.Lab</RootNamespace>
+    <LangVersion>7.3</LangVersion>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <LabVersion Condition="'$(LabVersion)' == ''">dev</LabVersion>
+    <InformationalVersion>$(LabVersion)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <GenerateBindingRedirectsOutputType>false</GenerateBindingRedirectsOutputType>
+    <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
+    <DebugType>none</DebugType>
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+    <!-- Пути ниже задаёт build.sh (абсолютные); по умолчанию — lab/out/. -->
+    <PythonEmbedZip Condition="'$(PythonEmbedZip)' == ''">$(MSBuildThisFileDirectory)../out/work/python-embed.zip</PythonEmbedZip>
+    <LabCodeZip Condition="'$(LabCodeZip)' == ''">$(MSBuildThisFileDirectory)../out/work/lab-code.zip</LabCodeZip>
+    <BinZip Condition="'$(BinZip)' == ''">$(MSBuildThisFileDirectory)../out/work/bin.zip</BinZip>
+    <ShellExePath Condition="'$(ShellExePath)' == ''">$(MSBuildThisFileDirectory)../out/RemoteAgents-Lab-shell.exe</ShellExePath>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- V9b: клиент меню собирается отдельным проектом -->
+    <Compile Remove="shell/**" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Xml" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+    <!-- V8: Проводник Диска (дословные копии старой Программы); имена ресурсов как в ней -->
+    <EmbeddedResource Include="disk/app.ico" LogicalName="RemoteAgents.App.ico" />
+    <EmbeddedResource Include="disk/icons/*.ico" LogicalName="RemoteAgents.Icons.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="disk/stignore.txt" LogicalName="RemoteAgents.Lab.stignore.txt" />
+    <EmbeddedResource Include="$(PythonEmbedZip)" LogicalName="python-embed.zip" Condition="Exists('$(PythonEmbedZip)')" />
+    <EmbeddedResource Include="$(BinZip)" LogicalName="bin.zip" Condition="Exists('$(BinZip)')" />
+    <EmbeddedResource Include="$(LabCodeZip)" LogicalName="lab-code.zip" Condition="Exists('$(LabCodeZip)')" />
+    <EmbeddedResource Include="$(ShellExePath)" LogicalName="RemoteAgents.Lab.Shell.exe" Condition="Exists('$(ShellExePath)')" />
+  </ItemGroup>
+  <Target Name="RequireLabResources" BeforeTargets="Publish">
+    <Error Condition="!Exists('$(PythonEmbedZip)') Or !Exists('$(LabCodeZip)') Or !Exists('$(BinZip)') Or !Exists('$(ShellExePath)')" Text="Сначала lab/build.sh: нужны python-embed.zip, bin.zip, lab-code.zip и клиент меню" />
+  </Target>
+</Project>

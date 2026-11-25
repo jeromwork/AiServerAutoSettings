@@ -1,0 +1,6 @@
+Дословные копии из ветки main старой Программы (git show main:<путь>), коммит 39c4f57a2a51900479c2a37741bf08782de43a47.
+Файлы app/launcher/: DiskExplorerController.cs DiskExplorerMetadata.cs DiskExplorerRegistry.cs DiskExplorerNative.cs DiskShellCommands.cs DiskShellModel.cs DiskSyncthingClient.cs DiskLifecycle.cs DiskRecycle.cs DiskMissingFolders.cs DiskTiming.cs
+DataCopy.cs: классы Json (Data.cs 32-47, без #if) и Files (Data.cs 77-146), шапка using + namespace RemoteAgents.Launcher.
+app.ico <- app/launcher/app.ico; icons/*.ico <- app/launcher/icons/; stignore.txt <- disk/stignore.txt
+Не копировались: AccountDiskSetup.cs, DiskChoice.cs (не нужны для компиляции).
+LabDiskGlue.cs — клей Лаборатории (не копия).
