@@ -134,18 +134,18 @@ func startProcess(ctx context.Context, pr api.Procs, exe string, args []string, 
 
 	tr, err := cleanup.New(api.NewPaths(dir), &defaultLogger{}, platform.Current())
 	if err != nil {
-		stdoutR.Close()
-		stdoutW.Close()
-		stderrR.Close()
-		stderrW.Close()
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
+		_ = stderrR.Close()
+		_ = stderrW.Close()
 		return nil, nil, nil, err
 	}
 	id := fmt.Sprintf("core-%d", time.Now().UnixNano())
 	if err := tr.Intent(api.Trace{Kind: "process", ID: id, Instance: tr.Instance(), Owner: "supervise", Data: map[string]string{"exe": exe, "home": dir}}); err != nil {
-		stdoutR.Close()
-		stdoutW.Close()
-		stderrR.Close()
-		stderrW.Close()
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
+		_ = stderrR.Close()
+		_ = stderrW.Close()
 		return nil, nil, nil, err
 	}
 
@@ -227,11 +227,19 @@ func rotateSelfUpdate(p api.Paths) error {
 	} else if err != nil {
 		return err
 	}
-	// Copy rather than rename: the installed path must survive a failed promotion.
-	if err := copyBinary(target, target+".prev"); err != nil {
+	// Free the installed name: Windows cannot replace a running executable,
+	// but can rename it. Keep that executable as the fallback until promotion.
+	previous := target + ".prev"
+	if err := replaceFile(target, previous); err != nil {
 		return err
 	}
-	return replaceFile(candidate, target)
+	if err := replaceFile(candidate, target); err != nil {
+		if restoreErr := replaceFile(previous, target); restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("supervise: self-update-restore: %w", restoreErr))
+		}
+		return err
+	}
+	return nil
 }
 
 func getEmbeddedVersion(parent context.Context, self string) string {
@@ -467,7 +475,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		go func() {
 			defer close(stdoutDone)
 			defer close(messages)
-			defer stdoutReader.Close()
+			defer func() { _ = stdoutReader.Close() }()
 			scanner := bufio.NewScanner(stdoutReader)
 			for scanner.Scan() {
 				var msg message
@@ -512,7 +520,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		stderrDone := make(chan struct{})
 		go func() {
 			defer close(stderrDone)
-			defer stderrReader.Close()
+			defer func() { _ = stderrReader.Close() }()
 			scanner := bufio.NewScanner(stderrReader)
 			for scanner.Scan() {
 				line := scanner.Text()
