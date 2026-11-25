@@ -20,6 +20,9 @@ type ChannelState struct {
 	Session int       `json:"session"`
 }
 
+// Channel consumes channel.up/channel.down from the shared bus. The active v2
+// SINGLE round waits for uplink.selected, then probes and claims the same SSH
+// session through Singbox.ChanAddr; ForcePath selects chan before dropping SSH.
 type Channel interface {
 	Component
 	State() ChannelState
