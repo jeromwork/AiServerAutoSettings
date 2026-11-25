@@ -28,21 +28,23 @@ case "$remote" in
 esac
 repo=${repo%.git}
 [[ $repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail 'invalid release repository in origin'
-# R0 supplies one or more minisign public keys, with optional comment lines.
-# Before R0, development builds have no trusted release keys.
+# C9: R0 supplies current and backup OpenSSH keys for the ra3 signer.
+[[ -s keys/allowed_signers ]] || fail 'keys/allowed_signers is missing or empty (R0 required)'
 keys=''
-if [[ -f keys/release.pub ]]; then
-  while IFS= read -r line || [[ -n $line ]]; do
-    line=${line%$'\r'}
-    [[ -z $line || $line == 'untrusted comment:'* ]] && continue
-    [[ $line =~ ^[A-Za-z0-9+/]{56}$ ]] || fail 'invalid minisign public key'
-    keys+="${keys:+,}$line"
-  done < keys/release.pub
-  [[ -n $keys ]] || fail 'release.pub contains no public keys'
-else
-  printf 'build: warning: keys/release.pub absent (R0); no trusted release keys embedded\n' >&2
-fi
-ldflags="-X main.version=$version -X main.releaseRepo=$repo -X main.pubKeys=$keys"
+key_count=0
+while read -r signer key_type key_data comment || [[ -n $signer ]]; do
+  [[ -z $signer || $signer == \#* ]] && continue
+  [[ $signer == ra3 ]] || fail 'allowed_signers: expected signer ra3'
+  [[ $key_type =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521))$ ]] ||
+    fail 'allowed_signers: unsupported public key type'
+  [[ $key_data =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || fail 'allowed_signers: invalid public key data'
+  # Drop comments; keep the allowed_signers format, including line boundaries.
+  keys+="${keys:+$'\n'}$signer $key_type $key_data"
+  key_count=$((key_count + 1))
+done < keys/allowed_signers
+[[ $key_count == 2 ]] || fail 'allowed_signers must contain current and backup keys'
+# Go's flag parser preserves spaces/newlines inside this quoted -X argument.
+ldflags="-X main.version=$version -X main.releaseRepo=$repo -X 'main.pubKeys=$keys'"
 
 exec 9>/tmp/heavy-tests.lock
 timeout --foreground 420 flock -x 9
