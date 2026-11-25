@@ -68,7 +68,19 @@ func userCredential(username string) (*syscall.Credential, error) {
 	if err != nil {
 		return nil, fmt.Errorf("shell: parse-gid: %w", err)
 	}
-	return &syscall.Credential{
+	groups, err := u.GroupIds()
+	if err != nil {
+		return nil, fmt.Errorf("shell: user-groups: %w", err)
+	}
+	gids := make([]uint32, 0, len(groups))
+	for _, group := range groups {
+		id, err := strconv.ParseUint(group, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("shell: parse-group: %w", err)
+		}
+		gids = append(gids, uint32(id))
+	}
+	return &syscall.Credential{Groups: gids,
 		Uid: uint32(uid),
 		Gid: uint32(gid),
 	}, nil
@@ -94,7 +106,7 @@ func startProc(ctx context.Context, pr api.Procs, runAs, path string, args []str
 		spec := api.ProcSpec{
 			Name:   "exec:" + proc.id,
 			Path:   path,
-			Args:   args,
+			Args:   args[1:],
 			Dir:    cwd,
 			RunAs:  runAs,
 			Stdout: outW,
@@ -105,13 +117,18 @@ func startProc(ctx context.Context, pr api.Procs, runAs, path string, args []str
 		if err != nil {
 			return fmt.Errorf("shell: start-failed: %w", err)
 		}
-		proc.killFn = func() error {
+		proc.setKill(func() error {
 			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
 			return p.Stop(stopCtx)
-		}
+		})
 		go func() {
-			<-p.Done()
+			select {
+			case <-p.Done():
+			case <-ctx.Done():
+				_ = proc.Kill()
+				<-p.Done()
+			}
 			proc.finish(p.ExitCode())
 		}()
 		return nil
@@ -125,6 +142,7 @@ func startProc(ctx context.Context, pr api.Procs, runAs, path string, args []str
 	cmd.Dir = cwd
 	cmd.Stdout = outW
 	cmd.Stderr = errW
+	cmd.WaitDelay = time.Second
 
 	cred, err := userCredential(runAs)
 	if err != nil {
@@ -135,17 +153,24 @@ func startProc(ctx context.Context, pr api.Procs, runAs, path string, args []str
 		Credential: cred,
 	}
 
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if err == syscall.ESRCH {
+			return os.ErrProcessDone
+		}
+		return err
+	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("shell: start-failed: %w", err)
 	}
 
-	proc.killFn = func() error {
-		if cmd.Process == nil {
+	proc.setKill(func() error {
+		err := cmd.Cancel()
+		if err == os.ErrProcessDone {
 			return nil
 		}
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		return cmd.Process.Kill()
-	}
+		return err
+	})
 
 	go func() {
 		err := cmd.Wait()

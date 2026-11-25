@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"remoteagents/internal/api"
 	"remoteagents/internal/api/fake"
@@ -32,8 +33,11 @@ func runDevShell(ctx context.Context, args []string) int {
 
 	shellType := args[1]
 	cmdStr := args[2]
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 
 	sh := platform.Current().NewShell(&fake.Logger{}, nil, "")
+	defer func() { _ = sh.KillAll() }()
 	req := api.ExecReq{
 		Shell: shellType,
 		Cmd:   cmdStr,

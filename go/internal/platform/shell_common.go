@@ -19,24 +19,25 @@ const (
 
 // execProc implements api.ExecProc.
 type execProc struct {
-	id        string
-	mu        sync.Mutex
-	outBuf    []byte
-	outBase   int
-	errBuf    []byte
-	errBase   int
-	truncated bool
-	exited    bool
-	code      int
-	notifyCh  chan struct{}
-	killFn    func() error
+	id            string
+	mu            sync.Mutex
+	outBuf        []byte
+	outBase       int
+	errBuf        []byte
+	errBase       int
+	truncated     bool
+	exited        bool
+	code          int
+	notifyCh      chan struct{}
+	killFn        func() error
+	killRequested bool
 }
 
 func newExecProc(id string, killFn func() error) *execProc {
 	return &execProc{
 		id:       id,
 		code:     -1,
-		notifyCh: make(chan struct{}, 1),
+		notifyCh: make(chan struct{}),
 		killFn:   killFn,
 	}
 }
@@ -99,6 +100,7 @@ func (p *execProc) WaitNew(ctx context.Context, outOff, errOff int, max time.Dur
 		done := p.exited ||
 			outOff < p.outBase+len(p.outBuf) ||
 			errOff < p.errBase+len(p.errBuf)
+		changed := p.notifyCh
 		p.mu.Unlock()
 		if done {
 			return
@@ -109,7 +111,7 @@ func (p *execProc) WaitNew(ctx context.Context, outOff, errOff int, max time.Dur
 			return
 		case <-timer.C:
 			return
-		case <-p.notifyCh:
+		case <-changed:
 		}
 	}
 }
@@ -141,10 +143,33 @@ func (p *execProc) Truncated() bool {
 }
 
 func (p *execProc) Kill() error {
-	if p.killFn != nil {
-		return p.killFn()
+	p.mu.Lock()
+	if p.exited {
+		p.mu.Unlock()
+		return nil
+	}
+	p.killRequested = true
+	kill := p.killFn
+	p.mu.Unlock()
+	if kill != nil {
+		return kill()
 	}
 	return nil
+}
+
+func (p *execProc) setKill(kill func() error) {
+	p.mu.Lock()
+	p.killFn = kill
+	requested := p.killRequested
+	p.mu.Unlock()
+	if requested {
+		_ = kill()
+	}
+}
+
+func (p *execProc) changed() {
+	close(p.notifyCh)
+	p.notifyCh = make(chan struct{})
 }
 
 func (p *execProc) appendData(stream string, data []byte) {
@@ -172,10 +197,7 @@ func (p *execProc) appendData(stream string, data []byte) {
 		p.truncated = true
 	}
 
-	select {
-	case p.notifyCh <- struct{}{}:
-	default:
-	}
+	p.changed()
 }
 
 func (p *execProc) finish(code int) {
@@ -184,10 +206,7 @@ func (p *execProc) finish(code int) {
 	p.exited = true
 	p.code = code
 
-	select {
-	case p.notifyCh <- struct{}{}:
-	default:
-	}
+	p.changed()
 }
 
 type streamWriter struct {
@@ -277,11 +296,17 @@ func (s *shellImpl) Start(ctx context.Context, r api.ExecReq) (api.ExecProc, err
 	}
 
 	if r.Wait {
-		for !proc.Exited() {
+		for {
+			proc.mu.Lock()
+			exited, changed := proc.exited, proc.notifyCh
+			proc.mu.Unlock()
+			if exited {
+				break
+			}
 			select {
 			case <-ctx.Done():
 				return proc, ctx.Err()
-			case <-proc.notifyCh:
+			case <-changed:
 			}
 		}
 	}
