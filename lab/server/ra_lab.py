@@ -449,6 +449,28 @@ def auto_candidates(blocked):
     return res
 
 
+DOCKER = {'ts': 0.0, 'ports': {}}
+
+
+def docker_ports():
+    """{порт: контейнер} для docker-публикаций TCP на 127.0.0.1/0.0.0.0; не чаще раза в 2 с, при ошибке — пусто."""
+    if time.time() - DOCKER['ts'] < 2:
+        return DOCKER['ports']
+    DOCKER['ts'] = time.time()
+    res = {}
+    try:
+        out = subprocess.check_output(['sudo', '-n', 'docker', 'ps', '--format', '{{.Names}}\t{{.Ports}}'], text=True,
+                                      stderr=subprocess.DEVNULL, timeout=10)
+        for line in out.splitlines():
+            name, _, ports = line.partition('\t')
+            for host, port in re.findall(r'(127\.0\.0\.1|0\.0\.0\.0):(\d+)->\d+/tcp', ports):
+                res.setdefault(int(port), name)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    DOCKER['ports'] = res
+    return res
+
+
 def autoforward_step(miss):
     pcs = pc_online()
     if not pcs:
@@ -457,12 +479,17 @@ def autoforward_step(miss):
     blocked = {st['port'] for st in sts}
     listening = {r['port']: r['process'] for r in server_listeners()}
     cand = auto_candidates(blocked)
+    for port, cname in docker_ports().items():
+        if port >= 1024 and port not in blocked and port not in cand and not any(port == b or (isinstance(b, range) and port in b) for b in NO_AUTO_PORTS):
+            cand[port] = (cname, 'docker: ' + cname, '-')
     with registry_lock():
         rows = read_registry('exposed.json')
         known = {r['serverPort'] for r in rows}
         for port, (name, comm, cwd) in sorted(cand.items()):
             if port in known:
                 continue
+            if any(r['name'] == name for r in rows):
+                name = '%s-%d' % (name, port)
             got = place(name, port, port, sts)
             if got:
                 rows.append({'name': name, 'serverPort': port, 'pcPort': got, 'cwd': cwd, 'proc': comm, 'auto': True,
@@ -491,7 +518,7 @@ def autoforward_step(miss):
                         r['pcPort'] = got
                     break
         write_registry('exposed.json', keep)
-        PAGE['rows'] = [{'name': r['name'], 'port': r['pcPort'], 'proc': r.get('proc') or ((re.search(r'"([^"]+)"', listening.get(r['serverPort']) or '') or [0, '-'])[1]),
+        PAGE['rows'] = [{'name': r['name'], 'port': r['pcPort'], 'proc': r.get('proc') or ('docker: ' + docker_ports()[r['serverPort']] if r['serverPort'] in docker_ports() else None) or ((re.search(r'"([^"]+)"', listening.get(r['serverPort']) or '') or [0, '-'])[1]),
                          'auto': bool(r.get('auto')), 'pcs': [st['pc'] for st, exp in pcs if any(e['name'] == r['name'] for e in exp)]}
                         for r in keep]
 
