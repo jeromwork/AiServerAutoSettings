@@ -278,6 +278,18 @@ func checkSwitchExpire(p api.Paths, log api.Logger) (bool, error) {
 	if err := json.Unmarshal(b, &sw); err != nil {
 		return false, err
 	}
+	// Commit writes lastgood before removing switch.json. Finish an interrupted
+	// commit before considering expiry, so a confirmed generation is not reverted.
+	lastGood, err := os.ReadFile(filepath.Join(p.Config, "lastgood"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if sw.To != "" && sw.To == strings.TrimSpace(string(lastGood)) {
+		if err := os.Remove(path); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
 	if sw.Deadline.IsZero() {
 		return false, fmt.Errorf("supervise: switch-invalid: missing deadline")
 	}
