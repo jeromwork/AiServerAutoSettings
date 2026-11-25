@@ -59,6 +59,15 @@ func runDevCleanup(ctx context.Context, args []string) int {
 			return 1
 		}
 
+		if err := c.Intent(api.Trace{
+			Kind:  "listener",
+			ID:    "demo-listener",
+			Owner: "dev",
+			Data:  map[string]string{"addr": "127.0.0.1:0"},
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "intent listener: %v\n", err)
+			return 1
+		}
 		var lc net.ListenConfig
 		l, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 		if err != nil {
@@ -67,16 +76,6 @@ func runDevCleanup(ctx context.Context, args []string) int {
 		}
 		addr := l.Addr().String()
 
-		if err := c.Intent(api.Trace{
-			Kind:  "listener",
-			ID:    "demo-listener",
-			Owner: "dev",
-			Data:  map[string]string{"addr": addr},
-		}); err != nil {
-			_ = l.Close()
-			fmt.Fprintf(os.Stderr, "intent listener: %v\n", err)
-			return 1
-		}
 		if err := c.Applied("listener", "demo-listener", map[string]string{"addr": addr}, nil); err != nil {
 			_ = l.Close()
 			fmt.Fprintf(os.Stderr, "applied listener: %v\n", err)

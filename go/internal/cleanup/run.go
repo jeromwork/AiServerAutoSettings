@@ -377,12 +377,12 @@ func removeHostsBlock(marker string) error {
 
 	for _, line := range lines {
 		trimmedLine := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmedLine, "#") && strings.Contains(trimmedLine, trimmedMarker) && strings.Contains(trimmedLine, "begin") {
+		if trimmedLine == "# "+trimmedMarker+" begin" {
 			inBlock = true
 			continue
 		}
 		if inBlock {
-			if strings.HasPrefix(trimmedLine, "#") && strings.Contains(trimmedLine, trimmedMarker) && strings.Contains(trimmedLine, "end") {
+			if trimmedLine == "# "+trimmedMarker+" end" {
 				inBlock = false
 				continue
 			}

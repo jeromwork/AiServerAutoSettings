@@ -133,7 +133,17 @@ func (s *darwinSteps) checkRoute(ctx context.Context, dest, iface string) bool {
 	if err != nil {
 		return true
 	}
-	return bytes.Contains(out, []byte(dest))
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 2 && fields[0] == dest {
+			for _, f := range fields[2:] {
+				if f == iface {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (s *darwinSteps) removeRule(ctx context.Context, prio, table string) error {
@@ -149,7 +159,8 @@ func (s *darwinSteps) removeFirewall(ctx context.Context, name string) error {
 }
 
 func (s *darwinSteps) checkFirewall(ctx context.Context, name string) bool {
-	return true
+	out, err := exec.CommandContext(ctx, "pfctl", "-a", name, "-sr").Output()
+	return err != nil || len(bytes.TrimSpace(out)) > 0
 }
 
 func (s *darwinSteps) lock(path string) (func(), error) {
