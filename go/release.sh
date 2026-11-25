@@ -47,10 +47,13 @@ TARGETS=(
 CLEANUP_DIRS=()
 cleanup() { for d in "${CLEANUP_DIRS[@]}"; do rm -rf -- "$d"; done; }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 if [[ "$DRY_RUN" == true ]]; then
   DIST_DIR=$(mktemp -d); CLEANUP_DIRS+=("$DIST_DIR")
-  [[ "$SKIP_BUILD" == true && -d "$HERE/dist" ]] && cp -a "$HERE/dist/." "$DIST_DIR/" 2>/dev/null || true
+  if [[ "$SKIP_BUILD" == true ]]; then cp -a "$HERE/dist/." "$DIST_DIR/"; fi
 else
   DIST_DIR="$HERE/dist"; mkdir -p "$DIST_DIR"
 fi
@@ -58,10 +61,8 @@ fi
 if [[ "$SKIP_BUILD" == false ]]; then
   if [[ -x "$HERE/build.sh" ]]; then
     echo "==> Сборка 5 целей через build.sh..."
-    timeout 420 flock --close /tmp/heavy-tests.lock bash "$HERE/build.sh"
+    timeout 420 bash "$HERE/build.sh"
     [[ "$DRY_RUN" == true ]] && cp -a "$HERE/dist/." "$DIST_DIR/"
-  elif [[ "$DRY_RUN" == true ]]; then
-    for t in "${TARGETS[@]}"; do echo "dummy binary for $t" > "$DIST_DIR/$t"; done
   else
     echo "ОШИБКА: $HERE/build.sh не найден или не исполняемый" >&2; exit 1
   fi
@@ -71,63 +72,62 @@ for t in "${TARGETS[@]}"; do
   [[ -f "$DIST_DIR/$t" ]] || { echo "ОШИБКА: целевой файл $t отсутствует в $DIST_DIR" >&2; exit 1; }
 done
 
-if [[ -x "$DIST_DIR/remoteagents-linux-amd64" ]]; then
-  bin_ver=$("$DIST_DIR/remoteagents-linux-amd64" version 2>/dev/null || true)
-  [[ "$bin_ver" =~ ^3\.0\.[0-9]+ ]] && echo "$bin_ver" > "$DIST_DIR/version.txt"
-fi
-
-if [[ ! -f "$DIST_DIR/version.txt" ]]; then
-  COMMIT_COUNT=$(git -C "$REPO" rev-list --count HEAD 2>/dev/null || echo "1")
-  echo "3.0.$COMMIT_COUNT" > "$DIST_DIR/version.txt"
-fi
-VERSION=$(tr -d ' \r\n' < "$DIST_DIR/version.txt")
-
+# Always query the actual binary, including with --skip-build; never trust version.txt.
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || {
+  echo "ОШИБКА: для проверки версии требуется Linux/amd64" >&2; exit 1;
+}
+VERSION=$(timeout 5 "$DIST_DIR/remoteagents-linux-amd64" version) || {
+  echo "ОШИБКА: не удалось получить версию сборки" >&2; exit 1;
+}
+[[ "$VERSION" =~ ^3\.0\.[0-9]+$ ]] || {
+  echo "ОШИБКА: недопустимая версия сборки" >&2; exit 1;
+}
+printf '%s\n' "$VERSION" > "$DIST_DIR/version.txt"
 (cd "$DIST_DIR" && sha256sum "${TARGETS[@]}" version.txt > checksums.txt)
 
-sign_done=false
-sign_target="$DIST_DIR/checksums.txt"
-
-if [[ -n "${RELEASE_KEY:-}" ]]; then
-  if [[ -f "$RELEASE_KEY" ]]; then
-    ssh-keygen -Y sign -n ra3-release -f "$RELEASE_KEY" "$sign_target" 2>/dev/null && sign_done=true
-  else
-    key_tmp=$(mktemp); chmod 600 "$key_tmp"; printf '%s\n' "$RELEASE_KEY" > "$key_tmp"
-    ssh-keygen -Y sign -n ra3-release -f "$key_tmp" "$sign_target" 2>/dev/null && sign_done=true
-    rm -f -- "$key_tmp"
-  fi
-fi
-
-if [[ "$sign_done" == false ]] && command -v projenv >/dev/null 2>&1; then
+# Dry-run does not access signing secrets or create a pretend signature.
+if [[ "$DRY_RUN" == false ]]; then
+  command -v projenv >/dev/null || { echo "ОШИБКА: требуется projenv" >&2; exit 1; }
   PROJ=""
-  projenv list 2>/dev/null | grep -q '^remoteagents' && PROJ="remoteagents" || { projenv list 2>/dev/null | grep -q '^ra3' && PROJ="ra3"; } || true
-  if [[ -n "$PROJ" ]]; then
-    projenv run "$PROJ" -- bash -c '
-      k="${RELEASE_KEY:-${KEY:-}}"; t="$1"
-      if [[ -f "$k" ]]; then ssh-keygen -Y sign -n ra3-release -f "$k" "$t"
-      elif [[ -n "$k" ]]; then
-        f=$(mktemp); chmod 600 "$f"; printf "%s\n" "$k" > "$f"
-        ssh-keygen -Y sign -n ra3-release -f "$f" "$t"; r=$?; rm -f -- "$f"; exit $r
-      else exit 1; fi' _ "$sign_target" >/dev/null 2>&1 && sign_done=true
-  fi
-fi
-
-if [[ "$sign_done" == false ]]; then
-  if [[ "$DRY_RUN" == true ]]; then
-    echo "dummy-signature" > "$DIST_DIR/checksums.txt.sig"
-  else
-    echo "ОШИБКА: не удалось подписать checksums.txt (настройте projenv или укажите RELEASE_KEY)" >&2; exit 1
-  fi
+  projects=$(projenv list)
+  if grep -q '^remoteagents' <<< "$projects"; then PROJ="remoteagents"
+  elif grep -q '^ra3' <<< "$projects"; then PROJ="ra3"; fi
+  [[ -n "$PROJ" ]] || { echo "ОШИБКА: проект подписи не найден в projenv" >&2; exit 1; }
+  rm -f -- "$DIST_DIR/checksums.txt.sig"
+  projenv run "$PROJ" -- bash -c '
+    set -euo pipefail
+    umask 077
+    key_dir=$(mktemp -d)
+    trap '\''rm -rf -- "$key_dir"'\'' EXIT
+    trap '\''exit 130'\'' INT
+    trap '\''exit 143'\'' TERM
+    trap '\''exit 129'\'' HUP
+    k="${RELEASE_KEY:-${KEY:-}}"
+    [[ -n "$k" ]] || exit 1
+    if [[ -f "$k" ]]; then
+      cp -- "$k" "$key_dir/key"
+    else
+      printf "%s\n" "$k" > "$key_dir/key"
+    fi
+    ssh-keygen -Y sign -n ra3-release -f "$key_dir/key" "$1"
+  ' _ "$DIST_DIR/checksums.txt" >/dev/null 2>&1 || {
+    echo "ОШИБКА: не удалось подписать checksums.txt через projenv" >&2; exit 1;
+  }
+  ssh-keygen -Y verify -n ra3-release -f "$HERE/keys/allowed_signers" -I ra3 \
+    -s "$DIST_DIR/checksums.txt.sig" < "$DIST_DIR/checksums.txt"
 fi
 
 ASSETS=()
 for t in "${TARGETS[@]}"; do ASSETS+=("$DIST_DIR/$t"); done
-ASSETS+=("$DIST_DIR/version.txt" "$DIST_DIR/checksums.txt" "$DIST_DIR/checksums.txt.sig")
+ASSETS+=("$DIST_DIR/version.txt" "$DIST_DIR/checksums.txt")
+if [[ "$DRY_RUN" == false ]]; then ASSETS+=("$DIST_DIR/checksums.txt.sig"); fi
 
 if [[ "$DRY_RUN" == true ]]; then
   echo "=== Список файлов релиза ($TAG) ==="
   for a in "${ASSETS[@]}"; do
     echo "  $(basename "$a") ($(stat -c%s "$a" 2>/dev/null || wc -c < "$a") bytes)"
   done
+  echo "  checksums.txt.sig (будет создан через projenv при публикации)"
   echo && echo "=== checksums.txt ===" && cat "$DIST_DIR/checksums.txt" && echo
   echo "Готово (--dry-run: файлы сформированы, загрузка пропущена)."
   exit 0
@@ -152,12 +152,16 @@ gh release edit "$TAG" --prerelease --notes "$NOTES"
 echo "==> Скачивание и сверка SHA-256..."
 TMP_DIR=$(mktemp -d); CLEANUP_DIRS+=("$TMP_DIR")
 
-gh release download "$TAG" -p "checksums.txt" -D "$TMP_DIR"
-DOWNLOADED_SHA=$(sha256sum "$TMP_DIR/checksums.txt" | cut -d' ' -f1)
-[[ "$DOWNLOADED_SHA" == "$SHA_CHECKSUMS" ]] || { echo "ОШИБКА: SHA-256 скачанного checksums.txt ($DOWNLOADED_SHA) != локального ($SHA_CHECKSUMS)" >&2; exit 1; }
-
-gh release download "$TAG" -p "remoteagents-linux-amd64" -D "$TMP_DIR"
-(cd "$TMP_DIR" && sha256sum -c <(grep "remoteagents-linux-amd64" "$DIST_DIR/checksums.txt"))
+for a in "${ASSETS[@]}"; do
+  name=$(basename "$a")
+  gh release download "$TAG" -p "$name" -D "$TMP_DIR"
+  cmp -s -- "$a" "$TMP_DIR/$name" || {
+    echo "ОШИБКА: скачанный $name отличается от опубликованного файла" >&2; exit 1;
+  }
+done
+(cd "$TMP_DIR" && sha256sum -c checksums.txt)
+ssh-keygen -Y verify -n ra3-release -f "$HERE/keys/allowed_signers" -I ra3 \
+  -s "$TMP_DIR/checksums.txt.sig" < "$TMP_DIR/checksums.txt"
 
 echo "==> Релиз $TAG успешно опубликован и проверен."
 echo "Релиз: https://github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo "jeromwork/AiServerAutoSettings")/releases/tag/$TAG"
