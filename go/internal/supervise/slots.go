@@ -25,6 +25,7 @@ const (
 type slots struct {
 	Current        string `json:"current"`
 	LastGood       string `json:"lastGood"`
+	Previous       string `json:"previous,omitempty"`
 	EmbeddedSeen   string `json:"embeddedSeen"`
 	FailsGood      int    `json:"failsGood"`
 	MemRestarts    int    `json:"memRestarts"`
@@ -96,6 +97,9 @@ func (s *slots) save(log api.Logger) {
 
 // markGood: the core said good, the current version is proven.
 func (s *slots) markGood(log api.Logger) {
+	if s.LastGood != "" && s.LastGood != s.Current {
+		s.Previous = s.LastGood
+	}
 	s.LastGood, s.FailsGood, s.MemRestarts, s.RollbackReason = s.Current, 0, 0, ""
 	s.save(log)
 }

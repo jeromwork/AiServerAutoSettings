@@ -56,7 +56,7 @@ func (d *Disk) Name() string { return "disk" }
 func (d *Disk) Status() map[string]any {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return map[string]any{"state": d.state}
+	return map[string]any{"state": d.state, "home": d.home, "base": d.base}
 }
 func (d *Disk) set(state string) {
 	d.mu.Lock()
@@ -65,6 +65,9 @@ func (d *Disk) set(state string) {
 	d.mu.Unlock()
 	if changed {
 		d.log("state", "state", state)
+		if d.o.Bus != nil {
+			d.o.Bus.Publish("disk.state", map[string]any{"state": state})
+		}
 	}
 }
 func (d *Disk) log(event string, kv ...any) {

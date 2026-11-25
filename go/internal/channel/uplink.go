@@ -407,7 +407,7 @@ func (r *Rounds) Start(ctx context.Context) error {
 	if r.cancel != nil {
 		return nil
 	}
-	if r.cfg == nil || len(r.cfg.Paths.Channel) == 0 || len(r.cfg.Servers) == 0 || len(r.cfg.Servers[0].Key) == 0 || r.o.Mode.NoChannel || r.o.Mode.NoSingbox {
+	if r.cfg == nil || len(r.cfg.Servers) == 0 || len(r.cfg.Servers[0].Key) == 0 || r.o.Mode.NoChannel || r.o.Mode.NoSingbox {
 		return nil
 	}
 	if r.pr == nil || r.agent == nil {
