@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -308,8 +309,8 @@ func (c *Cleaner) isSafeTmpPath(p string) bool {
 	tempDir := filepath.Clean(os.TempDir())
 	relTemp, err := filepath.Rel(tempDir, cleanP)
 	if err == nil && !strings.HasPrefix(relTemp, "..") {
-		base := filepath.Base(cleanP)
-		if strings.HasPrefix(base, "ra3-") || strings.HasPrefix(relTemp, "ra3-") {
+		first := strings.SplitN(relTemp, string(os.PathSeparator), 2)[0]
+		if strings.HasPrefix(first, "ra3-") {
 			return true
 		}
 	}
@@ -478,9 +479,39 @@ func (c *Cleaner) validate(t api.Trace) error {
 	owned := func(s string) bool {
 		return s == tag || strings.HasPrefix(s, tag+"-") || strings.HasPrefix(s, "ra3_"+c.instance[:8])
 	}
+	// macOS assigns utun numbers itself. Only an applied trace belonging to
+	// this instance authorizes the otherwise untagged interface name.
+	ownedInterface := func(name string) bool {
+		if owned(name) {
+			return true
+		}
+		if runtime.GOOS != "darwin" || t.Instance != c.instance || t.Phase != "applied" || !strings.HasPrefix(name, "utun") {
+			return false
+		}
+		number := strings.TrimPrefix(name, "utun")
+		n, err := strconv.ParseUint(number, 10, 32)
+		if err != nil || strconv.FormatUint(n, 10) != number {
+			return false
+		}
+		iface, err := net.InterfaceByName(name)
+		if err != nil {
+			// An already removed interface needs no system mutation.
+			interfaces, queryErr := net.Interfaces()
+			if queryErr != nil {
+				return false
+			}
+			for _, candidate := range interfaces {
+				if candidate.Name == name {
+					return false
+				}
+			}
+			return true
+		}
+		return t.Data["ifindex"] == strconv.Itoa(iface.Index)
+	}
 	switch t.Kind {
 	case "adapter":
-		if !owned(t.Data["name"]) {
+		if !ownedInterface(t.Data["name"]) {
 			return fmt.Errorf("cleanup: ownership: adapter")
 		}
 	case "route":
@@ -488,7 +519,7 @@ func (c *Cleaner) validate(t api.Trace) error {
 			return fmt.Errorf("cleanup: ownership: route")
 		}
 	case "dns":
-		if !owned(t.Data["iface"]) {
+		if !ownedInterface(t.Data["iface"]) {
 			return fmt.Errorf("cleanup: ownership: dns")
 		}
 	case "rule":
