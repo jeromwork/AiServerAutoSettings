@@ -2,7 +2,7 @@ package api
 
 import "encoding/json"
 
-// Config — нормализованная модель remoteagents-2. Отображение JSON → модель — блок C, таблица C2.
+// Config is the v2 config plus decrypted runtime values. Raw remains encrypted.
 type Config struct {
 	Format    string
 	Name      string
@@ -20,6 +20,8 @@ type Config struct {
 	Disk      json.RawMessage
 	Raw       json.RawMessage
 	Unknown   []string
+	Sections  map[string]json.RawMessage // original top-level sections
+	VPNOnly   bool                       // vpn present, server and paths absent
 }
 
 type Server struct {
@@ -80,7 +82,7 @@ type LocalWeb struct {
 }
 
 // ForwardCfg — нормализовано: Listen — только порт (1..65535); формы JSON: число или строка из цифр (как int(f['listen']) v2).
-// Строка "адрес:порт" — отказ semantic "forwards.listen" (v3 слушает только 127.0.0.1).
+// Invalid items are skipped, as in v2 forward.py.
 type ForwardCfg struct {
 	Listen int
 	ToHost string
@@ -88,11 +90,37 @@ type ForwardCfg struct {
 }
 type LanProxyCfg struct{ Port int }
 
-// ControlCfg: JSON "control" (bool, нет → true).
+// ControlCfg: JSON "control" (bool, absent → false, v2 apply).
 type ControlCfg struct {
 	Enabled bool
 }
 type UpdateCfg struct {
-	Auto    bool   // JSON update.auto, нет → true
-	Channel string // JSON update.channel, нет → "v3-latest"
+	Auto    bool   // JSON update.auto; absent → false
+	Channel string // JSON update.channel, preserved when present
+}
+
+// Enabled reports explicit section presence; absent sections never start components.
+func (c *Config) Enabled(name string) bool {
+	if c == nil {
+		return false
+	}
+	v, ok := c.Sections[name]
+	if !ok || string(v) == "null" || string(v) == "false" {
+		return false
+	}
+	var obj struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if json.Unmarshal(v, &obj) == nil && obj.Enabled != nil {
+		return *obj.Enabled
+	}
+	return true
+}
+
+// Section returns the original parameters without dropping v2 fields.
+func (c *Config) Section(name string, dst any) error {
+	if c == nil || c.Sections[name] == nil {
+		return nil
+	}
+	return json.Unmarshal(c.Sections[name], dst)
 }
