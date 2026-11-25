@@ -58,14 +58,14 @@ func (discardCloser) Write(p []byte) (int, error) { return len(p), nil }
 func (discardCloser) Close() error                { return nil }
 
 func writeExecutableScript(path, unixContent, winContent string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
 	content := strings.Replace(unixContent, "#!/bin/sh\n", "#!/bin/sh\nif [ \"$1\" = version ]; then echo embedded; exit 0; fi\n", 1)
 	if runtime.GOOS == "windows" {
 		content = winContent
 	}
-	return os.WriteFile(path, []byte(content), 0755)
+	return os.WriteFile(path, []byte(content), 0700) // #nosec G306 -- simulation scripts must be executable by their owner.
 }
 
 func getExeName() string {
@@ -110,7 +110,7 @@ func runDevSupervise(ctx context.Context, args []string) int {
 		homeDir = tmp
 	}
 
-	if err := os.MkdirAll(homeDir, 0755); err != nil {
+	if err := os.MkdirAll(homeDir, 0700); err != nil {
 		fmt.Fprintf(os.Stderr, "cannot create home dir: %v\n", err)
 		return 1
 	}
@@ -205,7 +205,7 @@ func runDevSupervise(ctx context.Context, args []string) int {
 	home3 := filepath.Join(homeDir, "sim3")
 	p3 := api.NewPaths(home3)
 
-	flagFile := filepath.Join(home3, "invoked.flag")
+	flagFile := "invoked.flag"
 	silentExe := filepath.Join(p3.Versions, "silent", exeName)
 	silentUnix := fmt.Sprintf("#!/bin/sh\nif [ ! -f '%s' ]; then\n  touch '%s'\n  sleep 300\nelse\n  echo '{\"t\":\"good\",\"version\":\"silent\"}'\n  echo '{\"t\":\"alive\"}'\necho '{\"t\":\"exit\",\"final\":true}'\n  exit 0\nfi\n", flagFile, flagFile)
 	silentWin := fmt.Sprintf("@echo off\r\nif not exist \"%s\" (\r\n  type nul > \"%s\"\r\n  timeout /t 30 /nobreak >nul\r\n) else (\r\n  echo {\"t\":\"good\",\"version\":\"silent\"}\r\n  echo {\"t\":\"exit\",\"final\":true}\r\n  exit /b 0\r\n)\r\n", flagFile, flagFile)

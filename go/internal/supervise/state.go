@@ -75,7 +75,7 @@ func loadSlots(p api.Paths, self, embeddedVersion string, reset bool) (*slots, e
 		embeddedVersion: embeddedVersion,
 		self:            self,
 	}
-	if err := os.MkdirAll(p.Versions, 0755); err != nil {
+	if err := os.MkdirAll(p.Versions, 0700); err != nil {
 		return nil, err
 	}
 	b, err := os.ReadFile(filepath.Join(p.Versions, "state.json"))
@@ -256,7 +256,7 @@ func writeJSON(path string, v any) error {
 
 func atomicWrite(path string, b []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(dir, ".supervise-*")
@@ -295,5 +295,5 @@ func copyBinary(src, dst string) error {
 	if len(b) > 100<<20 {
 		return fmt.Errorf("supervise: size: executable too large")
 	}
-	return atomicWrite(dst, b, 0755)
+	return atomicWrite(dst, b, 0700)
 }

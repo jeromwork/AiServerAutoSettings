@@ -192,8 +192,8 @@ func rotateSelfUpdate(p api.Paths) error {
 	return replaceFile(candidate, target)
 }
 
-func getEmbeddedVersion(self string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+func getEmbeddedVersion(parent context.Context, self string) string {
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, self, "version")
 	if out, err := cmd.Output(); err == nil {
@@ -268,7 +268,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		log = &defaultLogger{}
 	}
 
-	if err := os.MkdirAll(p.State, 0755); err != nil {
+	if err := os.MkdirAll(p.State, 0700); err != nil {
 		log.Error("supervise: cannot create state directory", "err", err)
 		return 1
 	}
@@ -305,7 +305,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		silenceTimeout = 3 * time.Second
 	}
 
-	embeddedVersion := getEmbeddedVersion(self)
+	embeddedVersion := getEmbeddedVersion(ctx, self)
 	s, err := loadSlots(p, self, embeddedVersion, reset)
 	if err != nil {
 		log.Error("supervise: load slots failed", "err", err)
@@ -399,6 +399,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		rollbackMsg := false
 		rollbackReasonStr := ""
 		ranLong := false
+		configRestart := false
 
 		type message struct {
 			T       string `json:"t"`
@@ -519,6 +520,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 				switchTick++
 				if fast || switchTick%5 == 0 {
 					if expired, _ := checkSwitchExpire(p, log); expired {
+						configRestart = true
 						log.Warn("supervise: config switch deadline expired, stopping core for restart")
 						_ = proc.Stop(ctx)
 						<-procDone
@@ -551,6 +553,9 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		}
 
 		runCleanup(ctx, p, log, "crash")
+		if configRestart {
+			continue
+		}
 
 		var reason string
 		if silenceFired {
