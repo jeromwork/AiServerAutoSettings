@@ -11,6 +11,7 @@ import (
 	"os"
 
 	"remoteagents/internal/api"
+	"remoteagents/internal/api/fake"
 	"remoteagents/internal/secret"
 )
 
@@ -29,7 +30,7 @@ func devSecret(ctx context.Context, args []string) int {
 	case len(args) == 1 && args[0] == "vector":
 		plain, err = secretVector()
 	case len(args) == 3 && args[0] == "open":
-		plain, err = secretFile(args[1], args[2])
+		plain, err = secretFile(args[1], args[2], &fake.Logger{})
 	default:
 		err = errors.New("secret: usage: vector | open <config.json> <password>")
 	}
@@ -72,7 +73,7 @@ func secretVector() ([]byte, error) {
 	return opened, nil
 }
 
-func secretFile(path, password string) ([]byte, error) {
+func secretFile(path, password string, log api.Logger) ([]byte, error) {
 	var cfg struct {
 		KDF struct {
 			Salt       string
@@ -101,7 +102,11 @@ func secretFile(path, password string) ([]byte, error) {
 		return nil, errors.New("secret: password: invalid password or check")
 	}
 	plain, err := secret.Open(key, cfg.Server.Key)
-	if err != nil || !bytes.HasPrefix(plain, []byte("-----BEGIN")) {
+	if err != nil {
+		return nil, errors.New("secret: server-key: invalid encrypted key")
+	}
+	log.Secret(string(plain))
+	if !bytes.HasPrefix(plain, []byte("-----BEGIN")) {
 		clear(plain)
 		return nil, errors.New("secret: server-key: invalid encrypted key")
 	}
