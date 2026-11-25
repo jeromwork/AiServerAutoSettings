@@ -89,7 +89,10 @@ func (p *execProc) Read(stream string, off int) api.Chunk {
 }
 
 func (p *execProc) WaitNew(ctx context.Context, outOff, errOff int, max time.Duration) {
-	if max <= 0 || max > maxWait {
+	if max <= 0 {
+		return
+	}
+	if max > maxWait {
 		max = maxWait
 	}
 	timer := time.NewTimer(max)
