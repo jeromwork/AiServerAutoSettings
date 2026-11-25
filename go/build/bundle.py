@@ -105,5 +105,5 @@ with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
         info.compress_type = zipfile.ZIP_DEFLATED
         info.create_system = 3
         info.external_attr = (0o100000 | modes[rel]) << 16
-        archive.writestr(info, data)
+        archive.writestr(info, data, compresslevel=9)
 print('bin.zip: %d байт, SHA-256 %s' % (target.stat().st_size, sha(target.read_bytes())))

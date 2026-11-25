@@ -2,7 +2,7 @@
 
 `New(Options)` возвращает компонент. Он использует переданные `Procs`, `Channel`,
 `Forwarder`, шину и журнал. `Config.Disk == nil`, `null` или `enabled:false`
-оставляют компонент выключенным. `Exe` — путь к поставляемому syncthingtray;
+оставляют компонент выключенным. `Exe` — путь к syncthing (syncthing.exe на Windows);
 `Installed` — каталог программы с transport state/secrets.
 
 Windows-оформление сохранено из **v2 lab/exe/disk**, а не из прежнего Go-пакета.
@@ -15,15 +15,14 @@ Go закрывает его stdin до остановки движка, дав�
 Сборка помощника при подготовке Windows-дистрибутива (.NET 10 SDK):
 
 ```sh
-dotnet publish explorer/disk-explorer.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+dotnet publish explorer/disk-explorer.csproj -c Release --self-contained false
 ```
 
-Папку результата publish поставлять вместе с программой. Помощник не компилируется
-и не скачивается при запуске. Нужные .NET-библиотеки входят в поставку.
-Для ARM64 выбрать `win-arm64`.
+В bin.zip входит disk-explorer.exe; он использует установленный в Windows
+.NET Framework 4.8. Помощник не компилируется и не скачивается при запуске.
 
 Отличия от v2: Python-движок переписан на Go; прежний C#-контроллер вынесен в
-помощник, JSON переведён с JavaScriptSerializer на System.Text.Json. Готовность API
+помощник; JSON обрабатывается JavaScriptSerializer, как в v2. Готовность API
 приходит из stdout движка, с одним резервным сроком 10 секунд. Папки подключаются
 по `/rest/events`, без периодического ожидания предложений. Изменения каталогов
 Проводника приходят через FileSystemWatcher; исчезновение перепроверяется один раз

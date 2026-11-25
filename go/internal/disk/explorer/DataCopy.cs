@@ -7,24 +7,14 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Text.Json;
+using System.Web.Script.Serialization;
 
 namespace RemoteAgents.Launcher
 {
     internal static class Json
     {
-        static object Decode(JsonElement e) {
-            switch (e.ValueKind) {
-                case JsonValueKind.Object: return e.EnumerateObject().ToDictionary(p => p.Name, p => Decode(p.Value));
-                case JsonValueKind.Array: return e.EnumerateArray().Select(Decode).ToArray();
-                case JsonValueKind.String: return e.GetString();
-                case JsonValueKind.Number: long n; return e.TryGetInt64(out n) ? (object)n : e.GetDouble();
-                case JsonValueKind.True: return true;
-                case JsonValueKind.False: return false;
-                default: return null;
-            }
-        }
-        public static object Parse(string text) { using (var doc = JsonDocument.Parse(text.TrimStart('\uFEFF'))) return Decode(doc.RootElement); }
+        static JavaScriptSerializer Serializer() { return new JavaScriptSerializer { MaxJsonLength = 4 * 1024 * 1024 }; }
+        public static object Parse(string text) { return Serializer().DeserializeObject(text.TrimStart('\uFEFF')); }
         public static Dictionary<string, object> Map(object value) { return value as Dictionary<string, object> ?? new Dictionary<string, object>(); }
         public static Dictionary<string, object> Read(string path) { return Map(Parse(Files.ReadSharedText(path))); }
         public static object Get(Dictionary<string, object> map, string key) { object value; return map != null && map.TryGetValue(key, out value) ? value : null; }
@@ -34,7 +24,7 @@ namespace RemoteAgents.Launcher
         public static int Int(Dictionary<string, object> map, string key, int fallback) { int n; return int.TryParse(Str(map, key), out n) ? n : fallback; }
         public static object[] Array(object value) { return value is IEnumerable && !(value is string) && !(value is IDictionary) ? ((IEnumerable)value).Cast<object>().ToArray() : new object[0]; }
         public static string[] Strings(object value) { return Array(value).Select(x => Convert.ToString(x, CultureInfo.InvariantCulture)).ToArray(); }
-        public static string Encode(object value) { return JsonSerializer.Serialize(value); }
+        public static string Encode(object value) { return Serializer().Serialize(value); }
         public static void Write(string path, object value) { Files.Atomic(path, Encode(value) + "\n"); }
     }
     internal static class Files

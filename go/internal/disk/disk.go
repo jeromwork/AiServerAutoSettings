@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,7 +21,7 @@ import (
 	"remoteagents/internal/bus"
 )
 
-// Options supplies existing application services. Exe is the bundled syncthingtray
+// Options supplies existing application services. Exe is the bundled syncthing
 // binary (v2 bins.find); Installed is the directory with transport state/secrets.
 type Options struct {
 	Config         *api.Config
@@ -107,7 +108,11 @@ func (d *Disk) Start(parent context.Context) error {
 		d.base = defaultBase()
 	}
 	if d.o.Exe == "" {
-		d.o.Exe = filepath.Join(d.home, "tray", "syncthingtray.exe")
+		name := "syncthing"
+		if runtime.GOOS == "windows" {
+			name = "syncthing.exe"
+		}
+		d.o.Exe = filepath.Join(d.home, "tray", name)
 	}
 	ctx, cancel := context.WithCancel(parent)
 	d.mu.Lock()
@@ -371,7 +376,7 @@ func (d *Disk) run(ctx context.Context, states <-chan api.ChannelState) {
 							}
 							output := &lineWriter{d: d}
 							env := append(os.Environ(), "STMONITORED=yes")
-							process, e = d.o.Procs.Start(ctx, api.ProcSpec{Name: "syncthing", Path: d.o.Exe, Args: []string{"syncthing", "serve", "--home", state, "--no-browser", "--no-restart"}, Env: env, Stdout: output, Stderr: output})
+							process, e = d.o.Procs.Start(ctx, api.ProcSpec{Name: "syncthing", Path: d.o.Exe, Args: []string{"serve", "--home", state, "--no-browser", "--no-restart"}, Env: env, Stdout: output, Stderr: output})
 							unlock()
 							if e != nil {
 								fails++

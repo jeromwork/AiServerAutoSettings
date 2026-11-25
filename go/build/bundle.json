@@ -40,16 +40,6 @@
       "os": "windows"
     },
     {
-      "name": "syncthingtray",
-      "url": "https://github.com/Martchus/syncthingtray/releases/download/v2.1.9/syncthingtray-2.1.9-x86_64-w64-mingw32.exe.zip",
-      "sha256": "c20d74998cb84980b07cb00eca4c38d26643eaa69b8bef94f6841ded6c752cc5",
-      "member": "syncthingtray.exe",
-      "memberSha256": "6d0010a4b5233a1c393614546d9bcdbd1c4f1f425502bea22d163314c2ad7da7",
-      "target": "syncthingtray.exe",
-      "license": "syncthingtray-2.1.9-x86_64-w64-mingw32-LICENSES.md",
-      "os": "windows"
-    },
-    {
       "name": "geoip-ru",
       "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/66c864fcfe1535549e0658569cb514dbd35756ba/geoip-ru.srs",
       "sha256": "55869c680cf6489991cbfdf62c2f5da77ea85bf571babddb6cd9c4941d84cbfa",
