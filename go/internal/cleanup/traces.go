@@ -2,6 +2,7 @@ package cleanup
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -19,11 +20,18 @@ func (c *Cleaner) Intent(t api.Trace) error {
 	t.Phase, t.Instance = "intent", c.instance
 	return c.append(t)
 }
+
 func (c *Cleaner) Applied(kind, id string, data, set map[string]string) error {
 	return c.transition(kind, id, "applied", data, set)
 }
-func (c *Cleaner) Done(kind, id string) error { return c.transition(kind, id, "done", nil, nil) }
-func (c *Cleaner) Instance() string           { return c.instance }
+
+func (c *Cleaner) Done(kind, id string) error {
+	return c.transition(kind, id, "done", nil, nil)
+}
+
+func (c *Cleaner) Instance() string {
+	return c.instance
+}
 
 func (c *Cleaner) transition(kind, id, phase string, data, set map[string]string) error {
 	c.mu.Lock()
@@ -36,6 +44,9 @@ func (c *Cleaner) transition(kind, id, phase string, data, set map[string]string
 		t := traces[i]
 		if t.Kind != kind || t.ID != id {
 			continue
+		}
+		if t.Phase == "done" && phase == "done" {
+			return nil
 		}
 		if t.Phase == "done" && phase != "done" {
 			break
@@ -68,8 +79,12 @@ func (c *Cleaner) read() ([]api.Trace, error) {
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 4096), 4<<20)
 	for s.Scan() {
+		line := bytes.TrimSpace(s.Bytes())
+		if len(line) == 0 {
+			continue
+		}
 		var t api.Trace
-		if json.Unmarshal(s.Bytes(), &t) == nil && t.Instance == c.instance {
+		if json.Unmarshal(line, &t) == nil && t.Instance == c.instance {
 			traces = append(traces, t)
 		}
 	}
