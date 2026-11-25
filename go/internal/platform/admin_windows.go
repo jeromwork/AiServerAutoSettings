@@ -11,6 +11,6 @@ func (p *stubPlatform) IsAdmin() bool {
 	if err != nil {
 		return false
 	}
-	defer token.Close()
+	defer func() { _ = token.Close() }()
 	return token.IsElevated()
 }
