@@ -105,7 +105,8 @@ func cmdPush(ctx context.Context, stateDir, pc, binaryFile, customVersion string
 	// 1. Слушатель <ПК>.events создаётся ДО POST запроса
 	eventsPath := filepath.Join(stateDir, st.PC+".events")
 
-	l, err := net.Listen("unix", eventsPath)
+	var lc net.ListenConfig
+	l, err := lc.Listen(ctx, "unix", eventsPath)
 	if err != nil {
 		return fmt.Errorf("ra3: не удалось открыть сокет событий %s: %w", eventsPath, err)
 	}
@@ -163,12 +164,15 @@ func cmdPush(ctx context.Context, stateDir, pc, binaryFile, customVersion string
 			return fmt.Errorf("ra3: за %d с новая версия не подняла канал", deadlineSec)
 		}
 
+		stopConnClose := context.AfterFunc(waitCtx, func() { _ = conn.Close() })
 		end, _ := waitCtx.Deadline()
 		if err := conn.SetReadDeadline(end); err != nil {
+			stopConnClose()
 			_ = conn.Close()
 			return err
 		}
 		lineBytes, readErr := bufio.NewReaderSize(conn, 1024).ReadSlice('\n')
+		stopConnClose()
 		_ = conn.Close()
 		if readErr != nil {
 			continue

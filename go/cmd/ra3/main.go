@@ -136,9 +136,9 @@ func run(ctx context.Context, args []string) error {
 
 	case "log":
 		var follow bool
-		var count int = 200
-		var interval time.Duration = time.Second
-		var pc string = globalPC
+		count := 200
+		interval := time.Second
+		pc := globalPC
 
 		for i := 0; i < len(rest); i++ {
 			arg := rest[i]
@@ -190,6 +190,6 @@ func run(ctx context.Context, args []string) error {
 		return cmdRollback(ctx, stateDir, pc)
 
 	default:
-		return fmt.Errorf("ra3: неизвестная команда %q. Используйте 'ra3 help' для списка команд.", subcmd)
+		return fmt.Errorf("ra3: неизвестная команда %q. Используйте 'ra3 help' для списка команд", subcmd)
 	}
 }

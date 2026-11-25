@@ -167,7 +167,7 @@ func callAgent(ctx context.Context, st *State, method, path string, body io.Read
 	if err != nil {
 		return 0, nil, fmt.Errorf("ra3: канала нет (%w)", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respData, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
