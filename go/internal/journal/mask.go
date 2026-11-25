@@ -157,9 +157,45 @@ func isWordOrHyphenRune(r rune) bool {
 
 // MaskValue recursively masks strings within data structures.
 func MaskValue(v any) any {
+	v = normalizeValue(v)
 	collectSecrets(v)
 	return maskValue(v)
 }
+
+// normalizeValue expands typed JSON containers before any secrets are collected.
+// Keep errors and Stringers consistent with the values actually logged.
+func normalizeValue(v any) any {
+	switch val := v.(type) {
+	case nil, string, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, bool:
+		return val
+	case error:
+		return val.Error()
+	case fmt.Stringer:
+		return val.String()
+	case map[string]any:
+		res := make(map[string]any, len(val))
+		for k, elem := range val {
+			res[k] = normalizeValue(elem)
+		}
+		return res
+	case []any:
+		res := make([]any, len(val))
+		for i, elem := range val {
+			res[i] = normalizeValue(elem)
+		}
+		return res
+	default:
+		b, err := json.Marshal(val)
+		if err == nil {
+			var generic any
+			if json.Unmarshal(b, &generic) == nil {
+				return normalizeValue(generic)
+			}
+		}
+		return fmt.Sprint(val)
+	}
+}
+
 func collectSecrets(v any) {
 	switch x := v.(type) {
 	case map[string]any:

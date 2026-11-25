@@ -77,7 +77,7 @@ func newJournalInternal(p api.Paths, stream string, o Options) (*Journal, error)
 	}
 
 	if err := os.MkdirAll(p.Logs, 0750); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("journal: mkdir: %w", err)
 	}
 
 	j := &Journal{
@@ -90,7 +90,7 @@ func newJournalInternal(p api.Paths, stream string, o Options) (*Journal, error)
 	}
 
 	if err := j.initFile(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("journal: open: %w", err)
 	}
 
 	return j, nil
@@ -398,7 +398,12 @@ func (j *Journal) Tail(n int) []string {
 	return res
 }
 
-func (j *Journal) Zip(w io.Writer) error {
+func (j *Journal) Zip(w io.Writer) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("journal: zip: %w", err)
+		}
+	}()
 	j.mu.Lock()
 	j.flushRepeatLocked()
 	j.mu.Unlock()
@@ -414,7 +419,8 @@ func (j *Journal) Zip(w io.Writer) error {
 	entries, err := os.ReadDir(j.paths.Logs)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			closed = true
+			return zw.Close()
 		}
 		return err
 	}
