@@ -87,10 +87,9 @@ func Parse(data []byte) (*api.Config, []Problem) {
 		return nil, problems
 	}
 	srv, paths := obj(root["server"]), obj(root["paths"])
-	// Task-specific extension: a VPN-only config needs neither SSH nor channel paths.
+	// A VPN-only config may carry bridge paths without an SSH server.
 	_, serverPresent := root["server"]
-	_, pathsPresent := root["paths"]
-	vpnOnly := root["vpn"] != nil && !serverPresent && !pathsPresent
+	vpnOnly := root["vpn"] != nil && !serverPresent
 	if strings.TrimSpace(str(root["name"])) == "" {
 		bad("name", "В конфиге нет имени.")
 	}
