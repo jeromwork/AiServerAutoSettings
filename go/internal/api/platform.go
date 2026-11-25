@@ -22,9 +22,8 @@ type Platform interface {
 	Arch() string
 	DefaultHome() string
 	IsAdmin() bool
-	RunAsUser(cfg ControlCfg) (string, error)
-	NewShell(log Logger, pr Procs, runAs string) Shell
-	OpenBrowser(url, runAs string) error
+	NewShell(log Logger, pr Procs) Shell
+	OpenBrowser(url string) error
 	Autostart(binPath, home string, inst8 string) AutostartSpec
 	Interfaces() ([]Iface, error)
 }

@@ -12,7 +12,6 @@ type ProcSpec struct {
 	Args   []string
 	Dir    string
 	Env    []string
-	RunAs  string    // не поддерживается: непустое — ошибка Start
 	Stream string    // поток журнала, если Stdout/Stderr == nil
 	Stdin  io.Reader // nil — пусто
 	Stdout io.Writer // nil — в журнал Stream

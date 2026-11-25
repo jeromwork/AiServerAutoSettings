@@ -10,7 +10,7 @@ import (
 )
 
 // NewShell — заглушка до P5a.
-func (p *stubPlatform) NewShell(log api.Logger, pr api.Procs, runAs string) api.Shell {
+func (p *stubPlatform) NewShell(log api.Logger, pr api.Procs) api.Shell {
 	return stubShell{}
 }
 

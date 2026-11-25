@@ -51,7 +51,6 @@
         "domains": { "type": "array", "items": { "$ref": "#/$defs/text" } },
         "geoip": {} } } } },
     "control": { "type": "boolean", "default": true },
-    "controlRunAs": { "type": "string", "description": "v3: пользователь для команд моста на Linux/Mac" },
     "autostart": { "type": "boolean", "default": true },
     "lan": { "type": "array", "items": { "type": "object", "required": ["name", "host"], "properties": {
       "name": { "$ref": "#/$defs/text" }, "host": { "$ref": "#/$defs/text" },

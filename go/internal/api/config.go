@@ -88,10 +88,9 @@ type ForwardCfg struct {
 }
 type LanProxyCfg struct{ Port int }
 
-// ControlCfg: JSON "control" (bool, нет → true) + v3-поле верхнего уровня "controlRunAs" (строка, нет → "").
+// ControlCfg: JSON "control" (bool, нет → true).
 type ControlCfg struct {
 	Enabled bool
-	RunAs   string
 }
 type UpdateCfg struct {
 	Auto    bool   // JSON update.auto, нет → true

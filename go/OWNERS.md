@@ -15,7 +15,7 @@
 | `internal/journal/*`, `dev_journal.go` | P3 | — |
 | `internal/procs/*`, `dev_procs.go` | P4 | — |
 | `internal/platform/shell_*.go`, `dev_shell.go` | P5a | — |
-| `internal/platform/{platform,home,admin,browser,runas}_*.go`, `dev_platform.go` | P5b | — |
+| `internal/platform/{platform,home,admin,browser}_*.go`, `dev_platform.go` | P5b | — |
 | `internal/platform/autostart_*.go` | P5c | — |
 | `internal/platform/{ifaces,netwatch,foreignvpn}_*.go` | N4 | — |
 | `internal/platform/lan_*.go` (DNS/NRPT/hosts) | N2 | — |

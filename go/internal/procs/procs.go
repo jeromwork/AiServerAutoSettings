@@ -35,9 +35,6 @@ func New(log api.Logger) api.Procs {
 }
 
 func (m *manager) Start(_ context.Context, s api.ProcSpec) (api.Process, error) {
-	if s.RunAs != "" {
-		return nil, errors.New("procs: RunAs is not supported")
-	}
 	cmd := exec.Command(s.Path, s.Args...)
 	cmd.Dir, cmd.Env, cmd.Stdin = s.Dir, s.Env, s.Stdin
 	cmd.Stdout, cmd.Stderr = s.Stdout, s.Stderr
