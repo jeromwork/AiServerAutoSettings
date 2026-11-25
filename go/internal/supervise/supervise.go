@@ -203,12 +203,21 @@ func startProcess(ctx context.Context, pr api.Procs, log api.Logger, exe string,
 	return ep, stdoutR, stderrR, nil
 }
 
-func rotateSelfUpdate(p api.Paths) error {
+func rotateSelfUpdate(ctx context.Context, p api.Paths) error {
 	target := filepath.Join(p.Bin, executableName())
 	candidate := target + ".new"
 	if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {
+		return err
+	}
+	// Preserve the old embedded under its version before .prev can be replaced.
+	version, err := binaryVersion(ctx, target)
+	if err != nil {
+		return fmt.Errorf("supervise: archive-version: %w", err)
+	}
+	archive := &slots{p: p}
+	if err := archive.archive(version, target); err != nil {
 		return err
 	}
 	// Free the installed name: Windows cannot replace a running executable,
@@ -226,15 +235,23 @@ func rotateSelfUpdate(p api.Paths) error {
 	return nil
 }
 
-func getEmbeddedVersion(parent context.Context, self string) string {
+func binaryVersion(parent context.Context, self string) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, self, "version")
-	if out, err := cmd.Output(); err == nil {
-		v := strings.TrimSpace(string(out))
-		if versionName.MatchString(v) {
-			return v
-		}
+	out, err := exec.CommandContext(ctx, self, "version").Output()
+	if err != nil {
+		return "", err
+	}
+	v := strings.TrimSpace(string(out))
+	if !versionName.MatchString(v) {
+		return "", fmt.Errorf("supervise: version: invalid version")
+	}
+	return v, nil
+}
+
+func getEmbeddedVersion(parent context.Context, self string) string {
+	if v, err := binaryVersion(parent, self); err == nil {
+		return v
 	}
 	if fi, err := os.Stat(self); err == nil {
 		return fmt.Sprintf("build-%d", fi.ModTime().Unix())
@@ -337,7 +354,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 	}
 	defer unlock()
 
-	if err := rotateSelfUpdate(p); err != nil {
+	if err := rotateSelfUpdate(ctx, p); err != nil {
 		log.Error("supervise: self-update", "err", err)
 		return 1
 	}
@@ -362,7 +379,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 	}
 
 	embeddedVersion := getEmbeddedVersion(ctx, self)
-	s, err := loadSlots(p, self, embeddedVersion, reset)
+	s, err := loadSlots(ctx, p, self, embeddedVersion, reset)
 	if err != nil {
 		log.Error("supervise: load slots failed", "err", err)
 		return 1

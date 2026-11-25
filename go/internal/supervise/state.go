@@ -1,6 +1,7 @@
 package supervise
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,7 +67,7 @@ func (s *slots) exists(v string) bool {
 	return err == nil && st.Mode().IsRegular() && (runtime.GOOS == "windows" || st.Mode()&0111 != 0)
 }
 
-func loadSlots(p api.Paths, self, embeddedVersion string, reset bool) (*slots, error) {
+func loadSlots(ctx context.Context, p api.Paths, self, embeddedVersion string, reset bool) (*slots, error) {
 	resolved, err := exec.LookPath(self)
 	if err != nil {
 		return nil, err
@@ -102,6 +103,16 @@ func loadSlots(p api.Paths, self, embeddedVersion string, reset bool) (*slots, e
 			*slot = s.EmbeddedSeen
 		}
 	}
+	// Recover older installations which kept the previous embedded only in .prev.
+	if old := s.EmbeddedSeen; old != "" && old != embeddedVersion && !s.exists(old) &&
+		(old == s.Current || old == s.LastGood || old == s.PrevGood) {
+		previous := filepath.Join(p.Bin, executableName()+".prev")
+		if version, err := binaryVersion(ctx, previous); err == nil && version == old {
+			if err := s.archive(old, previous); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if s.EmbeddedSeen != embeddedVersion || s.Current == "" || !s.exists(s.Current) {
 		s.Current = s.embedded
 		s.EmbeddedSeen = embeddedVersion
@@ -124,6 +135,36 @@ func loadSlots(p api.Paths, self, embeddedVersion string, reset bool) (*slots, e
 		s.MemRestarts = 0
 	}
 	return s, s.save()
+}
+
+// archive preserves an embedded binary as a regular slot before its name is reused.
+func (s *slots) archive(version, src string) error {
+	if !versionName.MatchString(version) {
+		return fmt.Errorf("supervise: archive-version: invalid version")
+	}
+	if s.exists(version) {
+		return nil
+	}
+	dir := filepath.Join(s.p.Versions, version)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	st, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("supervise: archive-slot: invalid directory")
+	}
+	return copyBinary(src, filepath.Join(dir, executableName()))
+}
+
+func (s *slots) discardSelfUpdate() error {
+	err := os.Remove(filepath.Join(s.p.Bin, executableName()+".new"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 func (s *slots) save() error {
@@ -178,6 +219,10 @@ func (s *slots) transition(code int, silence, rollback bool, reason string) erro
 			if next == "" || !s.exists(next) {
 				next = s.embedded
 			}
+			// Cancel promotion before persisting the rollback; failure must stop it.
+			if err := s.discardSelfUpdate(); err != nil {
+				return err
+			}
 			s.Current = next
 			s.RollbackReason = reason
 			s.FailsGood = 0
@@ -208,6 +253,11 @@ func (s *slots) transition(code int, silence, rollback bool, reason string) erro
 			s.Stopped = "memory-limit"
 		}
 		return s.save()
+	}
+	if s.Current != s.LastGood {
+		if err := s.discardSelfUpdate(); err != nil {
+			return err
+		}
 	}
 	s.RollbackReason = reason
 	if s.Current != s.LastGood {
