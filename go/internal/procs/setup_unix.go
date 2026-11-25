@@ -3,137 +3,59 @@
 package procs
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
-	"sync"
+	"os/user"
+	"strconv"
 	"syscall"
+
+	"remoteagents/internal/api"
 )
 
-type platformState struct {
-	releases *sync.Map
-	pgid     int
-	leader   *exec.Cmd
-	reap     chan struct{}
-	reaped   chan struct{}
-	closed   bool
-}
+type platformProcess struct{}
 
-func newPlatformState() (platformState, error) {
-	return platformState{releases: &sync.Map{}, reap: make(chan struct{}), reaped: make(chan struct{})}, nil
-}
-
-// Start holds m.mu: the first successful child is the single group leader.
-func (m *manager) publishCmd(cmd *exec.Cmd) {
-	if m.platform.pgid == 0 {
-		m.platform.pgid = cmd.Process.Pid
-		m.platform.leader = cmd
+func setupProcess(cmd *exec.Cmd, s api.ProcSpec) (platformProcess, error) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+	setDeathSignal(cmd.SysProcAttr)
+	if s.RunAs == "" {
+		return platformProcess{}, nil
 	}
-}
-
-func (m *manager) terminatePlatform() {
-	m.mu.Lock()
-	if !m.platform.closed {
-		m.platform.closed = true
-		if m.platform.pgid > 0 {
-			// The unreaped leader reserves this PID/PGID, even after its exit.
-			_ = syscall.Kill(-m.platform.pgid, syscall.SIGKILL)
+	u, err := user.Lookup(s.RunAs)
+	if err != nil {
+		return platformProcess{}, err
+	}
+	uid, err := strconv.ParseUint(u.Uid, 10, 32)
+	if err != nil {
+		return platformProcess{}, err
+	}
+	gid, err := strconv.ParseUint(u.Gid, 10, 32)
+	if err != nil {
+		return platformProcess{}, err
+	}
+	if os.Geteuid() != 0 {
+		if os.Geteuid() != int(uid) {
+			return platformProcess{}, fmt.Errorf("runAs requires root")
 		}
-		close(m.platform.reap)
+		return platformProcess{}, nil
 	}
-	leader := m.platform.leader
-	m.mu.Unlock()
-	if leader != nil {
-		<-m.platform.reaped
+	groups, err := u.GroupIds()
+	if err != nil {
+		return platformProcess{}, err
 	}
-}
-
-// Report the leader's exit without reaping it. Otherwise a short-lived first
-// child could lose the group's ID before the next Start, or allow PGID reuse.
-func (m *manager) collectCmd(cmd *exec.Cmd) int {
-	if cmd.SysProcAttr.Pgid == 0 {
-		identity, err := inspectProcess(cmd.Process.Pid)
+	cred := &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
+	for _, group := range groups {
+		id, err := strconv.ParseUint(group, 10, 32)
 		if err != nil {
-			return -1
+			return platformProcess{}, err
 		}
-		return syscall.WaitStatus(identity.status).ExitStatus()
+		cred.Groups = append(cred.Groups, uint32(id))
 	}
-	_ = cmd.Wait()
-	m.releaseCmd(cmd)
-	if cmd.ProcessState != nil {
-		return cmd.ProcessState.ExitCode()
-	}
-	return -1
+	cmd.SysProcAttr.Credential = cred
+	return platformProcess{}, nil
 }
 
-func (m *manager) reapLeader(cmd *exec.Cmd) {
-	if cmd.SysProcAttr.Pgid == 0 {
-		<-m.platform.reap
-		_ = cmd.Wait()
-		m.releaseCmd(cmd)
-		close(m.platform.reaped)
-	}
-}
-
-func sameLiveProcess(want processIdentity) bool {
-	got, err := inspectProcess(want.pid)
-	return err == nil && got.live && got.started.Equal(want.started)
-}
-
-// Never signal a shared PGID from Process.Stop. Snapshot only this still-live
-// process's descendants, and recheck every PID's kernel birth time before use.
-func (p *proc) rememberTree() {
-	root := processIdentity{pid: p.pid, started: p.started}
-	if !sameLiveProcess(root) {
-		return
-	}
-	all := processTable()
-	if !sameLiveProcess(root) {
-		return
-	}
-	seen := make(map[int]bool)
-	for _, old := range p.targets {
-		seen[old.pid] = true
-	}
-	queue := []processIdentity{root}
-	for len(queue) > 0 {
-		next := queue[0]
-		queue = queue[1:]
-		if !seen[next.pid] {
-			p.targets = append(p.targets, next)
-			seen[next.pid] = true
-		}
-		if !sameLiveProcess(next) {
-			continue
-		}
-		for _, candidate := range all {
-			if candidate.ppid == next.pid && candidate.started.Compare(next.started) >= 0 {
-				queue = append(queue, candidate)
-			}
-		}
-	}
-}
-
-func (p *proc) signalTargets(sig syscall.Signal) {
-	// Children first, so a dying parent cannot hide them by reparenting.
-	for i := len(p.targets) - 1; i >= 0; i-- {
-		target := p.targets[i]
-		if sameLiveProcess(target) {
-			_ = syscall.Kill(target.pid, sig)
-		}
-	}
-}
-
-func (p *proc) softStop() {
-	p.rememberTree()
-	p.signalTargets(syscall.SIGTERM)
-}
-
-func (p *proc) hardKill() {
-	p.rememberTree()
-	p.signalTargets(syscall.SIGKILL)
-}
-
-func (p *proc) cleanupExited() {
-	// Only descendants captured by an earlier Stop/ctx are ours to finish.
-	// A naturally completed process is never signaled, nor is its shared group.
-	p.signalTargets(syscall.SIGKILL)
-}
+func (p *proc) attach() error { return nil }
+func (p *proc) softStop()     { _ = syscall.Kill(-p.PID(), syscall.SIGTERM) }
+func (p *proc) hardKill()     { _ = syscall.Kill(-p.PID(), syscall.SIGKILL) }
+func (p *proc) release()      {}
