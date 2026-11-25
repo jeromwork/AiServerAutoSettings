@@ -19,16 +19,43 @@ KEEPALIVE = {'tcp_keep_alive': '15s', 'tcp_keep_alive_interval': '5s'}
 HOP_RE = re.compile(r'^(?:([a-z_][a-z0-9_-]{0,31})@)?([a-zA-Z0-9][a-zA-Z0-9.-]{0,252})(?::(\d{1,5}))?$')
 
 
-def free_ports(n):
-    """n разных свободных портов 127.0.0.1 (bind на порт 0; сокеты закрываются вместе)."""
-    socks = [socket.socket() for _ in range(n)]
+def free_ports(n, tries=None):
+    """n разных портов 127.0.0.1, свободных и по TCP, и по UDP.
+    Windows с Hyper-V/WSL резервирует диапазоны отдельно для UDP, а sing-box
+    слушает оба протокола на одном порту (V14.2)."""
+    tries = tries or max(64, n * 20)
+    held, ports, tcp_only = [], [], []
     try:
-        for s in socks:
-            s.bind(('127.0.0.1', 0))
-        return [s.getsockname()[1] for s in socks]
+        for _ in range(tries):
+            if len(ports) >= n:
+                break
+            t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            held.append(t)          # держим открытым: ОС не выдаст порт повторно
+            try:
+                t.bind(('127.0.0.1', 0))
+            except OSError:
+                continue
+            p = t.getsockname()[1]
+            if p in ports or p in tcp_only:
+                continue
+            u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            held.append(u)
+            try:
+                u.bind(('127.0.0.1', p))
+            except OSError:
+                tcp_only.append(p)  # запасной вариант, если UDP-свободных не хватит
+                continue
+            ports.append(p)
+        if len(ports) < n:
+            # хуже, чем раньше, не будет: добираем портами, свободными только по TCP
+            ports += tcp_only[:n - len(ports)]
+        return ports
     finally:
-        for s in socks:
-            s.close()
+        for s in held:
+            try:
+                s.close()
+            except OSError:
+                pass
 
 
 def set_algs(ssh):

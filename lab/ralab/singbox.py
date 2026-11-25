@@ -11,13 +11,15 @@ from .bus import bus
 
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 RESTARTS_MAX = 5  # перезапусков подряд без "started"
+BIND_RETRIES_MAX = 8
+BIND_RX = re.compile(r'bind:|listen (tcp|udp)|address already in use|forbidden by its access permissions', re.I)
 DELAY_URL = 'https://www.gstatic.com/generate_204'
 
 
 class SingBox:
     def __init__(self, ctx):
         self.ctx, self.ports, self.clash_port, self._secret = ctx, {}, 0, ''
-        self.fails, self.up, self.failed, self.stopping, self.relaunch = 0, False, False, False, False
+        self.fails, self.bind_retries, self.up, self.failed, self.stopping, self.relaunch = 0, 0, False, False, False, False
         self.tail = collections.deque(maxlen=8)
         bus.subscribe('settings.loaded', self._on_settings)
         bus.subscribe('proc.exited', self._on_proc)
@@ -35,7 +37,7 @@ class SingBox:
             journal.log('singbox', 'relaunch', None, 'пути изменились: перезапуск sing-box')
             procs.kill('singbox')
             return
-        self.failed, self.fails = False, 0
+        self.failed, self.fails, self.bind_retries = False, 0, 0
         self._launch()
 
     def _on_tun(self, _):
@@ -52,7 +54,7 @@ class SingBox:
 
     def _on_net(self, _):
         if self.failed:  # после 5 неудач ждём смену сети или ассистента
-            self.failed, self.fails = False, 0
+            self.failed, self.fails, self.bind_retries = False, 0, 0
             self._launch()
 
     def _launch(self):
@@ -105,7 +107,7 @@ class SingBox:
         line = ANSI.sub('', line)  # sing-box красит журнал и в канал; отключить цвет в конфиге нельзя (поля нет)
         self.tail.append(line[-200:])
         if 'sing-box started' in line:
-            self.fails, self.up = 0, True
+            self.fails, self.bind_retries, self.up = 0, 0, True
             bus.publish('singbox.started', {'paths': len(self.ports) - 1})
 
     def _on_proc(self, ev):
@@ -117,11 +119,18 @@ class SingBox:
         if self.stopping:
             return
         if self.relaunch:
-            self.relaunch, self.fails, self.failed = False, 0, False
+            self.relaunch, self.fails, self.bind_retries, self.failed = False, 0, 0, False
             self._launch()
             return
         if self.with_tun and getattr(self.ctx, 'tun', None):
             self.ctx.tun.crashed(ev.get('code'))  # следующий запуск - без TUN: канал важнее
+        text = ' | '.join(self.tail)
+        if BIND_RX.search(text) and self.bind_retries < BIND_RETRIES_MAX:
+            self.bind_retries += 1
+            journal.log('singbox', 'bind.retry', {'n': self.bind_retries}, 'sing-box: порт занят, перезапуск на новых портах (%d/%d): %s'
+                        % (self.bind_retries, BIND_RETRIES_MAX, text[-200:]))
+            self._launch()
+            return
         self.fails += 1
         if self.fails >= RESTARTS_MAX:
             self.failed = True
