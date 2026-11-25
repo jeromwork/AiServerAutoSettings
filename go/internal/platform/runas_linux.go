@@ -21,8 +21,9 @@ func (p *stubPlatform) RunAsUser(cfg api.ControlCfg) (string, error) {
 		return runAs, nil
 	}
 
-	// The caller must load state/runas from its selected home into cfg.RunAs.
-	// This interface has no home argument: never read another instance's state.
+	// Integration requires the caller to load state/runas from its selected
+	// home into cfg.RunAs. The current contract supplies neither that home nor
+	// a state store; DefaultHome may belong to a different instance.
 	if sudoUser := strings.TrimSpace(os.Getenv("SUDO_USER")); sudoUser != "" && sudoUser != "root" {
 		if _, err := user.Lookup(sudoUser); err == nil {
 			return sudoUser, nil
@@ -34,7 +35,7 @@ func (p *stubPlatform) RunAsUser(cfg api.ControlCfg) (string, error) {
 	}
 
 	if os.Geteuid() == 0 {
-		return "", errors.New("platform: runas-not-found: running as root without user in controlRunAs or SUDO_USER")
+		return "", errors.New("platform: runas-not-found: running as root; supply controlRunAs or load the selected home state/runas into cfg.RunAs")
 	}
 
 	return "", errors.New("platform: runas-not-found: unable to determine user")
