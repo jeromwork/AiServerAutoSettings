@@ -16,31 +16,21 @@ import (
 	"remoteagents/internal/api"
 )
 
-type platformState struct{ pgid int }
+type platformState struct{}
 
 func newPlatformState() (platformState, error) {
 	return platformState{}, nil
 }
 
-func (m *manager) terminatePlatform() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.platform.pgid > 0 {
-		_ = syscall.Kill(-m.platform.pgid, syscall.SIGKILL)
-		m.platform.pgid = 0
-	}
-}
+func (m *manager) terminatePlatform() {}
 
 func (m *manager) setupCmd(cmd *exec.Cmd, s api.ProcSpec) error {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
-	// An empty group disappears when its last member exits.
-	if m.platform.pgid > 0 && syscall.Kill(-m.platform.pgid, 0) == syscall.ESRCH {
-		m.platform.pgid = 0
-	}
-	cmd.SysProcAttr.Pgid = m.platform.pgid
+	// Each managed process owns its group; Stop must preserve siblings.
+	cmd.SysProcAttr.Pgid = 0
 	// CommandContext must cancel the group, including descendants which ignore
 	// SIGTERM, rather than killing only the direct child.
 	cmd.Cancel = func() error {
@@ -88,12 +78,7 @@ func (m *manager) startCmd(cmd *exec.Cmd, _ context.Context) error {
 	return cmd.Start()
 }
 
-func (m *manager) postStart(cmd *exec.Cmd) error {
-	if m.platform.pgid == 0 {
-		m.platform.pgid = cmd.Process.Pid
-	}
-	return nil
-}
+func (m *manager) postStart(_ *exec.Cmd) error { return nil }
 
 func (p *proc) softStop() {
 	if p.pid > 0 {
@@ -123,20 +108,12 @@ func processStarted(ctx context.Context, cmd *exec.Cmd) (time.Time, error) {
 	return t.UTC(), err
 }
 
-// Preserve siblings on ordinary exit, but clean the group on shutdown or when
-// its final managed leader exits. Called with the manager mutex held.
-func (p *proc) reapExited(cleanGroup bool) {
+// Reap descendants of this leader on every exit, without touching siblings.
+func (p *proc) reapExited(_ bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if cleanGroup {
-		p.killOnce.Do(p.hardKill)
-	}
+	p.killOnce.Do(p.hardKill)
 	p.retired = true
 }
 
-func (p *proc) groupID() int {
-	if p.cmd != nil && p.cmd.SysProcAttr != nil && p.cmd.SysProcAttr.Pgid > 0 {
-		return p.cmd.SysProcAttr.Pgid
-	}
-	return p.pid
-}
+func (p *proc) groupID() int { return p.pid }
