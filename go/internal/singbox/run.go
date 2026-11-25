@@ -117,7 +117,11 @@ func (s *box) Status() map[string]any {
 }
 
 func (s *box) Start(ctx context.Context) error {
-	s.mu.Lock()
+	ctx, deadline := context.WithTimeout(ctx, 30*time.Second)
+	defer deadline()
+	if err := s.lockState(ctx); err != nil {
+		return fmt.Errorf("singbox: start: %w", err)
+	}
 	defer s.mu.Unlock()
 	if s.running {
 		return nil
@@ -136,7 +140,11 @@ func (s *box) Start(ctx context.Context) error {
 	return s.apply(ctx, s.rc.Effective)
 }
 func (s *box) Apply(ctx context.Context, e api.Effective) error {
-	s.mu.Lock()
+	ctx, deadline := context.WithTimeout(ctx, 30*time.Second)
+	defer deadline()
+	if err := s.lockState(ctx); err != nil {
+		return fmt.Errorf("singbox: apply: %w", err)
+	}
 	defer s.mu.Unlock()
 	if s.binary == "" {
 		return fmt.Errorf("singbox: stopped: start before apply")
@@ -378,6 +386,25 @@ func (s *box) remove(path string) error {
 		return fmt.Errorf("singbox: cleanup: %w", err)
 	}
 	return s.tr.Done("tmp", path)
+}
+
+// lockState includes contention in the caller's deadline without a waiting goroutine.
+func (s *box) lockState(ctx context.Context) error {
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if s.mu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
 }
 
 // operation lets Stop interrupt work that holds the state lock.
