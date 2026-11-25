@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/user"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,21 +18,12 @@ import (
 	"remoteagents/internal/api"
 )
 
-type platformState struct{}
-
-func newPlatformState() (platformState, error) {
-	return platformState{}, nil
-}
-
-func (m *manager) terminatePlatform() {}
-
 func (m *manager) setupCmd(cmd *exec.Cmd, s api.ProcSpec) error {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
-	// Each managed process owns its group; Stop must preserve siblings.
-	cmd.SysProcAttr.Pgid = 0
+	cmd.SysProcAttr.Pgid = m.platform.pgid
 
 	if s.RunAs != "" {
 		u, err := user.Lookup(s.RunAs)
@@ -74,29 +66,54 @@ func (m *manager) startCmd(cmd *exec.Cmd, _ context.Context) error {
 
 func (m *manager) postStart(_ *exec.Cmd) error { return nil }
 
-func (p *proc) softStop() {
-	if p.pid > 0 {
-		_ = syscall.Kill(-p.groupID(), syscall.SIGTERM)
-	}
-}
-
-func (p *proc) hardKill() {
-	if p.pid > 0 {
-		_ = syscall.Kill(-p.groupID(), syscall.SIGKILL)
-	}
-	if p.cmd != nil && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-	}
-}
-
 func (m *manager) releaseCmd(_ *exec.Cmd) {}
 
-func processStarted(_ context.Context, cmd *exec.Cmd) (time.Time, error) {
-	info, err := unix.SysctlKinfoProc("kern.proc.pid", cmd.Process.Pid)
+func inspectProcess(pid int) (processIdentity, error) {
+	info, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
-		return time.Time{}, err
+		return processIdentity{}, err
 	}
-	return time.Unix(info.Proc.P_starttime.Sec, int64(info.Proc.P_starttime.Usec)*1000).UTC(), nil
+	if info.Proc.P_pid != int32(pid) {
+		return processIdentity{}, fmt.Errorf("process not found")
+	}
+	return processIdentity{pid: pid, status: int(info.Proc.P_xstat),
+		live:    info.Proc.P_stat != 5,
+		started: time.Unix(info.Proc.P_starttime.Sec, int64(info.Proc.P_starttime.Usec)*1000).UTC()}, nil
+}
+
+func processStarted(_ context.Context, cmd *exec.Cmd) (time.Time, error) {
+	identity, err := inspectProcess(cmd.Process.Pid)
+	return identity.started, err
+}
+
+func processTable() []processIdentity {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "/bin/ps", "-axo", "pid=,ppid=").Output()
+	if err != nil {
+		return nil
+	}
+	var table []processIdentity
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		ppid, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+		identity, err := inspectProcess(pid)
+		if err == nil {
+			identity.ppid = ppid
+			table = append(table, identity)
+		}
+	}
+	return table
 }
 
 // Darwin has no exported waitid wrapper in x/sys. Observe SZOMB through
@@ -116,5 +133,3 @@ func waitExited(cmd *exec.Cmd) error {
 		<-ticker.C
 	}
 }
-
-func (p *proc) groupID() int { return p.pid }

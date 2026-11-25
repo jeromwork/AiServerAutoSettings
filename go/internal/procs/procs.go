@@ -27,6 +27,13 @@ type manager struct {
 	closed   bool
 }
 
+type processIdentity struct {
+	pid, ppid int
+	started   time.Time
+	live      bool
+	status    int
+}
+
 type proc struct {
 	cmd          *exec.Cmd
 	pid          int
@@ -39,6 +46,7 @@ type proc struct {
 	killOnce     sync.Once
 	streams      *procStreams
 	platformKill func() error
+	targets      []processIdentity
 }
 
 // New creates a new Procs manager.
@@ -184,7 +192,8 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 	}
 	p.pid = cmd.Process.Pid
 	fail := func(code string, err error) (api.Process, error) {
-		p.hardKill()
+		// This child has not been published; its os.Process handle is ours.
+		_ = cmd.Process.Kill()
 		p.retired = true
 		p.mu.Unlock()
 		streams.close()
@@ -210,6 +219,7 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 			return fail("applied-failed", err)
 		}
 	}
+	m.publishCmd(cmd)
 	streams.start()
 	p.mu.Unlock()
 
@@ -217,29 +227,20 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 	handedOff = true
 
 	go func() {
-		// Observe exit without reaping: the Unix leader still reserves its PID
-		// and PGID until the group is killed and all signal paths are retired.
-		exitErr := waitExited(cmd)
+		_ = waitExited(cmd)
 		p.mu.Lock()
-		if exitErr == nil {
-			p.killOnce.Do(p.hardKill)
-		}
+		p.cleanupExited()
 		p.retired = true
 		p.mu.Unlock()
 		streams.closeInput()
-		err := cmd.Wait()
+		code := m.collectCmd(cmd)
 		streams.finish(cmd.WaitDelay)
-		m.releaseCmd(cmd)
 		m.mu.Lock()
 		delete(m.procs, pid)
 		m.mu.Unlock()
 
 		p.mu.Lock()
-		if cmd.ProcessState != nil {
-			p.exitCode = cmd.ProcessState.ExitCode()
-		} else if err == nil {
-			p.exitCode = 0
-		}
+		p.exitCode = code
 		p.mu.Unlock()
 
 		if stdoutCloser != nil {
@@ -252,6 +253,7 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 			_ = m.tr.Done("process", traceID)
 		}
 		close(p.done)
+		m.reapLeader(cmd)
 	}()
 
 	return p, nil
@@ -281,6 +283,9 @@ func (m *manager) KillAll(ctx context.Context) error {
 	return result
 }
 
+// Close releases the shared Job/group and any reserved Unix leader.
+func (m *manager) Close() error { return m.KillAll(context.Background()) }
+
 func (p *proc) PID() int {
 	return p.pid
 }
@@ -300,7 +305,7 @@ func (p *proc) ExitCode() int {
 }
 
 func (p *proc) Stop(ctx context.Context) error {
-	p.streams.closeInput()
+	p.streams.close()
 	select {
 	case <-p.done:
 		return nil
@@ -353,10 +358,9 @@ func (p *proc) killTree() {
 	}
 }
 
-// streamPipe borrows the caller's stream and owns only the pipe ends. An
-// arbitrary Read/Write cannot be forcibly canceled by Go. If it blocks, closing
-// our ends detaches that call from Process.Done; once it returns the pump exits.
-// We never close caller-owned streams or wait indefinitely for their methods.
+// streamPipe owns the OS pipe and closes a cancellable endpoint on Stop/ctx.
+// In particular, an io.PipeReader/Writer blocked inside Read/Write must be
+// closed too: closing only our OS pipe cannot interrupt that external call.
 type streamPipe struct {
 	child, parent *os.File
 	src           io.Reader
@@ -364,6 +368,7 @@ type streamPipe struct {
 	done          chan struct{}
 	stop          chan struct{}
 	closeOnce     sync.Once
+	endpoint      io.Closer
 }
 
 func (s *streamPipe) close() {
@@ -371,6 +376,9 @@ func (s *streamPipe) close() {
 		close(s.stop)
 		_ = s.child.Close()
 		_ = s.parent.Close()
+		if s.endpoint != nil {
+			_ = s.endpoint.Close()
+		}
 	})
 }
 
@@ -412,9 +420,11 @@ func newProcStreams(cmd *exec.Cmd) (*procStreams, error) {
 		}
 		p := &streamPipe{src: src, dst: dst, done: make(chan struct{}), stop: make(chan struct{})}
 		if input {
+			p.endpoint, _ = src.(io.Closer)
 			p.child, p.parent, p.dst = r, w, w
 			s.input = p
 		} else {
+			p.endpoint, _ = dst.(io.Closer)
 			p.child, p.parent, p.src = w, r, r
 			s.outputs = append(s.outputs, p)
 		}
