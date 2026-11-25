@@ -295,6 +295,11 @@ func (f *Forwarder) Expose(name string, serverPort, pcPort int) (api.Exposed, er
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	return f.exposeLocked(name, serverPort, pcPort)
+}
+
+// exposeLocked keeps restoration atomic with Expose and Unexpose.
+func (f *Forwarder) exposeLocked(name string, serverPort, pcPort int) (api.Exposed, error) {
 	if f.closed {
 		return api.Exposed{}, errors.New("forward: stopped: component is closed")
 	}
@@ -461,6 +466,8 @@ func (f *Forwarder) startInternalSocks() {
 				defer f.unregisterConn(c)
 				defer func() { _ = c.Close() }()
 
+				// Track the socket before reading even the first handshake byte.
+				f.registerChConn(c, c)
 				serveSOCKS5(f.ctx, c, c, func(ctx context.Context, target string) (net.Conn, error) {
 					if f.ch.State().State != "up" {
 						return nil, errors.New("forward: channel-down: channel is not up")
@@ -691,13 +698,11 @@ func (f *Forwarder) restoreExposed() {
 	for _, exp := range f.exposed {
 		rows = append(rows, exp)
 	}
-	f.mu.Unlock()
 	for _, exp := range rows {
-		if _, err := f.Expose(exp.Name, exp.ServerPort, exp.PCPort); err != nil {
+		if _, err := f.exposeLocked(exp.Name, exp.ServerPort, exp.PCPort); err != nil {
 			f.log.Warn("forward: expose-restore-failed", "name", exp.Name, "err", err)
 		}
 	}
-	f.mu.Lock()
 }
 
 func (f *Forwarder) watchChannelState() {

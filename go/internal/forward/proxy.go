@@ -2,6 +2,7 @@ package forward
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -167,7 +168,25 @@ func serveDualProxy(ctx context.Context, conn net.Conn, pacBytes []byte, dialer 
 		return
 	}
 
-	// HTTP Proxy or PAC request
+	// Bound the entire header before parsing; bufio's buffer size is not a limit.
+	// Keep bytes buffered beyond the header for request bodies and CONNECT data.
+	const headerMax = 16384
+	header := make([]byte, 0, headerMax)
+	for {
+		b, readErr := br.ReadByte()
+		if readErr != nil {
+			return
+		}
+		header = append(header, b)
+		if bytes.HasSuffix(header, []byte("\r\n\r\n")) || bytes.HasSuffix(header, []byte("\n\n")) {
+			break
+		}
+		if len(header) >= headerMax {
+			_, _ = conn.Write([]byte("HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+			return
+		}
+	}
+	br = bufio.NewReader(io.MultiReader(bytes.NewReader(header), br))
 	req, err := http.ReadRequest(br)
 	if err != nil {
 		_, _ = conn.Write([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
