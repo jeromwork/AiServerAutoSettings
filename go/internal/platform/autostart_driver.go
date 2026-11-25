@@ -7,16 +7,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-
-	"remoteagents/internal/api"
 )
 
-func init() {
-	api.RegisterDev(api.DevCmd{Name: "platform", Run: autostartDriver})
-}
-
-// autostartDriver only writes a temporary specification; it never installs it.
-func autostartDriver(ctx context.Context, args []string) int {
+// RunAutostartDev only writes a temporary specification; it never installs it.
+func RunAutostartDev(ctx context.Context, args []string) int {
 	if len(args) != 2 || args[0] != "autostart" || args[1] != runtime.GOOS {
 		fmt.Fprintln(os.Stderr, "usage: dev platform autostart "+runtime.GOOS)
 		return 2
