@@ -35,15 +35,16 @@ func (s *linuxSteps) removeProcess(ctx context.Context, t api.Trace) error {
 	if err != nil || !matches {
 		return err
 	}
-	// Only a dedicated group led by the verified process belongs to this trace.
+	// Procs may place several traced children in one group; the traced PID
+	// need not be its leader. Never signal the cleanup process's own group.
 	pgid, err := syscall.Getpgid(pid)
 	if err != nil {
 		return err
 	}
-	if pgid != pid {
-		return fmt.Errorf("process: refusing non-isolated process group")
+	if pgid <= 1 || pgid == syscall.Getpgrp() {
+		return fmt.Errorf("process: refusing unsafe process group")
 	}
-	identity, err := groupLeaderIdentity(ctx, pid)
+	identity, err := processIdentity(ctx, pid)
 	if err != nil {
 		return err
 	}
@@ -56,15 +57,19 @@ func (s *linuxSteps) removeProcess(ctx context.Context, t api.Trace) error {
 	case <-ctx.Done():
 	case <-timer.C:
 	}
-	// The leader may have exited on TERM while its children remain in the group.
-	// If the PID was reused, do not signal the new process's group.
+	// The traced member may exit on TERM while other group members remain.
+	// If its PID was reused or moved groups, preserve the group.
 	if err := syscall.Kill(pid, 0); err == nil {
-		current, identityErr := groupLeaderIdentity(ctx, pid)
+		current, identityErr := processIdentity(ctx, pid)
 		if identityErr != nil {
 			return identityErr
 		}
-		if current != identity {
-			return fmt.Errorf("process: leader identity changed; group preserved")
+		currentGroup, groupErr := syscall.Getpgid(pid)
+		if groupErr != nil {
+			return groupErr
+		}
+		if current != identity || currentGroup != pgid {
+			return fmt.Errorf("process: identity or group changed; group preserved")
 		}
 	}
 	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
@@ -73,8 +78,8 @@ func (s *linuxSteps) removeProcess(ctx context.Context, t api.Trace) error {
 	return nil
 }
 
-// Start ticks remain readable for a zombie leader until it is reaped.
-func groupLeaderIdentity(_ context.Context, pid int) (string, error) {
+// Start ticks remain readable for a zombie process until it is reaped.
+func processIdentity(_ context.Context, pid int) (string, error) {
 	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		return "", err
