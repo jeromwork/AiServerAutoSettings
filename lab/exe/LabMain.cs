@@ -430,8 +430,20 @@ namespace RemoteAgents.Lab
                 case "notice": {
                     object text; msg.TryGetValue("text", out text);
                     string t = ((text as string) ?? "").Replace("\r", " ").Replace("\n", " "); if (t.Length > 200) t = t.Substring(0, 200);
-                    if (t.StartsWith("Уже последняя версия") || t.StartsWith("Ошибка") || t.StartsWith("Не удалось") || t.StartsWith("Нет связи")) updateLockUntil = DateTime.MinValue;
+                    if (t.StartsWith("Уже последняя версия") || t.StartsWith("Ошибка") || t.StartsWith("Не удалось") || t.StartsWith("Нет связи")) { updateLockUntil = DateTime.MinValue; UpdateStatus = null; var up = UpdateProgress; if (up != null) up(); }
                     if (t.Length > 0) { var handler = Notice; if (handler != null) handler(t); }
+                    break;
+                }
+                case "update-progress": {
+                    object text; msg.TryGetValue("text", out text);
+                    string t = ((text as string) ?? "").Replace("\r", " ").Replace("\n", " ");
+                    if (t.Length == 0) UpdateStatus = null;
+                    else
+                    {
+                        UpdateStatus = t.Length > 24 ? t.Substring(0, 24) : t;
+                        updateLockUntil = DateTime.UtcNow.AddSeconds(120); // продлеваем блок, пока идёт прогресс
+                    }
+                    var upd = UpdateProgress; if (upd != null) upd();
                     break;
                 }
                 case "restart-exe": {
@@ -492,6 +504,8 @@ namespace RemoteAgents.Lab
         }
         DateTime updateLockUntil = DateTime.MinValue;
         // После «Обновить» Python сам переставляет exe/.prev/.tmp: 120 с (или до restart-exe/выхода) откат и повторное обновление недоступны.
+        public string UpdateStatus { get; private set; }
+        public event Action UpdateProgress;
         public bool UpdateLocked { get { return DateTime.UtcNow < updateLockUntil; } }
         public bool ExitInProgress { get { return exitRequested || RestartExeRequested; } }
         public volatile string RollbackError; bool pendingRollbackFiles;

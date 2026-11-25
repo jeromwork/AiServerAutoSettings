@@ -37,7 +37,9 @@ namespace RemoteAgents.Lab
                 diskItem.Enabled = supervisor.DiskRunning && supervisor.DiskHome.Length > 0;
                 updateItem.Enabled = supervisor.PythonRunning && !supervisor.UpdateLocked;
                 rollbackItem.Enabled = File.Exists(Supervisor.PrevExePath) && !supervisor.UpdateLocked && !supervisor.ExitInProgress;
+                ShowUpdate();
             };
+            supervisor.UpdateProgress += ShowUpdate;
             supervisor.Notice += text => icon.ShowBalloonTip(5000, "RemoteAgents", text, ToolTipIcon.Info);
             // Одиночный левый клик или двойной клик открывает страницу (или «Состояние», если адреса ещё нет).
             clickTimer = new Timer { Interval = SystemInformation.DoubleClickTime };
@@ -75,12 +77,24 @@ namespace RemoteAgents.Lab
             catch (Exception ex) { supervisor.WriteLog("Открыть Диск: " + ex.Message); }
         }
 
+        string lastTip = "";
+
+        // Прогресс обновления: пункт меню и подсказка значка; вызывается только из UI-потока.
+        void ShowUpdate()
+        {
+            string s = supervisor.UpdateLocked ? supervisor.UpdateStatus : null;
+            updateItem.Text = s ?? "Обновить";
+            string tip = s != null ? "Лаборатория: " + s : lastTip;
+            icon.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
+        }
+
         void Refresh()
         {
             var state = supervisor.State;
             icon.Icon = state.Color == "green" ? green : state.Color == "yellow" ? yellow : state.Color == "red" ? red : grey;
             disk.Sync(supervisor.DiskRunning, supervisor.DiskHome);
-            icon.Text = state.Tip; // NotifyIcon.Text: не больше 63 символов, Supervisor их уже обрезал
+            lastTip = state.Tip; // NotifyIcon.Text: не больше 63 символов, Supervisor их уже обрезал
+            ShowUpdate();
             if (controlItem != null) controlItem.Checked = supervisor.ControlEnabled;
             if (window != null && window.Visible) FillWindow();
         }
