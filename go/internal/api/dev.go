@@ -2,6 +2,8 @@ package api
 
 import "context"
 
+// Ручные драйверы пакетной приёмки: `remoteagents dev <ID задачи> …`, имя = ID задачи в нижнем регистре (p6a, p13…).
+// Регистрация — в cmd/remoteagents/dev_<id>.go владельца задачи через init(); повтор имени — panic при старте (ловится сразу).
 type DevCmd struct {
 	Name string
 	Help string
@@ -16,5 +18,4 @@ func RegisterDev(c DevCmd) {
 	}
 	devCmds[c.Name] = c
 }
-
 func DevCmds() map[string]DevCmd { return devCmds }

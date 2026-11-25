@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"errors"
 	"time"
 
 	"remoteagents/internal/api"
@@ -13,5 +14,5 @@ type Options struct {
 }
 
 func New(cfg *api.Config, sb api.Singbox, agent api.AgentHost, log api.Logger, tr api.Traces, o Options) (api.Channel, error) {
-	panic("not implemented")
+	return nil, errors.New("channel: not-implemented")
 }

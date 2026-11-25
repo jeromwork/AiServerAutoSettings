@@ -2,21 +2,25 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 
 	"remoteagents/internal/api"
 	"remoteagents/internal/core"
 )
 
-var Version = "dev"
-var Build = "0"
+var version = "dev"
+var build = "0"
+
+// pubKeys and releaseRepo are set via -ldflags.
+var pubKeys = ""
+var releaseRepo = ""
 
 func main() {
 	os.Exit(dispatch(context.Background(), os.Args[1:]))
 }
 
-// silence unused
+// suppress unused
 var _ = api.ExitOK
 var _ = core.Flags{}
-var _ = fmt.Sprintf
+var _ = pubKeys
+var _ = releaseRepo

@@ -13,7 +13,7 @@ type AgentHost interface {
 }
 
 type ChannelState struct {
-	State   string    `json:"state"`
+	State   string    `json:"state"` // waiting | connecting | up | down
 	Path    string    `json:"path"`
 	Reason  string    `json:"reason"`
 	Since   time.Time `json:"since"`
@@ -26,5 +26,5 @@ type Channel interface {
 	Subscribe() (<-chan ChannelState, func())
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
 	Exec(ctx context.Context, cmd string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
-	ForcePath(name string) error
+	ForcePath(name string) error // повтор uplink.force: selector + закрепить 600 с + разорвать ssh для переподключения
 }

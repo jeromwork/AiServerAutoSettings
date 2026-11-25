@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"time"
 
 	"remoteagents/internal/api"
@@ -13,7 +15,7 @@ type Flags struct {
 	ExitAfter                                                                     time.Duration
 }
 
-func Run(ctx context.Context, f Flags) int { panic("not implemented") }
-
-func startVPNGuard() {}
-func startLANGuard() {}
+func Run(ctx context.Context, f Flags) int {
+	fmt.Fprintln(os.Stderr, "core: not-implemented")
+	return 1
+}

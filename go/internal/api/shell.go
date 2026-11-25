@@ -16,7 +16,7 @@ type ExecReq struct {
 // Буфер каждого потока ≤1 МиБ; лишнее отрезается спереди, Base растёт. off < Base → читать с Base.
 type Chunk struct {
 	Data    []byte
-	NextOff int  // off' + len(Data), где off' = max(off, Base)
+	NextOff int // off' + len(Data), где off' = max(off, Base)
 	Base    int
 }
 
@@ -25,7 +25,7 @@ type ExecProc interface {
 	Read(stream string, off int) Chunk // stream: "out" | "err"
 	// WaitNew: ждёт, пока процесс завершится ИЛИ появятся байты за outOff/errOff; max — верхний предел (v3: 25 с, v2 ждёт без предела).
 	WaitNew(ctx context.Context, outOff, errOff int, max time.Duration)
-	Exited() bool // процесс завершён
+	Exited() bool                    // процесс завершён
 	Drained(outOff, errOff int) bool // завершён и оба смещения дошли до конца — это v2 "exited"
 	Code() int
 	Truncated() bool

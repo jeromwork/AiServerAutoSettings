@@ -17,8 +17,8 @@ type Trace struct {
 }
 
 type Traces interface {
-	Intent(t Trace) error                             // ошибка → изменение НЕ делать
+	Intent(t Trace) error // ошибка → изменение НЕ делать
 	Applied(kind, id string, data, set map[string]string) error
 	Done(kind, id string) error
-	Instance() string                                 // 32 hex; системные метки: "ra3-"+Instance()[:8]
+	Instance() string // 32 hex; системные метки: "ra3-"+Instance()[:8]
 }

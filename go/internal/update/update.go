@@ -1,6 +1,7 @@
 package update
 
 import (
+	"errors"
 	"time"
 
 	"remoteagents/internal/api"
@@ -14,4 +15,6 @@ type Options struct {
 	BaseURL       string
 }
 
-func New(p api.Paths, log api.Logger, o Options) (api.Updater, error) { panic("not implemented") }
+func New(p api.Paths, log api.Logger, o Options) (api.Updater, error) {
+	return nil, errors.New("update: not-implemented")
+}

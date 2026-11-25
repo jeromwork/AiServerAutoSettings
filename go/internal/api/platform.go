@@ -1,13 +1,13 @@
 package api
 
 type AutostartSpec struct {
-	Kind    string
-	Path    string
-	Content string
-	Install []string
-	Remove  []string
-	Enable  []string
-	Disable []string
+	Kind    string   // schtasks | systemd | launchd
+	Path    string   // путь файла задания/unit/plist
+	Content string   // текст (для schtasks — XML задачи)
+	Install []string // argv
+	Remove  []string // argv
+	Enable  []string // argv включить (без запуска)
+	Disable []string // argv выключить
 }
 
 type Iface struct {
@@ -29,7 +29,8 @@ type Platform interface {
 	Interfaces() ([]Iface, error)
 }
 
+// LANOps — платформенные изменения для ЛВС (N2). Каждое — через Traces (Kind nrpt/hosts/dns), только при Mode.AllowsSystemChanges.
 type LANOps interface {
-	ApplyDomains(domains []string, dnsServer string) error
+	ApplyDomains(domains []string, dnsServer string) error // NRPT (Windows) / resolvectl domain на своём адаптере (Linux) / /etc/resolver (Mac)
 	RemoveAll() error
 }

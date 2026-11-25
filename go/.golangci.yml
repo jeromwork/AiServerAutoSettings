@@ -1,0 +1,35 @@
+version: "2"
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - bodyclose
+    - noctx
+    - contextcheck
+    - ineffassign
+    - unused
+    - gosec
+  settings:
+    gosec:
+      includes:
+        - G101
+        - G107
+        - G110
+        - G112
+        - G114
+        - G301
+        - G302
+        - G303
+        - G306
+        - G401
+        - G402
+        - G403
+        - G404
+        - G501
+        - G502
+        - G503
+        - G505
+      excludes:
+        - G204
+        - G304

@@ -3,14 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"runtime"
-	"strconv"
-	"time"
+	"strings"
 
 	"remoteagents/internal/api"
 	"remoteagents/internal/core"
+	"remoteagents/internal/supervise"
 )
 
 func dispatch(ctx context.Context, args []string) int {
@@ -22,22 +23,32 @@ func dispatch(ctx context.Context, args []string) int {
 	case "version":
 		if len(args) > 1 && args[1] == "--json" {
 			b, _ := json.Marshal(map[string]string{
-				"version": Version,
-				"build":   Build,
+				"version": version,
+				"build":   build,
 				"os":      runtime.GOOS,
 				"arch":    runtime.GOARCH,
 			})
 			fmt.Println(string(b))
 		} else {
-			fmt.Println(Version)
+			fmt.Println(version)
 		}
 		return 0
+
 	case "run":
-		f := parseRunFlags(args[1:])
+		f, err := parseRunFlags(args[1:], false)
+		if err != nil {
+			return 2
+		}
 		return core.Run(ctx, f)
+
 	case "supervise":
-		f := parseRunFlags(args[1:])
-		return core.Run(ctx, f)
+		f, err := parseRunFlags(args[1:], true)
+		if err != nil {
+			return 2
+		}
+		p := api.NewPaths(f.Home)
+		return supervise.Run(ctx, p, nil, nil, os.Args[0], f.Mode, args[1:])
+
 	case "dev":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: remoteagents dev <id> [args...]")
@@ -50,51 +61,53 @@ func dispatch(ctx context.Context, args []string) int {
 			return 1
 		}
 		return c.Run(ctx, args[2:])
+
+	case "open", "status", "config", "update", "leftovers", "install", "enable", "uninstall", "singbox":
+		fmt.Fprintf(os.Stderr, "%s: not-implemented\n", args[0])
+		return 1
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
 		return 1
 	}
 }
 
-func parseRunFlags(args []string) core.Flags {
-	f := core.Flags{}
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--home":
-			i++; if i < len(args) { f.Home = args[i] }
-		case "--config":
-			i++; if i < len(args) { f.Config = args[i] }
-		case "--password-file":
-			i++; if i < len(args) { f.PasswordFile = args[i] }
-		case "--pc":
-			i++; if i < len(args) { f.PC = args[i] }
-		case "--safe":
-			f.Mode.Safe = true
-		case "--no-tun":
-			f.Mode.NoTun = true
-		case "--no-channel":
-			f.Mode.NoChannel = true
-		case "--no-singbox":
-			f.Mode.NoSingbox = true
-		case "--dev-assets":
-			i++; if i < len(args) { f.DevAssets = args[i] }
-		case "--pprof":
-			i++; if i < len(args) { f.Pprof = args[i] }
-		case "--exit-after":
-			i++
-			if i < len(args) {
-				if d, err := time.ParseDuration(args[i]); err == nil {
-					f.ExitAfter = d
-				}
+func parseRunFlags(args []string, supervised bool) (core.Flags, error) {
+	var f core.Flags
+	var reset bool
+	flags := flag.NewFlagSet("remoteagents", flag.ContinueOnError)
+	flags.StringVar(&f.Home, "home", "", "application data directory")
+	flags.StringVar(&f.Config, "config", "", "configuration file")
+	flags.StringVar(&f.PasswordFile, "password-file", "", "configuration password file")
+	flags.StringVar(&f.PC, "pc", "", "computer name")
+	flags.BoolVar(&f.Mode.Safe, "safe", false, "start without system changes")
+	flags.BoolVar(&f.Mode.NoTun, "no-tun", false, "disable TUN")
+	flags.BoolVar(&f.Mode.NoChannel, "no-channel", false, "disable the channel")
+	flags.BoolVar(&f.Mode.NoSingbox, "no-singbox", false, "disable sing-box")
+	flags.StringVar(&f.DevAssets, "dev-assets", "", "development web assets")
+	flags.StringVar(&f.Pprof, "pprof", "", "pprof address")
+	flags.DurationVar(&f.ExitAfter, "exit-after", 0, "exit delay")
+	flags.StringVar(&f.RollbackReason, "rollback-reason", "", "reason for rollback")
+	flags.StringVar(&f.ReleaseBase, "release-base", "", "release base URL")
+	if supervised {
+		flags.BoolVar(&reset, "reset", false, "clear supervisor stopped state")
+	}
+	for i, arg := range args {
+		switch arg {
+		case "--home", "--config", "--password-file", "--pc", "--dev-assets", "--pprof", "--exit-after", "--rollback-reason", "--release-base":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				err := fmt.Errorf("missing value for %s", arg)
+				fmt.Fprintln(flags.Output(), err)
+				return f, err
 			}
-		case "--rollback-reason":
-			i++; if i < len(args) { f.RollbackReason = args[i] }
-		case "--release-base":
-			i++; if i < len(args) { f.ReleaseBase = args[i] }
 		}
 	}
-	return f
+	if err := flags.Parse(args); err != nil {
+		return f, err
+	}
+	if flags.NArg() != 0 {
+		err := fmt.Errorf("unexpected argument: %s", flags.Arg(0))
+		fmt.Fprintln(flags.Output(), err)
+		return f, err
+	}
+	return f, nil
 }
-
-// suppress unused
-var _ = strconv.Itoa
