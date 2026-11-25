@@ -92,9 +92,9 @@ func parseRunFlags(args []string, supervised bool) (core.Flags, error) {
 		flags.BoolVar(&reset, "reset", false, "clear supervisor stopped state")
 	}
 	for i, arg := range args {
-		switch arg {
-		case "--home", "--config", "--password-file", "--pc", "--dev-assets", "--pprof", "--exit-after", "--rollback-reason", "--release-base":
-			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+		switch strings.TrimLeft(arg, "-") {
+		case "home", "config", "password-file", "pc", "dev-assets", "pprof", "exit-after", "rollback-reason", "release-base":
+			if strings.HasPrefix(arg, "-") && (i+1 >= len(args) || strings.HasPrefix(args[i+1], "-")) {
 				err := fmt.Errorf("missing value for %s", arg)
 				fmt.Fprintln(flags.Output(), err)
 				return f, err
