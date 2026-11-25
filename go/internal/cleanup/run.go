@@ -153,7 +153,7 @@ func (c *Cleaner) Run(ctx context.Context, reason string) []string {
 			removeErr = currentPlatformSteps.removeRule(ctx, prio, table)
 		case "hosts":
 			marker := t.Data["marker"]
-			removeErr = removeHostsBlock(marker)
+			removeErr = c.removeHostsBlock(marker)
 		case "firewall":
 			name := t.Data["name"]
 			removeErr = currentPlatformSteps.removeFirewall(ctx, name)
@@ -278,6 +278,9 @@ func (c *Cleaner) isSafeTmpPath(p string) bool {
 	if p == "" {
 		return false
 	}
+	if p == c.hostsTempPath() {
+		return true
+	}
 	resolved, err := filepath.EvalSymlinks(filepath.Dir(p))
 	if err != nil {
 		return os.IsNotExist(err) && !pathExists(p) && filepath.IsAbs(p) && strings.HasPrefix(filepath.Clean(p), c.p.Tmp+string(os.PathSeparator))
@@ -285,7 +288,13 @@ func (c *Cleaner) isSafeTmpPath(p string) bool {
 	p = filepath.Join(resolved, filepath.Base(p))
 	cleanP := filepath.Clean(p)
 	cleanTmp := filepath.Clean(c.p.Tmp)
-	cleanHome := filepath.Clean(c.p.Home)
+	cleanHome, err := filepath.EvalSymlinks(c.p.Home)
+	if err != nil {
+		return false
+	}
+	if rel, err := filepath.Rel(cleanP, cleanHome); err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))) {
+		return false
+	}
 	if cleanP == cleanHome || cleanP == "/" || cleanP == "." {
 		return false
 	}
@@ -355,7 +364,11 @@ func checkHostsMarker(marker string) bool {
 	return bytes.Contains(content, []byte(trimmedMarker))
 }
 
-func removeHostsBlock(marker string) error {
+func (c *Cleaner) hostsTempPath() string {
+	return hostsPath() + ".ra3-" + c.instance + ".tmp"
+}
+
+func (c *Cleaner) removeHostsBlock(marker string) error {
 	if marker == "" {
 		return nil
 	}
@@ -395,16 +408,44 @@ func removeHostsBlock(marker string) error {
 		return fmt.Errorf("hosts: unterminated block")
 	}
 	newContent := []byte(strings.Join(newLines, "\n"))
-	if bytes.Equal(content, newContent) {
-		return nil
+	if bytes.Contains(newContent, []byte(trimmedMarker)) {
+		return fmt.Errorf("hosts: marker remains in malformed block")
 	}
-	tmpFile := fmt.Sprintf("%s.ra3.tmp.%d", path, os.Getpid())
-	if err := os.WriteFile(tmpFile, newContent, 0644); err != nil { //nolint:gosec // hosts is public
+	tmpFile := c.hostsTempPath()
+	const tmpID = "hosts-rewrite"
+	if err := c.Intent(api.Trace{Kind: "tmp", ID: tmpID, Owner: "cleanup", Data: map[string]string{"path": tmpFile}}); err != nil {
 		return err
+	}
+	// The intent survives a crash; normal failures remove the staging file now.
+	defer func() {
+		if err := os.Remove(tmpFile); err == nil || os.IsNotExist(err) {
+			_ = c.Done("tmp", tmpID)
+		}
+	}()
+	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644) //nolint:gosec // hosts is public
+	if err != nil {
+		return err
+	}
+	if err := c.Applied("tmp", tmpID, nil, nil); err != nil {
+		_ = f.Close()
+		return err
+	}
+	_, err = f.Write(newContent)
+	if err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	if err := os.Rename(tmpFile, path); err != nil {
-		_ = os.Remove(tmpFile)
 		return err
+	}
+	if checkHostsMarker(marker) {
+		return fmt.Errorf("hosts: marker remains after replacement")
 	}
 	return nil
 }
