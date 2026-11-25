@@ -7,6 +7,10 @@ import (
 )
 
 func openRegular(path string) (*os.File, error) {
+	return openRegularFile(path, os.O_RDONLY)
+}
+
+func openRegularFile(path string, flag int) (*os.File, error) {
 	// Named pipes and devices are not files and can block during open. Refuse
 	// Windows device namespaces before asking the OS for file metadata.
 	normalized := strings.ToLower(strings.ReplaceAll(path, "/", `\`))
@@ -20,5 +24,5 @@ func openRegular(path string) (*os.File, error) {
 	if !st.Mode().IsRegular() {
 		return nil, errors.New("agent: file: regular file required")
 	}
-	return os.Open(path)
+	return os.OpenFile(path, flag, 0)
 }

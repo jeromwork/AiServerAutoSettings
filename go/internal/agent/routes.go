@@ -404,9 +404,16 @@ func (a *Agent) handleWrite(body []byte) response {
 			err = errors.Join(err, a.saveParts())
 		}
 	} else {
-		f, err = os.OpenFile(part, os.O_WRONLY, 0600)
+		f, err = openRegularFile(part, os.O_WRONLY)
 		if err == nil {
-			_, err = f.Seek(req.Offset, io.SeekStart)
+			var st os.FileInfo
+			st, err = f.Stat()
+			if err == nil && !st.Mode().IsRegular() {
+				err = errors.New("agent: upload: regular file required")
+			}
+			if err == nil {
+				_, err = f.Seek(req.Offset, io.SeekStart)
+			}
 		}
 	}
 	if err != nil {
