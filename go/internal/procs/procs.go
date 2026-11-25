@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,6 +68,18 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 	case nil, *os.File, *bytes.Buffer, *bytes.Reader, *strings.Reader, *io.PipeReader:
 	default:
 		return nil, fmt.Errorf("procs: stdin-unsupported: reader cannot be canceled")
+	}
+
+	// An arbitrary Writer can block forever and has no cancellation contract.
+	// PipeWriter is supported through an owned pipe, closed after process exit.
+	for _, w := range []io.Writer{s.Stdout, s.Stderr} {
+		switch w.(type) {
+		case nil, *os.File, *bytes.Buffer, *strings.Builder, *io.PipeWriter:
+		default:
+			if reflect.TypeOf(w) != reflect.TypeOf(io.Discard) {
+				return nil, fmt.Errorf("procs: output-unsupported: writer cannot be canceled")
+			}
+		}
 	}
 
 	m.mu.Lock()
@@ -176,6 +189,25 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		stderrCloser = w
 	}
 
+	var outputs []*outputPipe
+	defer func() {
+		if !handedOff {
+			for _, out := range outputs {
+				out.close()
+			}
+		}
+	}()
+	for _, dst := range []*io.Writer{&cmd.Stdout, &cmd.Stderr} {
+		if w, ok := (*dst).(*io.PipeWriter); ok {
+			out, err := newOutputPipe(w)
+			if err != nil {
+				return nil, fmt.Errorf("procs: output-pipe: %w", err)
+			}
+			outputs = append(outputs, out)
+			*dst = out.write
+		}
+	}
+
 	if err := m.setupCmd(cmd, s); err != nil {
 		if stdoutCloser != nil {
 			_ = stdoutCloser.Close()
@@ -270,6 +302,9 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 
 	go func() {
 		err := cmd.Wait()
+		for _, out := range outputs {
+			out.close()
+		}
 		if inputDone != nil {
 			_ = input.Close()
 			_ = inputWrite.Close()
@@ -404,4 +439,38 @@ func (p *proc) killTree() {
 	if !p.retired {
 		p.killOnce.Do(p.hardKill)
 	}
+}
+
+// outputPipe keeps a potentially blocked PipeWriter out of exec.Cmd.Wait.
+// Give the consumer a bounded drain period, then interrupt both pipe ends.
+type outputPipe struct {
+	read, write *os.File
+	dst         *io.PipeWriter
+	done        chan struct{}
+}
+
+func newOutputPipe(dst *io.PipeWriter) (*outputPipe, error) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	p := &outputPipe{read: r, write: w, dst: dst, done: make(chan struct{})}
+	go func() {
+		defer close(p.done)
+		_, _ = io.Copy(dst, r)
+	}()
+	return p, nil
+}
+
+func (p *outputPipe) close() {
+	_ = p.write.Close()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case <-p.done:
+	case <-timer.C:
+		_ = p.dst.CloseWithError(context.Canceled)
+	}
+	_ = p.read.Close()
+	<-p.done
 }
