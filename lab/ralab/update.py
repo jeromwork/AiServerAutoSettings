@@ -4,7 +4,7 @@ install(send): проверить релиз, скачать, сверить SHA
 rollback(send): поменять местами текущий и прежний EXE. send(obj) шлёт JSON-сообщение в EXE.
 Путь к EXE и его версия приходят аргументами --exe и --exe-version (читаются из sys.argv, app.py не трогаем).
 """
-import argparse, hashlib, json, os, re, sys, threading, urllib.request
+import argparse, hashlib, json, os, re, sys, threading, time, urllib.request
 
 URL = 'https://api.github.com/repos/jeromwork/AiServerAutoSettings/releases/tags/lab-latest'
 RX = re.compile(r'Последняя версия: (V[0-9.]+).*?SHA-256 ([0-9a-f]{64})', re.S)
@@ -55,7 +55,7 @@ def check():
     return ver, sha, url, size
 
 
-def _download(url, size, dest):
+def _download(url, size, dest, on_bytes=None):
     """Сеть -> OSError/ValueError, запись на диск -> FsError. SHA-256 проверяет вызывающий всегда (даже при size == 0)."""
     h, n = hashlib.sha256(), 0
     req = urllib.request.Request(url, headers={'User-Agent': 'ra-update'})
@@ -70,6 +70,8 @@ def _download(url, size, dest):
                 if not b:
                     break
                 n += len(b)
+                if on_bytes:
+                    on_bytes(n)
                 if n > MAX_SIZE:
                     raise ValueError('файл больше допустимого размера')
                 try:
@@ -98,15 +100,21 @@ def _notice(send, text):
     send({'t': 'notice', 'text': text})
 
 
+def _progress(send, text):
+    send({'t': 'update-progress', 'text': text[:24]})
+
+
 def _guard(fn, send):
     def run():
         global _swapped
         if not _busy.acquire(blocking=False):
             _notice(send, 'Уже обновляю')
             return
+        mine = False
         try:
             if _swapped:
                 return _notice(send, 'Уже обновляю')
+            mine = True
             if fn(send):
                 _swapped = True
         except FsError as e:
@@ -116,6 +124,8 @@ def _guard(fn, send):
         except Exception as e:
             _notice(send, 'Ошибка: %s' % str(e)[:160])
         finally:
+            if mine and not _swapped:
+                _progress(send, '')
             _busy.release()
     if _busy.locked() or _swapped:
         _notice(send, 'Уже обновляю')
@@ -124,6 +134,7 @@ def _guard(fn, send):
 
 
 def _install(send):
+    _progress(send, 'Проверяю версию…')
     a = _args()
     if not a.exe or not os.path.isfile(a.exe):
         return _notice(send, 'Ошибка: не знаю, где лежит программа')
@@ -135,9 +146,17 @@ def _install(send):
     if cur and _vkey(ver) <= _vkey(cur):
         return _notice(send, 'Уже последняя версия ' + ver)
     _notice(send, 'Обновляю до %s…' % ver)
+    last = {'t': 0.0, 'v': None}
+
+    def on_bytes(done):
+        v = (done * 100 // size) if size else done // (1 << 20)
+        now = time.monotonic()
+        if v != last['v'] and now - last['t'] >= 0.5:
+            last['t'], last['v'] = now, v
+            _progress(send, ('Скачиваю %s: %d%%' % (ver, v)) if size else ('Скачиваю %s: %d МБ' % (ver, v)))
     exe, prev, new = _paths(a.exe)
     try:
-        got = _download(url, size, new)
+        got = _download(url, size, new, on_bytes)
     except FsError as e:
         _rm(new)
         return _notice(send, 'Не удалось записать файл: %s' % str(e)[:120])
@@ -147,10 +166,12 @@ def _install(send):
     except ValueError as e:
         _rm(new)
         return _notice(send, 'Ошибка: ' + str(e))
+    _progress(send, 'Проверяю файл %s' % ver)
     if got != sha:
         _rm(new)
         return _notice(send, 'Ошибка: файл не совпал по SHA-256')
     moved = False
+    _progress(send, 'Устанавливаю %s' % ver)
     try:
         _rm(prev)
         os.replace(exe, prev)
@@ -164,6 +185,7 @@ def _install(send):
             pass
         _rm(new)
         return _notice(send, 'Не удалось записать файл: %s' % str(e)[:120])
+    _progress(send, 'Перезапуск в %s…' % ver)
     send({'t': 'restart-exe'})
     return True
 
