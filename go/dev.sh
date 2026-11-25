@@ -83,6 +83,6 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 export RA_DEV_BIN="$work/remoteagents"
-setsid "$AIR" -c .air.toml --tmp_dir "$work" &
+setsid "$AIR" -c .air.toml --tmp_dir "$work" --build.log "$work/build-errors.log" &
 air_pid=$!
 wait "$air_pid"
