@@ -271,7 +271,11 @@ func (s *box) watch(ctx context.Context, p api.Process, e api.Effective) {
 		return
 	}
 	s.running = false
-	s.ready = make(chan struct{})
+	select {
+	case <-s.ready:
+		s.ready = make(chan struct{})
+	default:
+	}
 	if e.VPN || e.LAN {
 		retry, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -292,7 +296,11 @@ func (s *box) stop(ctx context.Context) error {
 		s.proc = nil
 	}
 	s.running = false
-	s.ready = make(chan struct{})
+	select {
+	case <-s.ready:
+		s.ready = make(chan struct{})
+	default:
+	}
 	return nil
 }
 func (s *box) Stop(ctx context.Context) error {
