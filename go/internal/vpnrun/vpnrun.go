@@ -3,7 +3,9 @@
 package vpnrun
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -30,6 +32,7 @@ type Runner struct {
 	Conf   string   // путь к конфигу: <home>/private/vpn.json (как в v2)
 	API    string   // clash_api.external_controller из конфига VPN, напр. 127.0.0.1:9090
 	Secret string   // clash_api.secret
+	Exit   string   // тег outbound узла выхода в конфиге VPN (по нему ищем ошибки соединений); пусто = "proxy"
 
 	mu         sync.Mutex
 	proc       api.Process
@@ -37,6 +40,9 @@ type Runner struct {
 	cancel     context.CancelFunc
 	ctx        context.Context
 	rootCancel context.CancelFunc
+	dead       bool // остановлены из-за мёртвого туннеля: ждём net.changed
+	deadN      int  // мёртвых туннелей подряд (сбрасывается ручным Start)
+	unsub      func()
 }
 
 // New: пути постоянные, как в v2 (vpn.py), ничего не запоминается в файле.
@@ -46,8 +52,27 @@ func New(home string, procs api.Procs, log api.Logger, b *bus.Bus, apiAddr, secr
 		exe = "RA2-VPN.exe"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Runner{Procs: procs, Log: log, Bus: b, API: apiAddr, Secret: secret, ctx: ctx, rootCancel: cancel,
+	r := &Runner{Procs: procs, Log: log, Bus: b, API: apiAddr, Secret: secret, ctx: ctx, rootCancel: cancel,
 		Sing: filepath.Join(home, "runtime", exe), Conf: filepath.Join(home, "private", "vpn.json")}
+	if b != nil {
+		// Как в v2: после мёртвого туннеля VPN снова пробуем только по событию смены сети (новый путь — новый шанс).
+		r.unsub = b.Subscribe("net.changed", func(bus.Event) { r.retryAfterDead() })
+	}
+	return r
+}
+
+// retryAfterDead: net.changed. Повтор только если мы сами остановили VPN как мёртвый и попыток ещё меньше maxFails.
+func (r *Runner) retryAfterDead() {
+	r.mu.Lock()
+	ok := r.dead && r.deadN < maxFails
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	r.Log.Info("vpn.retry", "why", "net.changed")
+	if err := r.begin(); err != nil {
+		r.Log.Error("vpn.retry", "err", err.Error())
+	}
 }
 
 // Reset — при старте программы: VPN от прошлого запуска (задача Windows / служба Mac) мог пережить падение — останавливаем.
@@ -84,7 +109,8 @@ func badPath(ps ...string) error {
 //	"experimental": {"clash_api": {"external_controller": "<API>", "secret": "<Secret>"}}
 //
 // с теми же адресом (127.0.0.1:<порт>) и секретом, что переданы в New. Это делает генератор конфига.
-// Через этот API мы держим одно постоянное соединение (GET /traffic): оборвалось — sing-box умер.
+// Через этот API мы держим одно постоянное соединение (GET /logs): оборвалось — sing-box умер;
+// строки журнала по узлу выхода говорят, жив ли туннель (dead.go).
 
 const (
 	startWait = 10 * time.Second // сколько ждём, пока sing-box поднимет API после запуска
@@ -95,6 +121,14 @@ const (
 // (обрыв соединения с API). Упал сам — сразу перезапуск; maxFails подряд — стоп и ошибка в лог.
 func (r *Runner) Start() error {
 	r.mu.Lock()
+	r.deadN = 0
+	r.mu.Unlock()
+	return r.begin()
+}
+
+func (r *Runner) begin() error {
+	r.mu.Lock()
+	r.dead = false
 	r.gen++
 	gen := r.gen
 	if r.cancel != nil {
@@ -114,6 +148,7 @@ func (r *Runner) Start() error {
 // Stop — намеренная остановка: сторож отпускается и перезапуска не будет.
 func (r *Runner) Stop() error {
 	r.mu.Lock()
+	r.dead = false
 	r.gen++
 	if r.cancel != nil {
 		r.cancel()
@@ -124,7 +159,12 @@ func (r *Runner) Stop() error {
 }
 
 // Close — выключает сторожа (sing-box не трогает).
-func (r *Runner) Close() { r.rootCancel() }
+func (r *Runner) Close() {
+	if r.unsub != nil {
+		r.unsub()
+	}
+	r.rootCancel()
+}
 
 func (r *Runner) current(gen int) bool {
 	r.mu.Lock()
@@ -132,7 +172,7 @@ func (r *Runner) current(gen int) bool {
 	return r.gen == gen && r.ctx.Err() == nil
 }
 
-// connect открывает поток /traffic. Повторы — только в рамках одного ожидания старта (startWait):
+// connect открывает поток /logs. Повторы — только в рамках одного ожидания старта (startWait):
 // API появляется не сразу после запуска. exited (если есть) прерывает ожидание, когда процесс уже умер.
 func (r *Runner) connect(ctx context.Context) (io.ReadCloser, error) {
 	exited := r.exited()
@@ -145,7 +185,7 @@ func (r *Runner) connect(ctx context.Context) (io.ReadCloser, error) {
 	}}
 	var last error
 	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+r.API+"/traffic", nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+r.API+"/logs?level="+logLevel, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -176,7 +216,20 @@ func (r *Runner) monitor(ctx context.Context, gen int) {
 		body, err := r.connect(ctx)
 		if err == nil {
 			r.Log.Info("vpn.up")
-			_, _ = io.Copy(io.Discard, body) // блокируется до обрыва: это и есть событие «умер»
+			w := newTunnelWatch(r.exitTag())
+			sc := bufio.NewScanner(body) // блокируется до обрыва: это и есть событие «умер»
+			sc.Buffer(make([]byte, 64*1024), 1<<20)
+			for sc.Scan() {
+				var m struct {
+					Payload string `json:"payload"`
+				}
+				if json.Unmarshal(sc.Bytes(), &m) != nil || !w.feed(m.Payload) {
+					continue
+				}
+				body.Close()
+				r.tunnelDead(gen, w)
+				return
+			}
 			body.Close()
 			err = fmt.Errorf("connection lost")
 		}
@@ -198,4 +251,33 @@ func (r *Runner) monitor(ctx context.Context, gen int) {
 			}
 		}
 	}
+}
+
+func (r *Runner) exitTag() string {
+	if r.Exit == "" {
+		return "proxy"
+	}
+	return r.Exit
+}
+
+// tunnelDead: sing-box жив, узел выхода молчит. Останавливаем VPN (интернет идёт напрямую, fail-open),
+// сообщаем в шину; дальше — только net.changed (retryAfterDead) или ручной Start.
+func (r *Runner) tunnelDead(gen int, w *tunnelWatch) {
+	r.mu.Lock()
+	if r.gen != gen || r.ctx.Err() != nil {
+		r.mu.Unlock()
+		return
+	}
+	r.deadN++
+	n := r.deadN
+	r.mu.Unlock()
+	reason := fmt.Sprintf("%d connection errors via exit node in a row, no success", w.n)
+	r.Log.Warn("vpn.dead", "reason", reason, "n", n)
+	if err := r.Stop(); err != nil {
+		r.Log.Error("vpn.dead.stop", "err", err.Error())
+	}
+	r.mu.Lock()
+	r.dead = true // после Stop (он сбрасывает флаг)
+	r.mu.Unlock()
+	r.Bus.Publish("vpn.dead", map[string]any{"reason": reason, "errors": w.last, "n": n, "gave_up": n >= maxFails})
 }
