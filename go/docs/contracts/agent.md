@@ -1,7 +1,7 @@
 # Действующий контракт HTTP-агента ПК (v2)
 
 - **SHA (git rev-parse HEAD):** `80f1d0a0d4b99eee088254d5ede152c5e5d542dc`
-- **Источники:** `lab/ralab/agent.py` целиком; `lab/ralab/app.py:25-31`; `lab/server/mcp_shim.py:120-306`.
+- **Источники:** `lab/ralab/agent.py` целиком; `lab/ralab/app.py:25-31`; `lab/ralab/forward.py:286,302,319`; `lab/server/mcp_shim.py:120-306`.
 
 ---
 
@@ -23,7 +23,7 @@
 ### `GET /status`
 - **Обработчик:** `agent.py:173-174`.
 - **Ответ:** HTTP 200, объект `ctx.status()` (`app.py:25-31`).
-- **Поля ответа:** `home` (str), `version` (str), `exe_version` (str), `rollback` (str|null), `computer` (str), `uptime_s` (int), `rss_mb` (float), `events` (int), `agent_port` (int), `color` (str), `state` (str) (`app.py:27-29`); `settings` (`paths`: list[str], `skipped`: str|null, `lans`: list[str], `server`: dict) | null (`app.py:30`); `singbox` (dict), `uplink` (dict), `rounds` (dict), `lan` (list), `forward` (str), `tun` (dict), `vpn` (dict), `disk` (str), `procs` (list[str]) (`app.py:31`).
+- **Поля ответа:** `home` (str), `version` (str), `exe_version` (str), `rollback` (str, по умолчанию пустая), `computer` (str), `uptime_s` (int), `rss_mb` (float), `events` (int), `agent_port` (int), `color` (str), `state` (str) (`app.py:27-29,63,69`); `settings` (`paths`: list[str], `skipped`: dict, `lans`: list[str], `server`: str) | null (`app.py:30`); `singbox` (dict), `uplink` (dict), `rounds` (dict), `lan` (list), `forward` (dict), `tun` (dict), `vpn` (dict), `disk` (str), `procs` (list[str]) (`app.py:31`, `forward.py:512-516`).
 
 ### `GET /log?n=<int>`
 - **Обработчик:** `agent.py:194-195`. Параметр `n` (default 200) (`agent.py:195`).
@@ -60,8 +60,8 @@
 - **Ответ:** HTTP 200 `{"size": int, "offset": int, "b64": str, "eof": bool}` (`agent.py:262`).
 
 ### `POST /write`
-- **Обработчик:** `agent.py:264-280`. Тело JSON: `path` (str, обяз.), `b64` (str, обяз.), `offset` (int, default 0), `done` (bool, default true) (`agent.py:267,277`).
-- **Ошибки:** нет полей или невалидный base64 -> HTTP 400 `{"error": "нужны path, b64 (offset, done необязательно)"}` (`agent.py:269`). Если `offset > 0`, а часть файла `<path>.ralab-part` отсутствует -> HTTP 409 `{"error": "нет начала файла (offset > 0 без предыдущих кусков)"}` (`agent.py:273`).
+- **Обработчик:** `agent.py:264-280`. Тело JSON: `path` (str, обяз.), `b64` (str, необязателен, по умолчанию пустой `""`), `offset` (int, default 0), `done` (bool, default true) (`agent.py:267,277`).
+- **Ошибки:** отсутствует `path` или невалидный base64 -> HTTP 400 `{"error": "нужны path, b64 (offset, done необязательно)"}` (`agent.py:268-269`). Если `offset > 0`, а часть файла `<path>.ralab-part` отсутствует -> HTTP 409 `{"error": "нет начала файла (offset > 0 без предыдущих кусков)"}` (`agent.py:272-273`).
 - **Поведение:** запись во временный файл `<path>.ralab-part` (`agent.py:270,274-276`). При `done: true` — атомарная замена `os.replace` на целевой путь (`agent.py:277-278`).
 - **Ответ:** HTTP 200 `{"ok": true, "written": int, "done": bool}` (`agent.py:279`).
 
@@ -93,12 +93,12 @@
 ### `POST /expose`
 - **Обработчик:** `agent.py:176-184`. Тело JSON: `{"name": str, "serverPort": int, "pcPort": int|null}` (`agent.py:177,179`).
 - **Ошибки:** ValueError -> HTTP 400 `{"error": str}` (`agent.py:181`), OSError -> HTTP 409 `{"error": str}` (`agent.py:183`).
-- **Ответ:** HTTP 200, результат `ctx.forward.expose` (`agent.py:179`).
+- **Ответ:** HTTP 200 `{"ok": true, "name": str, "serverPort": int, "pcPort": int, "url": "http://localhost:<pcPort>"}` (`agent.py:179`, `forward.py:286,302`).
 
 ### `POST /unexpose`
 - **Обработчик:** `agent.py:185-190`. Тело JSON: `{"name": str}` (`agent.py:187`).
 - **Ошибки:** ValueError -> HTTP 400 `{"error": str}` (`agent.py:189`).
-- **Ответ:** HTTP 200, результат `ctx.forward.unexpose` (`agent.py:187`).
+- **Ответ:** HTTP 200 `{"ok": true, "name": str}` (`agent.py:187`, `forward.py:319`).
 
 ### `GET /exposed`
 - **Обработчик:** `agent.py:191-193`.
@@ -112,7 +112,7 @@
 - **Заголовки запроса:** `Authorization: Bearer <token>`, `Content-Type: application/json` для тел (`ra_lab.py:53-56`).
 - **Предварительная проверка туннеля (pre-flight):** перед любым вызовом `mcp_shim` запрашивает `GET /status` с таймаутом 10 с (`mcp_shim.py:145`). Если код 503 -> `{"ok": false, "reason": "busy"}` (`mcp_shim.py:147`); код != 200 -> `{"ok": false, "reason": "tunnel-down"}` (`mcp_shim.py:149`).
 - **Семафоры mcp_shim:** максимум 2 параллельные команды (`CMD_SLOTS = 2`) (`mcp_shim.py:8,216`), максимум 32 фоновых процесса (`PROCS_MAX = 32`) (`mcp_shim.py:8,267`). При нехватке слотов -> `{"ok": false, "reason": "busy"}` (`mcp_shim.py:217,268`). Флаг `exclusive: true` отклоняется как `busy`, если есть активные команды или процессы (`mcp_shim.py:219-221,267-268`).
-- **Трансляция путей (`wpath`):** пути соединяются с `windowsReplica`, переход `..` запрещён -> `{"ok": false, "error": "Path outside workspace."}` (`mcp_shim.py:134-142,175,228,272`).
+- **Трансляция путей (`wpath`):** пути с абсолютным Windows drive (`^[A-Za-z]:[\\/]`) передаются без преобразования (`mcp_shim.py:9,136-137`). Проверка `..` выполняется только для относительных путей (`mcp_shim.py:140-141`): при наличии `..` вызывается ошибка -> `{"ok": false, "error": "Path outside workspace."}` (`mcp_shim.py:175,228,272`), иначе относительный путь соединяется с `windowsReplica` (`mcp_shim.py:138-142`).
 
 ### Трансляция операций MCP в HTTP-вызовы:
 1. **`status`:** не делает дополнительных запросов к агенту, возвращает метаданные каталога (`mcp_shim.py:151-153`).
