@@ -7,10 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -19,243 +18,150 @@ import (
 )
 
 type manager struct {
-	log      api.Logger
-	tr       api.Traces
-	mu       sync.Mutex
-	procs    map[int]*proc
-	platform platformState
-	closed   bool
-}
-
-type processIdentity struct {
-	pid, ppid int
-	started   time.Time
-	live      bool
-	status    int
+	log    api.Logger
+	tr     api.Traces
+	mu     sync.Mutex
+	procs  map[int]*proc
+	closed bool
 }
 
 type proc struct {
-	cmd          *exec.Cmd
-	pid          int
-	started      time.Time
-	done         chan struct{}
-	mu           sync.Mutex
-	retired      bool
-	exitCode     int
-	stopOnce     sync.Once
-	killOnce     sync.Once
-	streams      *procStreams
-	platformKill func() error
-	targets      []processIdentity
+	cmd *exec.Cmd
+	platformProcess
+	started  time.Time
+	done     chan struct{}
+	mu       sync.Mutex
+	exited   bool
+	exitCode int
+	stopOnce sync.Once
+	streams  []io.Closer
 }
 
-// New creates a new Procs manager.
+// New creates a manager; every child gets its own process group or Job.
 func New(log api.Logger, tr api.Traces) (api.Procs, error) {
-	plat, err := newPlatformState()
-	if err != nil {
-		return nil, fmt.Errorf("procs: platform-init-failed: %w", err)
-	}
-	return &manager{
-		log:      log,
-		tr:       tr,
-		procs:    make(map[int]*proc),
-		platform: plat,
-	}, nil
+	return &manager{log: log, tr: tr, procs: make(map[int]*proc)}, nil
 }
 
 func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("procs: context-canceled: %w", err)
+		return nil, err
 	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
-		return nil, fmt.Errorf("procs: closed: manager stopped")
+		return nil, fmt.Errorf("procs: manager closed")
 	}
 	if len(m.procs) >= 64 {
-		return nil, fmt.Errorf("procs: limit: maximum 64 processes")
+		return nil, fmt.Errorf("procs: maximum 64 processes")
 	}
-
-	nonceBytes := make([]byte, 8)
-	if _, err := rand.Read(nonceBytes); err != nil {
-		return nil, fmt.Errorf("procs: nonce-failed: %w", err)
-	}
-	nonce := hex.EncodeToString(nonceBytes)
-	traceID := fmt.Sprintf("%s-%s", s.Name, nonce)
-
 	path, err := exec.LookPath(s.Path)
 	if err != nil {
-		return nil, fmt.Errorf("procs: executable: %w", err)
+		return nil, err
 	}
 	path, err = filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("procs: executable: %w", err)
+		return nil, err
 	}
+	var nonce [8]byte
+	if _, err = rand.Read(nonce[:]); err != nil {
+		return nil, err
+	}
+	id := s.Name + "-" + hex.EncodeToString(nonce[:])
 	dir := s.Dir
 	if dir == "" {
-		dir = filepath.Dir(s.Path)
+		dir = filepath.Dir(path)
 	}
-
 	if m.tr != nil {
-		t := api.Trace{
-			Phase:    "intent",
-			Kind:     "process",
-			ID:       traceID,
-			Instance: m.tr.Instance(),
-			Owner:    "procs",
-			Data: map[string]string{
-				"exe":  path,
-				"home": dir,
-			},
-		}
-		if err := m.tr.Intent(t); err != nil {
-			return nil, fmt.Errorf("procs: intent-failed: %w", err)
+		if err = m.tr.Intent(api.Trace{Phase: "intent", Kind: "process", ID: id,
+			Instance: m.tr.Instance(), Owner: "procs", Data: map[string]string{"exe": path, "home": dir}}); err != nil {
+			return nil, err
 		}
 	}
-
 	handedOff := false
 	defer func() {
-		if !handedOff {
-			if m.tr != nil {
-				_ = m.tr.Done("process", traceID)
-			}
+		if !handedOff && m.tr != nil {
+			_ = m.tr.Done("process", id)
 		}
 	}()
-
-	cmd := exec.CommandContext(ctx, path, s.Args...)
+	// Cancellation is handled below after the child and its basket are ready.
+	cmd := exec.Command(path, s.Args...) //nolint:noctx // Stop cancels the whole group/Job.
+	cmd.Dir, cmd.Env, cmd.Stdin = s.Dir, s.Env, s.Stdin
+	cmd.Stdout, cmd.Stderr = s.Stdout, s.Stderr
 	cmd.WaitDelay = time.Second
-	cmd.Dir = s.Dir
-	if s.Env != nil {
-		cmd.Env = s.Env
+	p := &proc{cmd: cmd, done: make(chan struct{}), exitCode: -1}
+	for _, output := range []*io.Writer{&cmd.Stdout, &cmd.Stderr} {
+		if *output == nil && s.Stream != "" && m.log != nil {
+			*output = m.log.Writer(s.Stream, s.Name)
+		}
 	}
-
-	cmd.Stdin = s.Stdin
-	var stdoutCloser, stderrCloser io.Closer
-	if s.Stdout != nil {
-		cmd.Stdout = s.Stdout
-	} else if s.Stream != "" && m.log != nil {
-		w := m.log.Writer(s.Stream, s.Name)
-		cmd.Stdout = w
-		stdoutCloser = w
+	for _, stream := range []any{cmd.Stdin, cmd.Stdout, cmd.Stderr} {
+		if closer, ok := stream.(io.Closer); ok {
+			p.streams = append(p.streams, closer)
+		}
 	}
-
-	if s.Stderr != nil {
-		cmd.Stderr = s.Stderr
-	} else if s.Stream != "" && m.log != nil {
-		w := m.log.Writer(s.Stream, s.Name)
-		cmd.Stderr = w
-		stderrCloser = w
-	}
-
-	// Every non-file stream crosses an owned OS pipe. exec.Wait never waits
-	// inside caller Read/Write methods; WaitDelay also bounds our output drain.
-	streams, err := newProcStreams(cmd)
+	p.platformProcess, err = setupProcess(cmd, s)
 	if err != nil {
-		if stdoutCloser != nil {
-			_ = stdoutCloser.Close()
-		}
-		if stderrCloser != nil {
-			_ = stderrCloser.Close()
-		}
-		return nil, fmt.Errorf("procs: io-setup-failed: %w", err)
+		p.closeStreams()
+		return nil, err
 	}
-	defer func() {
-		if !handedOff {
-			streams.close()
-			if stdoutCloser != nil {
-				_ = stdoutCloser.Close()
-			}
-			if stderrCloser != nil {
-				_ = stderrCloser.Close()
-			}
-		}
-	}()
-
-	p := &proc{cmd: cmd, streams: streams, done: make(chan struct{}), exitCode: -1}
-	if err := m.setupCmd(cmd, s); err != nil {
-		return nil, fmt.Errorf("procs: setup-failed: %w", err)
-	}
-	p.platformKill = cmd.Cancel
-	cmd.Cancel = func() error {
-		p.killTree()
-		return nil
-	}
-	// CommandContext can call Cancel before Start returns. Keep cancellation
-	// behind Job assignment, PID publication and trace registration.
-	p.mu.Lock()
-	if err := m.startCmd(cmd, ctx); err != nil {
-		p.retired = true
-		p.mu.Unlock()
-		m.releaseCmd(cmd)
-		return nil, fmt.Errorf("procs: start-failed: %w", err)
-	}
-	p.pid = cmd.Process.Pid
-	fail := func(code string, err error) (api.Process, error) {
-		// This child has not been published; its os.Process handle is ours.
-		_ = cmd.Process.Kill()
-		p.retired = true
-		p.mu.Unlock()
-		streams.close()
-		_ = cmd.Wait()
-		m.releaseCmd(cmd)
-		return nil, fmt.Errorf("procs: %s: %w", code, err)
-	}
-	if err := m.postStart(cmd); err != nil {
-		return fail("post-start-failed", err)
-	}
-	started, err := processStarted(ctx, cmd)
-	if err != nil {
-		return fail("identity-failed", err)
-	}
-	p.started = started
-	pid := p.pid
-	if m.tr != nil {
-		appliedData := map[string]string{
-			"exe": path, "home": dir, "pid": strconv.Itoa(pid),
-			"start": started.Format(time.RFC3339Nano),
-		}
-		if err := m.tr.Applied("process", traceID, appliedData, nil); err != nil {
-			return fail("applied-failed", err)
-		}
-	}
-	m.publishCmd(cmd)
-	streams.start()
-	p.mu.Unlock()
-
-	m.procs[pid] = p
-	handedOff = true
-
+	ready := make(chan error, 1)
 	go func() {
-		_ = waitExited(cmd)
-		p.mu.Lock()
-		p.cleanupExited()
-		p.retired = true
-		p.mu.Unlock()
-		streams.closeInput()
-		code := m.collectCmd(cmd)
-		streams.finish(cmd.WaitDelay)
-		m.mu.Lock()
-		delete(m.procs, pid)
-		m.mu.Unlock()
-
-		p.mu.Lock()
-		p.exitCode = code
-		p.mu.Unlock()
-
-		if stdoutCloser != nil {
-			_ = stdoutCloser.Close()
+		// Linux Pdeathsig is tied to the spawning OS thread: keep it until Wait.
+		if runtime.GOOS == "linux" {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
 		}
-		if stderrCloser != nil {
-			_ = stderrCloser.Close()
+		if startErr := cmd.Start(); startErr != nil {
+			p.release()
+			p.closeStreams()
+			ready <- startErr
+			return
 		}
+		p.started = time.Now().UTC()
+		startErr := p.attach()
+		if startErr == nil && m.tr != nil {
+			startErr = m.tr.Applied("process", id, map[string]string{"exe": path, "home": dir,
+				"pid": strconv.Itoa(p.PID()), "start": p.started.Format(time.RFC3339Nano)}, nil)
+		}
+		if startErr != nil {
+			p.hardKill()
+			_ = cmd.Process.Kill()
+			p.closeStreams()
+			_ = cmd.Wait()
+			p.release()
+			ready <- startErr
+			return
+		}
+		ready <- nil
+		// os/exec owns one copying goroutine per non-file output stream.
+		_ = cmd.Wait()
+		p.mu.Lock()
+		p.hardKill() // Remove descendants left behind by the leader.
+		p.release()
+		p.exited = true
+		p.exitCode = cmd.ProcessState.ExitCode()
+		p.mu.Unlock()
+		p.closeStreams()
 		if m.tr != nil {
-			_ = m.tr.Done("process", traceID)
+			_ = m.tr.Done("process", id)
 		}
+		m.mu.Lock()
+		delete(m.procs, p.PID())
+		m.mu.Unlock()
 		close(p.done)
-		m.reapLeader(cmd)
 	}()
-
+	if err = <-ready; err != nil {
+		return nil, fmt.Errorf("procs: start: %w", err)
+	}
+	m.procs[p.PID()] = p
+	handedOff = true
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = p.Stop(ctx)
+		case <-p.done:
+		}
+	}()
 	return p, nil
 }
 
@@ -279,222 +185,50 @@ func (m *manager) KillAll(ctx context.Context) error {
 	for err := range errs {
 		result = errors.Join(result, err)
 	}
-	m.terminatePlatform()
 	return result
 }
 
-// Close releases the shared Job/group and any reserved Unix leader.
-func (m *manager) Close() error { return m.KillAll(context.Background()) }
+func (m *manager) Close() error       { return m.KillAll(context.Background()) }
+func (p *proc) PID() int              { return p.cmd.Process.Pid }
+func (p *proc) Started() time.Time    { return p.started }
+func (p *proc) Done() <-chan struct{} { return p.done }
+func (p *proc) ExitCode() int         { p.mu.Lock(); defer p.mu.Unlock(); return p.exitCode }
 
-func (p *proc) PID() int {
-	return p.pid
-}
-
-func (p *proc) Started() time.Time {
-	return p.started
-}
-
-func (p *proc) Done() <-chan struct{} {
-	return p.done
-}
-
-func (p *proc) ExitCode() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.exitCode
+func (p *proc) closeStreams() {
+	for _, stream := range p.streams {
+		_ = stream.Close()
+	}
 }
 
 func (p *proc) Stop(ctx context.Context) error {
-	p.streams.close()
 	select {
 	case <-p.done:
 		return nil
 	default:
 	}
-
-	if ctx.Err() != nil {
-		p.killTree()
-		return fmt.Errorf("procs: stop-canceled: %w", ctx.Err())
-	}
 	p.mu.Lock()
-	if !p.retired {
+	if !p.exited {
 		p.stopOnce.Do(p.softStop)
 	}
 	p.mu.Unlock()
-
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
-
 	select {
 	case <-p.done:
 		return nil
 	case <-ctx.Done():
 	case <-timer.C:
 	}
-
-	select {
-	case <-p.done:
-		return nil
-	default:
+	p.mu.Lock()
+	if !p.exited {
+		p.hardKill()
 	}
-
-	p.killTree()
-
+	p.mu.Unlock()
+	p.closeStreams()
 	select {
 	case <-p.done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("procs: stop-canceled: %w", ctx.Err())
-	}
-}
-
-// Serialize signals with retirement so stale Process handles cannot kill siblings.
-func (p *proc) killTree() {
-	p.streams.close()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if !p.retired {
-		p.killOnce.Do(p.hardKill)
-	}
-}
-
-// streamPipe owns the OS pipe and closes a cancellable endpoint on Stop/ctx.
-// In particular, an io.PipeReader/Writer blocked inside Read/Write must be
-// closed too: closing only our OS pipe cannot interrupt that external call.
-type streamPipe struct {
-	child, parent *os.File
-	src           io.Reader
-	dst           io.Writer
-	done          chan struct{}
-	stop          chan struct{}
-	closeOnce     sync.Once
-	endpoint      io.Closer
-}
-
-func (s *streamPipe) close() {
-	s.closeOnce.Do(func() {
-		close(s.stop)
-		_ = s.child.Close()
-		_ = s.parent.Close()
-		if s.endpoint != nil {
-			_ = s.endpoint.Close()
-		}
-	})
-}
-
-// Hide optional WriterTo/ReaderFrom methods: after cancellation the pump must
-// make no further calls into caller-owned streams, even after an empty Read.
-type streamReader struct{ *streamPipe }
-
-func (s streamReader) Read(b []byte) (int, error) {
-	select {
-	case <-s.stop:
-		return 0, os.ErrClosed
-	default:
-		return s.src.Read(b)
-	}
-}
-
-type streamWriter struct{ *streamPipe }
-
-func (s streamWriter) Write(b []byte) (int, error) {
-	select {
-	case <-s.stop:
-		return 0, os.ErrClosed
-	default:
-		return s.dst.Write(b)
-	}
-}
-
-type procStreams struct {
-	input   *streamPipe
-	outputs []*streamPipe
-}
-
-func newProcStreams(cmd *exec.Cmd) (*procStreams, error) {
-	s := &procStreams{}
-	add := func(input bool, src io.Reader, dst io.Writer) (*streamPipe, error) {
-		r, w, err := os.Pipe()
-		if err != nil {
-			return nil, err
-		}
-		p := &streamPipe{src: src, dst: dst, done: make(chan struct{}), stop: make(chan struct{})}
-		if input {
-			p.endpoint, _ = src.(io.Closer)
-			p.child, p.parent, p.dst = r, w, w
-			s.input = p
-		} else {
-			p.endpoint, _ = dst.(io.Closer)
-			p.child, p.parent, p.src = w, r, r
-			s.outputs = append(s.outputs, p)
-		}
-		return p, nil
-	}
-	if _, file := cmd.Stdin.(*os.File); cmd.Stdin != nil && !file {
-		p, err := add(true, cmd.Stdin, nil)
-		if err != nil {
-			return nil, err
-		}
-		cmd.Stdin = p.child
-	}
-	stdout := cmd.Stdout
-	// Like os/exec, serialize stdout/stderr when they are the same Writer.
-	sameOutput := stdout != nil && reflect.ValueOf(stdout).Comparable() && stdout == cmd.Stderr
-	for i, dst := range []*io.Writer{&cmd.Stdout, &cmd.Stderr} {
-		if i == 1 && sameOutput {
-			cmd.Stderr = cmd.Stdout
-			continue
-		}
-		if _, file := (*dst).(*os.File); *dst == nil || file {
-			continue
-		}
-		p, err := add(false, nil, *dst)
-		if err != nil {
-			s.close()
-			return nil, err
-		}
-		*dst = p.child
-	}
-	return s, nil
-}
-
-func (s *procStreams) start() {
-	pipes := append([]*streamPipe{}, s.outputs...)
-	if s.input != nil {
-		pipes = append(pipes, s.input)
-	}
-	for _, p := range pipes {
-		_ = p.child.Close() // Start duplicated it into the child.
-		go func() {
-			defer close(p.done)
-			defer func() { _ = p.parent.Close() }()
-			_, _ = io.Copy(streamWriter{p}, streamReader{p})
-		}()
-	}
-}
-
-func (s *procStreams) closeInput() {
-	if s.input != nil {
-		s.input.close()
-	}
-}
-
-func (s *procStreams) close() {
-	s.closeInput()
-	for _, p := range s.outputs {
-		p.close()
-	}
-}
-
-func (s *procStreams) finish(delay time.Duration) {
-	defer s.close()
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	for _, p := range s.outputs {
-		select {
-		case <-p.done:
-		case <-timer.C:
-			return
-		}
+		return ctx.Err()
 	}
 }
