@@ -167,7 +167,7 @@ func Run(ctx context.Context, f Flags) int {
 		transport := newTransport(a)
 		a.start(ctx, transport)
 		a.start(ctx, a.rounds)
-		if a.cfg.Enabled("forward") || a.cfg.Enabled("forwards") || a.cfg.Enabled("lan") || a.cfg.Enabled("lanProxy") || a.cfg.Enabled("happier") || a.cfg.Enabled("disk") {
+		if a.cfg.Enabled("forward") || a.cfg.Enabled("forwards") || a.lanConfigured() || a.cfg.Enabled("lanProxy") || a.cfg.Enabled("happier") || a.cfg.Enabled("disk") {
 			a.fwd, err = forward.New(a.cfg, transport, p, log, nil, f.Mode)
 			if err != nil {
 				log.Error("forward.init", "err", err)
@@ -181,10 +181,14 @@ func Run(ctx context.Context, f Flags) int {
 		}
 		a.start(ctx, a.sb)
 	}
-	if a.cfg.Enabled("vpn") && f.Mode.AllowsTun() {
+	if (a.cfg.Enabled("vpn") || a.lanConfigured()) && f.Mode.AllowsTun() {
 		copyCfg := *a.cfg
 		a.vpnCfg = &copyCfg
-		a.loadVPNMode()
+		if a.cfg.Enabled("vpn") {
+			a.loadVPNMode()
+		} else {
+			a.vpnCfg.VPN.Mode = "off"
+		}
 		a.vpn = vpnrun.New(p.Home, a.pr, log, a.bus, "", "")
 		var v struct {
 			ProbeURL      string `json:"probe_url"`
@@ -196,9 +200,9 @@ func Run(ctx context.Context, f Flags) int {
 			a.vpn.ProbeURL = v.CamelProbeURL
 		}
 		a.vpn.Reset()
-		for _, topic := range []string{"settings.loaded", "net.changed", "vpn.request"} {
-			a.bus.Subscribe(topic, func(bus.Event) { go a.applyVPN(ctx) })
-		}
+		// ApplyVPN installs the runner's network/settings/channel subscriptions.
+		a.applyVPN(ctx)
+		a.bus.Subscribe("vpn.request", func(bus.Event) { go a.applyVPN(ctx) })
 	}
 	if hasChannel || a.vpn != nil {
 		a.net = platform.NewNetWatch(a.bus, log)
@@ -265,10 +269,10 @@ func (a *App) shutdown() {
 		a.vpnMu.Lock()
 		defer a.vpnMu.Unlock()
 		if a.vpn != nil {
-			if err := a.vpn.Stop(); err != nil {
+			a.vpn.Close()
+			if err := a.vpn.Configure(a.vpn.Stop); err != nil {
 				a.log.Warn("vpn.stop", "err", err)
 			}
-			a.vpn.Close()
 		}
 	}
 	for i := len(a.parts) - 1; i >= 0; i-- {
@@ -291,7 +295,7 @@ func (a *App) shutdown() {
 	_ = a.link.Stop(ctx)
 }
 func (a *App) Status() map[string]any {
-	st := map[string]any{"home": a.p.Home, "version": a.f.Version, "rollback": a.f.RollbackReason, "computer": a.f.PC, "uptime_s": int(time.Since(a.started).Seconds()), "rss_mb": float64(rssBytes()) / 1048576, "events": a.bus.Count(), "config": a.configStatus(), "control": agent.Enabled(a.p)}
+	st := map[string]any{"home": a.p.Home, "version": a.f.Version, "rollback": a.f.RollbackReason, "computer": a.f.PC, "uptime_s": int(time.Since(a.started).Seconds()), "rss_mb": float64(rssBytes()) / 1048576, "events": a.bus.Count(), "config": a.configStatus(), "control": agent.Enabled(a.p), "disabled": a.disabled()}
 	for _, c := range a.parts {
 		st[c.Name()] = c.Status()
 	}
@@ -307,6 +311,33 @@ func (a *App) Status() map[string]any {
 	}
 	a.vpnMu.Unlock()
 	return st
+}
+
+// disabled describes configuration, independently of transient connection state.
+func (a *App) disabled() []string {
+	out := []string{}
+	channel := a.cfg.Enabled("server") && a.cfg.Enabled("paths") && !a.cfg.VPNOnly
+	for _, section := range []struct {
+		name string
+		on   bool
+	}{
+		{"channel", channel}, {"vpn", a.cfg.Enabled("vpn")},
+		{"lan", a.lanConfigured()}, {"disk", a.cfg.Enabled("disk")},
+		{"forwards", a.cfg.Enabled("forwards") || a.cfg.Enabled("forward")},
+		{"agent", a.cfg.Enabled("agent")}, {"happier", a.cfg.Enabled("happier")},
+	} {
+		if !section.on {
+			out = append(out, section.name)
+		}
+	}
+	return out
+}
+func (a *App) lanConfigured() bool {
+	if _, present := a.cfg.Sections["lan"]; present {
+		return a.cfg.Enabled("lan")
+	}
+	// v2 also accepts profile.lan.
+	return len(a.cfg.LAN) > 0
 }
 func (a *App) configStatus() map[string]any {
 	c := config.Status(a.p)

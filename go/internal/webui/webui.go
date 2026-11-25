@@ -32,8 +32,9 @@ const page = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>
 <style>body{font:15px sans-serif;max-width:760px;margin:20px auto;padding:0 12px;color:#222}h1{font-size:20px}
 .box{border:1px solid #ccc;border-radius:6px;padding:12px;margin:12px 0}.big{font-size:20px;font-weight:bold}
 textarea{width:100%;height:160px;box-sizing:border-box}input[type=password]{width:260px}button{font-size:15px;padding:5px 12px;margin:4px 4px 4px 0}
-pre{background:#f4f4f4;padding:8px;white-space:pre-wrap}.err{color:#b00020}.ok{color:#176f2c}</style></head><body>
+pre{background:#f4f4f4;padding:8px;white-space:pre-wrap}.disabled{background:#fff3cd;border-color:#ba8b00;font-weight:bold}.err{color:#b00020}.ok{color:#176f2c}</style></head><body>
 <h1>RemoteAgents &middot; <span id="ver"></span></h1>
+<div class="box disabled" id="disabled" role="status" style="display:none"></div>
 <div class="box"><pre id="lines"></pre></div>
 <div class="box"><b>Конфиг</b><div id="cfg"></div>
 <form id="cform" method="post" action="/config" style="display:none">
@@ -52,6 +53,7 @@ function post(p,d){var b=new URLSearchParams(d||{});b.set("t",T);return fetch(p+
 function set(id,key,value){var e=document.getElementById(id);if(e[key]!==value)e[key]=value}
 function display(id,value){var e=document.getElementById(id);if(e.style.display!==value)e.style.display=value}
 function show(s){S=s;set("ver","textContent",s.version);set("lines","textContent",s.lines.join("\n"));
+var disabled=s.disabled||[];set("disabled","textContent","Выключено в конфиге: "+disabled.join(", "));display("disabled",disabled.length?"":"none");
 var c=s.config;
 set("cfg","textContent",c.has?"Конфиг: "+c.name+", сервер "+c.server+", от "+c.time:"Вставьте конфиг, который вам прислали");
 set("cfg","className",c.has?"":"big");
@@ -257,7 +259,7 @@ func (u *UI) state() map[string]any {
 	}
 	ctl, _ := st["control"].(bool)
 	ver, _ := st["version"].(string)
-	return map[string]any{"version": ver, "lines": u.lines(), "config": cfg, "control": ctl, "autostart": autostart.Enabled()}
+	return map[string]any{"version": ver, "lines": u.lines(), "config": cfg, "control": ctl, "autostart": autostart.Enabled(), "disabled": st["disabled"]}
 }
 
 func (u *UI) restart() {

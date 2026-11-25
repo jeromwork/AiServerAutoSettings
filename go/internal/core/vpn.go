@@ -40,13 +40,18 @@ func (a *App) applyVPN(ctx context.Context) {
 	if ifaces, err := net.Interfaces(); err == nil {
 		for _, i := range ifaces {
 			n := strings.ToLower(i.Name)
-			if i.Flags&net.FlagUp != 0 && i.Name != "RA2-VPN" && (strings.Contains(n, "tun") || strings.Contains(n, "wireguard") || strings.Contains(n, "ppp")) {
+			if i.Flags&net.FlagUp != 0 && i.Name != "RA2-VPN" && i.Name != "RA2-LAN" && (strings.Contains(n, "tun") || strings.Contains(n, "wireguard") || strings.Contains(n, "ppp")) {
 				foreign = i.Name
 				break
 			}
 		}
 	}
 	rc := api.RenderContext{Cfg: a.vpnCfg, Mode: a.f.Mode, GeoIPPath: filepath.Join(a.p.State, "geoip-ru.srs"), ExcludeIPs: excludes}
+	if a.fwd != nil && a.lanConfigured() {
+		rc.LANSocks = a.fwd.InternalSocks()
+	}
+	// LANDNS is read by the renderer from share.domains/share.dnsServers;
+	// vpnrun alone installs and removes the corresponding system DNS rules.
 	if err := singbox.ApplyVPN(ctx, rc, vpnPaths, foreign, a.vpn); err != nil {
 		a.log.Warn("vpn.failed", "err", err)
 		a.bus.Publish("vpn.state", map[string]any{"mode": a.vpnCfg.VPN.Mode, "state": err.Error()})

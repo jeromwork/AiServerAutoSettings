@@ -187,7 +187,7 @@ func (a *App) VPN(mode string) error {
 	if !a.f.Mode.AllowsTun() {
 		return api.ErrSafe
 	}
-	if a.vpn == nil {
+	if a.vpn == nil || !a.cfg.Enabled("vpn") {
 		return errors.New("VPN не настроен")
 	}
 	if mode != "off" && mode != "auto" && mode != "only" {
@@ -195,6 +195,8 @@ func (a *App) VPN(mode string) error {
 	}
 	a.vpnMu.Lock()
 	defer a.vpnMu.Unlock()
+	copyCfg := *a.vpnCfg
+	a.vpnCfg = &copyCfg
 	// RenderVPN reads Raw to distinguish a missing section; preserve every other field.
 	var raw map[string]json.RawMessage
 	_ = json.Unmarshal(a.vpnCfg.Raw, &raw)
