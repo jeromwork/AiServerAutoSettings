@@ -67,7 +67,7 @@ func New(cfg *api.Config, p api.Paths, log api.Logger, tr api.Traces, pr api.Pro
 	log.Secret(token)
 	ports := make([]int, 2)
 	for i := range ports {
-		l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+		l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 		if err != nil {
 			return nil, fmt.Errorf("singbox: port: %w", err)
 		}
