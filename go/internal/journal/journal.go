@@ -384,7 +384,7 @@ func (j *Journal) Tail(n int) []string {
 	j.flushRepeatLocked()
 
 	if n <= 0 {
-		n = 200
+		n = 1
 	}
 	if n > ringMax {
 		n = ringMax
