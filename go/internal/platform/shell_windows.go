@@ -35,7 +35,7 @@ func buildShellCommand(shell, cmd string) (string, []string, error) {
 		b64 := base64.StdEncoding.EncodeToString(encodeUTF16LE(script))
 		path, err := exec.LookPath("powershell.exe")
 		if err != nil {
-			path = "powershell.exe"
+			return "", nil, fmt.Errorf("shell: shell-unavailable: powershell")
 		}
 		args := []string{
 			path,
@@ -51,7 +51,7 @@ func buildShellCommand(shell, cmd string) (string, []string, error) {
 	case "cmd":
 		path, err := exec.LookPath("cmd.exe")
 		if err != nil {
-			path = "cmd.exe"
+			return "", nil, fmt.Errorf("shell: shell-unavailable: cmd")
 		}
 		args := []string{
 			path,

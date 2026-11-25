@@ -45,7 +45,11 @@ func runDevShell(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "shell: temporary-home-failed")
 		return 1
 	}
-	defer os.RemoveAll(home)
+	defer func() {
+		if err := os.RemoveAll(home); err != nil {
+			fmt.Fprintln(os.Stderr, "shell: temporary-home-cleanup-failed")
+		}
+	}()
 	traces, err := cleanup.New(api.NewPaths(home), log, platform.Current())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
