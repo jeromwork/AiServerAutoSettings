@@ -96,7 +96,7 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		}
 	}
 
-	cmd := exec.Command(path, s.Args...)
+	cmd := exec.CommandContext(ctx, path, s.Args...)
 	cmd.WaitDelay = time.Second
 	cmd.Dir = s.Dir
 	if s.Env != nil {
