@@ -17,8 +17,8 @@ const (
 
 // Install: LaunchDaemon (root, не стартует сам) + правило sudoers только на два точных launchctl-вызова
 // (иначе обычный пользователь не сможет kickstart/kill службы в system-домене). Один запрос пароля администратора.
-func (r *Runner) Install(singbox, config string) error {
-	if err := badPath(singbox, config); err != nil {
+func (r *Runner) Install() error {
+	if err := badPath(r.Sing, r.Conf); err != nil {
 		return err
 	}
 	u, err := user.Current()
@@ -28,7 +28,7 @@ func (r *Runner) Install(singbox, config string) error {
 	pl := `<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
 <key>Label</key><string>` + label + `</string>
-<key>ProgramArguments</key><array><string>` + singbox + `</string><string>run</string><string>-c</string><string>` + config + `</string></array>
+<key>ProgramArguments</key><array><string>` + r.Sing + `</string><string>run</string><string>-c</string><string>` + r.Conf + `</string></array>
 <key>RunAtLoad</key><false/>
 </dict></plist>
 `
@@ -48,7 +48,7 @@ func (r *Runner) Install(singbox, config string) error {
 	if err != nil {
 		return err
 	}
-	return r.save(singbox, config)
+	return nil
 }
 
 func (r *Runner) Uninstall() error {

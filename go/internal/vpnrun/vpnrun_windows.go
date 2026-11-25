@@ -46,11 +46,11 @@ func writeUTF16(path, s string) error {
 
 // Install (под администратором, один раз): задача HighestAvailable из XML, работает и от батареи,
 // без лимита времени; сама не стартует (триггеров нет).
-func (r *Runner) Install(singbox, config string) error {
-	if err := badPath(singbox, config); err != nil {
+func (r *Runner) Install() error {
+	if err := badPath(r.Sing, r.Conf); err != nil {
 		return err
 	}
-	x := strings.NewReplacer("{{CMD}}", esc(singbox), "{{ARGS}}", esc(`run -c "`+config+`"`)).Replace(taskXML)
+	x := strings.NewReplacer("{{CMD}}", esc(r.Sing), "{{ARGS}}", esc(`run -c "`+r.Conf+`"`)).Replace(taskXML)
 	f := filepath.Join(os.TempDir(), "ra-vpn-task.xml")
 	if err := writeUTF16(f, x); err != nil {
 		return err
@@ -59,7 +59,7 @@ func (r *Runner) Install(singbox, config string) error {
 	if _, err := run("schtasks.exe", "/Create", "/TN", label, "/XML", f, "/F"); err != nil {
 		return err
 	}
-	return r.save(singbox, config)
+	return nil
 }
 
 func (r *Runner) Uninstall() error {

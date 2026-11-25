@@ -11,14 +11,14 @@ import (
 )
 
 // Install: один раз sudo setcap (спросит пароль в терминале). Дальше root не нужен.
-func (r *Runner) Install(singbox, config string) error {
-	if err := badPath(singbox, config); err != nil {
+func (r *Runner) Install() error {
+	if err := badPath(r.Sing, r.Conf); err != nil {
 		return err
 	}
-	if _, err := run("sudo", "setcap", "cap_net_admin,cap_net_bind_service+ep", singbox); err != nil {
+	if _, err := run("sudo", "setcap", "cap_net_admin,cap_net_bind_service+ep", r.Sing); err != nil {
 		return err
 	}
-	return r.save(singbox, config)
+	return nil
 }
 
 func (r *Runner) Uninstall() error {

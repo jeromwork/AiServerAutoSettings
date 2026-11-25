@@ -4,11 +4,10 @@ package vpnrun
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -18,39 +17,36 @@ import (
 
 const label = "ru.remoteagents.vpn" // служба (Mac) / задача (Windows)
 
-// Runner: Install(singbox, config) — одноразово; Uninstall; Start; Stop; Running (методы — в файлах по ОС).
+// Runner: Install — одноразово; Uninstall; Start; Stop; Running; Reset (методы — в файлах по ОС).
 type Runner struct {
 	Procs api.Procs // нужен только на Linux (запуск обычным ребёнком)
 	Log   api.Logger
-	Sing  string // путь к sing-box (Linux Start; на Win/Mac он уже записан в задачу/службу)
-	Conf  string // путь к конфигу
-	dir   string // каталог данных программы (там vpnrun.json)
+	Sing  string // путь к sing-box: <home>/runtime/<имя exe> (как в v2)
+	Conf  string // путь к конфигу: <home>/private/vpn.json (как в v2)
 	mu    sync.Mutex
 	proc  api.Process
 }
 
-// New читает сохранённые Install пути sing-box и конфига (dataDir/vpnrun.json), если файл есть.
-func New(dataDir string, procs api.Procs, log api.Logger) *Runner {
-	r := &Runner{Procs: procs, Log: log, dir: dataDir}
-	if b, err := os.ReadFile(filepath.Join(dataDir, "vpnrun.json")); err == nil {
-		var v struct{ Sing, Conf string }
-		if json.Unmarshal(b, &v) == nil {
-			r.Sing, r.Conf = v.Sing, v.Conf
-		}
+// New: пути постоянные, как в v2 (vpn.py), ничего не запоминается в файле.
+func New(home string, procs api.Procs, log api.Logger) *Runner {
+	exe := "ra2-vpn"
+	if runtime.GOOS == "windows" {
+		exe = "RA2-VPN.exe"
 	}
-	return r
+	return &Runner{Procs: procs, Log: log,
+		Sing: filepath.Join(home, "runtime", exe), Conf: filepath.Join(home, "private", "vpn.json")}
 }
 
-func (r *Runner) save(singbox, config string) error {
-	r.Sing, r.Conf = singbox, config
-	if r.dir == "" {
-		return nil
+// Reset — при старте программы: VPN от прошлого запуска (задача Windows / служба Mac) мог пережить падение — останавливаем.
+// На Linux он ребёнок в корзине и умирает с программой, там Running() всегда false. Адаптер после Reset снимает уборка (P10).
+func (r *Runner) Reset() {
+	if !r.Running() {
+		return
 	}
-	b, _ := json.Marshal(struct{ Sing, Conf string }{singbox, config})
-	if err := os.MkdirAll(r.dir, 0o755); err != nil {
-		return err
+	r.Log.Warn("остался VPN от прошлого запуска: останавливаю")
+	if err := r.Stop(); err != nil {
+		r.Log.Error("vpn.reset", "err", err.Error())
 	}
-	return os.WriteFile(filepath.Join(r.dir, "vpnrun.json"), b, 0o644)
 }
 
 func run(name string, args ...string) ([]byte, error) {
