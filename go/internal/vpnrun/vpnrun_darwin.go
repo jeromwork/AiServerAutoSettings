@@ -45,7 +45,10 @@ func (r *Runner) Install(singbox, config string) error {
 	sh := fmt.Sprintf("/usr/sbin/visudo -cf %[3]s && install -m 644 -o root -g wheel %[1]s %[2]s && install -m 440 -o root -g wheel %[3]s %[4]s && /bin/launchctl bootout %[5]s 2>/dev/null; /bin/launchctl bootstrap system %[2]s",
 		tp, plist, ts, sudoers, target)
 	_, err = run("osascript", "-e", `do shell script "`+strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(sh)+`" with administrator privileges`)
-	return err
+	if err != nil {
+		return err
+	}
+	return r.save(singbox, config)
 }
 
 func (r *Runner) Uninstall() error {

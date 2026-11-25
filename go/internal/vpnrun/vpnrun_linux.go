@@ -18,8 +18,7 @@ func (r *Runner) Install(singbox, config string) error {
 	if _, err := run("sudo", "setcap", "cap_net_admin,cap_net_bind_service+ep", singbox); err != nil {
 		return err
 	}
-	r.Sing, r.Conf = singbox, config
-	return nil
+	return r.save(singbox, config)
 }
 
 func (r *Runner) Uninstall() error {

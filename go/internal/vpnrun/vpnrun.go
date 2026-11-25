@@ -4,8 +4,11 @@ package vpnrun
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -21,8 +24,33 @@ type Runner struct {
 	Log   api.Logger
 	Sing  string // путь к sing-box (Linux Start; на Win/Mac он уже записан в задачу/службу)
 	Conf  string // путь к конфигу
+	dir   string // каталог данных программы (там vpnrun.json)
 	mu    sync.Mutex
 	proc  api.Process
+}
+
+// New читает сохранённые Install пути sing-box и конфига (dataDir/vpnrun.json), если файл есть.
+func New(dataDir string, procs api.Procs, log api.Logger) *Runner {
+	r := &Runner{Procs: procs, Log: log, dir: dataDir}
+	if b, err := os.ReadFile(filepath.Join(dataDir, "vpnrun.json")); err == nil {
+		var v struct{ Sing, Conf string }
+		if json.Unmarshal(b, &v) == nil {
+			r.Sing, r.Conf = v.Sing, v.Conf
+		}
+	}
+	return r
+}
+
+func (r *Runner) save(singbox, config string) error {
+	r.Sing, r.Conf = singbox, config
+	if r.dir == "" {
+		return nil
+	}
+	b, _ := json.Marshal(struct{ Sing, Conf string }{singbox, config})
+	if err := os.MkdirAll(r.dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(r.dir, "vpnrun.json"), b, 0o644)
 }
 
 func run(name string, args ...string) ([]byte, error) {

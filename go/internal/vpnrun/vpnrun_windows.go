@@ -3,19 +3,63 @@
 package vpnrun
 
 import (
-	"bytes"
-	"encoding/csv"
+	"encoding/xml"
+	"os"
+	"path/filepath"
 	"strings"
+	"unicode/utf16"
 )
 
-// Install (под администратором, один раз): задача с /RL HIGHEST, сама по себе не стартует (ONCE в прошлом).
+const taskXML = `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Settings>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Principals>
+    <Principal id="Author"><RunLevel>HighestAvailable</RunLevel></Principal>
+  </Principals>
+  <Actions Context="Author">
+    <Exec><Command>{{CMD}}</Command><Arguments>{{ARGS}}</Arguments></Exec>
+  </Actions>
+</Task>
+`
+
+func esc(s string) string {
+	var b strings.Builder
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
+}
+
+// writeUTF16 пишет файл в UTF-16LE с BOM (формат, который schtasks принимает всегда).
+func writeUTF16(path, s string) error {
+	u := utf16.Encode([]rune(s))
+	b := []byte{0xFF, 0xFE}
+	for _, c := range u {
+		b = append(b, byte(c), byte(c>>8))
+	}
+	return os.WriteFile(path, b, 0o600)
+}
+
+// Install (под администратором, один раз): задача HighestAvailable из XML, работает и от батареи,
+// без лимита времени; сама не стартует (триггеров нет).
 func (r *Runner) Install(singbox, config string) error {
 	if err := badPath(singbox, config); err != nil {
 		return err
 	}
-	_, err := run("schtasks.exe", "/Create", "/TN", label, "/SC", "ONCE", "/ST", "00:00", "/SD", "01/01/2000",
-		"/RL", "HIGHEST", "/F", "/TR", `"`+singbox+`" run -c "`+config+`"`)
-	return err
+	x := strings.NewReplacer("{{CMD}}", esc(singbox), "{{ARGS}}", esc(`run -c "`+config+`"`)).Replace(taskXML)
+	f := filepath.Join(os.TempDir(), "ra-vpn-task.xml")
+	if err := writeUTF16(f, x); err != nil {
+		return err
+	}
+	defer os.Remove(f)
+	if _, err := run("schtasks.exe", "/Create", "/TN", label, "/XML", f, "/F"); err != nil {
+		return err
+	}
+	return r.save(singbox, config)
 }
 
 func (r *Runner) Uninstall() error {
@@ -27,16 +71,8 @@ func (r *Runner) Uninstall() error {
 func (r *Runner) Start() error { _, err := run("schtasks.exe", "/Run", "/TN", label); return err }
 func (r *Runner) Stop() error  { _, err := run("schtasks.exe", "/End", "/TN", label); return err }
 
-// Running: столбец «Состояние» (4-й) = Running / «Выполняется» (в OEM-кодировке cp866).
+// Running: состояние задачи из PowerShell (значение enum не локализуется).
 func (r *Runner) Running() bool {
-	out, err := run("schtasks.exe", "/Query", "/TN", label, "/FO", "CSV", "/V")
-	if err != nil {
-		return false
-	}
-	rows, err := csv.NewReader(bytes.NewReader([]byte(out))).ReadAll()
-	if err != nil || len(rows) < 2 || len(rows[1]) < 4 {
-		return false
-	}
-	s := rows[1][3]
-	return strings.EqualFold(s, "Running") || s == "\x82\xeb\xaf\xae\xab\xad\xef\xe5\xe2\xe1\xef"
+	out, err := run("powershell.exe", "-NoProfile", "-Command", "(Get-ScheduledTask -TaskName '"+label+"').State")
+	return err == nil && strings.TrimSpace(string(out)) == "Running"
 }
