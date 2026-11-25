@@ -4,6 +4,7 @@ package platform
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -23,7 +24,11 @@ func (p *stubPlatform) Autostart(binPath, home, inst8 string) api.AutostartSpec 
 	if home != "" {
 		execArgs += " --home " + syscall.EscapeArg(home)
 	}
-	trCmd := syscall.EscapeArg(binPath) + " " + execArgs
+	xmlDir := home
+	if xmlDir == "" {
+		xmlDir = filepath.Dir(binPath)
+	}
+	xmlPath := filepath.Join(xmlDir, taskName+".xml")
 	xmlContent := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>RemoteAgents3 Autostart</Description></RegistrationInfo>
@@ -40,9 +45,9 @@ func (p *stubPlatform) Autostart(binPath, home, inst8 string) api.AutostartSpec 
 </Task>`, escapeXML(binPath), escapeXML(execArgs))
 	return api.AutostartSpec{
 		Kind:    "schtasks",
-		Path:    taskName,
+		Path:    xmlPath,
 		Content: xmlContent,
-		Install: []string{"schtasks", "/Create", "/TN", taskName, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F", "/TR", trCmd},
+		Install: []string{"schtasks", "/Create", "/TN", taskName, "/XML", xmlPath, "/F"},
 		Remove:  []string{"schtasks", "/Delete", "/TN", taskName, "/F"},
 		Enable:  []string{"schtasks", "/Change", "/TN", taskName, "/ENABLE"},
 		Disable: []string{"schtasks", "/Change", "/TN", taskName, "/DISABLE"},

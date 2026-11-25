@@ -40,7 +40,7 @@ func (p *stubPlatform) Autostart(binPath, home, inst8 string) api.AutostartSpec 
 		Install: []string{"launchctl", "load", "-w", plistPath},
 		Remove:  []string{"launchctl", "unload", "-w", plistPath},
 		Enable:  []string{"launchctl", "enable", "system/" + label},
-		Disable: []string{"launchctl", "unload", "-w", plistPath},
+		Disable: []string{"launchctl", "disable", "system/" + label},
 	}
 }
 
