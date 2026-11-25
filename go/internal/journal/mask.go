@@ -3,6 +3,7 @@ package journal
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -165,6 +166,31 @@ func MaskValue(v any) any {
 // normalizeValue expands typed JSON containers before any secrets are collected.
 // Keep errors and Stringers consistent with the values actually logged.
 func normalizeValue(v any) any {
+	return normalizeNested(v, make(map[containerVisit]bool), 0)
+}
+
+type containerVisit struct {
+	kind reflect.Kind
+	ptr  uintptr
+	len  int
+}
+
+func normalizeNested(v any, active map[containerVisit]bool, depth int) any {
+	// Bound recursion even for deeply nested acyclic input. Never format rejected
+	// containers: fmt also recurses into cycles and may expose unmasked fields.
+	if depth >= 64 {
+		return "[journal: nesting limit]"
+	}
+	switch val := v.(type) {
+	case map[string]any, []any:
+		rv := reflect.ValueOf(val)
+		visit := containerVisit{kind: rv.Kind(), ptr: uintptr(rv.UnsafePointer()), len: rv.Len()}
+		if active[visit] {
+			return "[journal: cycle]"
+		}
+		active[visit] = true
+		defer delete(active, visit)
+	}
 	switch val := v.(type) {
 	case nil, string, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, bool:
 		return val
@@ -175,13 +201,13 @@ func normalizeValue(v any) any {
 	case map[string]any:
 		res := make(map[string]any, len(val))
 		for k, elem := range val {
-			res[k] = normalizeValue(elem)
+			res[k] = normalizeNested(elem, active, depth+1)
 		}
 		return res
 	case []any:
 		res := make([]any, len(val))
 		for i, elem := range val {
-			res[i] = normalizeValue(elem)
+			res[i] = normalizeNested(elem, active, depth+1)
 		}
 		return res
 	default:
@@ -189,10 +215,10 @@ func normalizeValue(v any) any {
 		if err == nil {
 			var generic any
 			if json.Unmarshal(b, &generic) == nil {
-				return normalizeValue(generic)
+				return normalizeNested(generic, active, depth+1)
 			}
 		}
-		return fmt.Sprint(val)
+		return "[journal: unsupported value]"
 	}
 }
 
