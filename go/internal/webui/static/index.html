@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RemoteAgents</title>
+<style>
+body { font: 15px sans-serif; max-width: 760px; margin: 20px auto; padding: 0 12px; color: #222; }
+h1 { font-size: 20px; }
+.box { border: 1px solid #ccc; border-radius: 6px; padding: 12px; margin: 12px 0; }
+.big { font-size: 20px; font-weight: bold; }
+textarea { width: 100%; height: 140px; box-sizing: border-box; }
+input[type=password] { width: 240px; }
+button { font-size: 14px; padding: 5px 12px; margin: 4px 4px 4px 0; cursor: pointer; }
+button.danger { background: #fce8e6; color: #c5221f; border: 1px solid #c5221f; }
+pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow-y: auto; }
+.err { color: #b00020; }
+.ok { color: #176f2c; }
+</style>
+</head>
+<body>
+<h1>RemoteAgents &middot; <span id="ver">3.0</span></h1>
+
+<div class="box">
+  <button id="btn-update" type="button">Обновить</button>
+  <button id="btn-exit" type="button" class="danger">Выход</button>
+  <div id="umsg"></div>
+</div>
+
+<div class="box">
+  <b>Состояние</b>
+  <pre id="lines">Загрузка...</pre>
+</div>
+
+<div class="box">
+  <b>Журнал</b>
+  <div>
+    <button id="btn-log-tail" type="button">Показать журнал</button>
+    <button id="btn-log-zip" type="button">Скачать zip</button>
+    <button id="btn-log-send" type="button">Отправить журнал</button>
+  </div>
+  <pre id="log-content" style="display:none"></pre>
+  <div id="lmsg"></div>
+</div>
+
+<div class="box">
+  <b>Конфиг</b>
+  <div id="cfg-info"></div>
+  <form id="cform" style="display:none">
+    <textarea name="text" placeholder="Вставьте сюда конфиг"></textarea><br>
+    Пароль: <input type="password" name="password" autocomplete="off">
+    <button type="button" id="btn-cfg-check">Проверить</button>
+    <button type="submit" id="btn-cfg-apply">Применить</button>
+  </form>
+  <div>
+    <button id="btn-cfg-other" type="button">Вставить конфиг</button>
+    <button id="btn-cfg-revert" type="button">Вернуть прежний</button>
+  </div>
+  <div id="cmsg"></div>
+</div>
+
+<div class="box">
+  Управление компьютером: <b id="ctl"></b>
+  <button id="btn-control" type="button"></button>
+</div>
+
+<div class="box">
+  <button id="btn-happier" type="button">Открыть Happier</button>
+  <span id="hmsg"></span>
+</div>
+
+<div class="box">
+  <button id="btn-check" type="button">Проверить чистоту</button>
+  <pre id="cres"></pre>
+</div>
+
+<script>
+var T = "__T__", S = null;
+
+function request(u, options) {
+  return fetch(u, options).then(function(r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }).catch(function(e) {
+    document.getElementById("umsg").textContent = "Связь со страницей: " + e.message;
+    throw e;
+  });
+}
+
+function post(p, d) {
+  var u = p + (p.indexOf("?") >= 0 ? "&" : "?") + "t=" + encodeURIComponent(T);
+  var body = new URLSearchParams(d || {});
+  return request(u, { method: "POST", body: body });
+}
+
+function get(p) {
+  var u = p + (p.indexOf("?") >= 0 ? "&" : "?") + "t=" + encodeURIComponent(T);
+  return request(u);
+}
+
+function show(s) {
+  S = s;
+  if (s.version) document.getElementById("ver").textContent = s.version;
+  var lines = s.lines || [];
+  if (lines.length) {
+    document.getElementById("lines").textContent = lines.join("\n");
+  } else {
+    document.getElementById("lines").textContent = JSON.stringify(s, null, 2);
+  }
+
+  var ctl = s.control !== false;
+  document.getElementById("ctl").textContent = ctl ? "разрешено" : "запрещено";
+  document.getElementById("btn-control").textContent = ctl ? "Запретить" : "Разрешить";
+}
+
+function poll() {
+  get("/state").then(show).catch(function() {});
+}
+
+document.getElementById("btn-update").onclick = function() {
+  var m = document.getElementById("umsg");
+  m.textContent = "Обновляю...";
+  post("/api/update").then(function(r) {
+    m.className = r.ok ? "ok" : "err";
+    m.textContent = r.ok ? "Команда обновления принята" : ("Ошибка: " + (r.error || "не удалось"));
+    poll();
+  });
+};
+
+document.getElementById("btn-exit").onclick = function() {
+  if (confirm("Завершить работу программы?")) {
+    post("/api/exit").then(function() {
+      alert("Команда выхода отправлена");
+    });
+  }
+};
+
+document.getElementById("btn-log-tail").onclick = function() {
+  var lc = document.getElementById("log-content");
+  lc.style.display = "";
+  lc.textContent = "Загрузка журнала...";
+  get("/api/log/tail").then(function(r) {
+    lc.textContent = (r.lines && r.lines.length) ? r.lines.join("\n") : "Журнал пуст";
+  });
+};
+
+document.getElementById("btn-log-zip").onclick = function() {
+  window.location.href = "/api/log/zip?t=" + encodeURIComponent(T);
+};
+
+document.getElementById("btn-log-send").onclick = function() {
+  var m = document.getElementById("lmsg");
+  m.textContent = "Отправляю журнал...";
+  post("/api/log/send").then(function(r) {
+    m.className = r.ok ? "ok" : "err";
+    m.textContent = r.ok ? "Журнал отправлен на сервер" : ("Ошибка отправки: " + (r.error || "сбой"));
+  });
+};
+
+document.getElementById("btn-happier").onclick = function() {
+  var m = document.getElementById("hmsg");
+  m.textContent = "Запрос адреса Happier...";
+  var win = window.open("about:blank", "_blank");
+  if (win) win.opener = null;
+  get("/api/happier").then(function(r) {
+    if (r.ok && r.url) {
+      m.textContent = "";
+      var target = new URL(r.url);
+      if (target.protocol !== "http:" && target.protocol !== "https:") {
+        if (win) win.close();
+        m.textContent = "Недопустимый адрес Happier";
+        return;
+      }
+      if (win) win.location.href = target.href;
+      else {
+        var link = document.createElement("a");
+        link.href = target.href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "Открыть Happier";
+        m.appendChild(link);
+      }
+    } else {
+      m.className = "err";
+      if (win) win.close();
+      m.textContent = "Happier недоступен: " + (r.error || "ошибка");
+    }
+  });
+};
+
+document.getElementById("btn-check").onclick = function() {
+  var rbox = document.getElementById("cres");
+  rbox.textContent = "Проверяю...";
+  post("/api/check").then(function(r) {
+    if (!r.ok) {
+      rbox.textContent = "Ошибка проверки: " + (r.error || "сбой");
+    } else if (r.items && r.items.length) {
+      rbox.textContent = r.items.join("\n");
+    } else {
+      rbox.textContent = "Чисто";
+    }
+  });
+};
+
+document.getElementById("btn-control").onclick = function() {
+  var cur = S && S.control !== false;
+  post("/api/control", { on: cur ? "0" : "1" }).then(function(r) {
+    if (!r.ok) document.getElementById("umsg").textContent = r.error || "Ошибка управления";
+    poll();
+  });
+};
+
+document.getElementById("btn-cfg-other").onclick = function() {
+  document.getElementById("cform").style.display = "";
+};
+
+document.getElementById("btn-cfg-check").onclick = function() {
+  var f = document.getElementById("cform");
+  var m = document.getElementById("cmsg");
+  m.textContent = "Проверяю...";
+  post("/api/config/check", { text: f.text.value, password: f.password.value }).then(function(r) {
+    m.className = r.ok ? "ok" : "err";
+    m.textContent = r.ok ? "Конфиг корректен" : (r.problems || ["Ошибка проверки"]).join("\n");
+  });
+};
+
+document.getElementById("btn-cfg-revert").onclick = function() {
+  var m = document.getElementById("cmsg");
+  m.textContent = "Возвращаю...";
+  post("/api/config/revert").then(function(r) {
+    m.className = r.ok ? "ok" : "err";
+    m.textContent = r.ok ? "Прежний конфиг возвращён" : (r.problems || ["Ошибка возврата"]).join("\n");
+    poll();
+  });
+};
+
+document.getElementById("cform").onsubmit = function(e) {
+  e.preventDefault();
+  var f = this;
+  var m = document.getElementById("cmsg");
+  m.textContent = "Применяю...";
+  post("/api/config/apply", { text: f.text.value, password: f.password.value }).then(function(r) {
+    m.className = r.ok ? "ok" : "err";
+    m.textContent = r.ok ? "Конфиг принят, перезапускаю..." : (r.problems || ["Ошибка применения"]).join("\n");
+    if (r.ok) f.password.value = "";
+    poll();
+  });
+  return false;
+};
+
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>
