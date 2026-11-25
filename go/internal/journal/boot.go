@@ -68,7 +68,10 @@ func (b *bootLogger) Secret(s string)          { RegisterSecret(s) }
 func (b *bootLogger) Drops() int64             { b.mu.Lock(); defer b.mu.Unlock(); return b.target.Drops() }
 func (b *bootLogger) With(c string) api.Logger { return &bootComponent{b: b, c: c} }
 func (b *bootLogger) Writer(stream, src string) io.WriteCloser {
-	return &bootWriter{b: b, stream: stream, src: src}
+	if src == "" {
+		src = api.StreamBoot
+	}
+	return newLineWriter(&bootStream{b: b, stream: stream}, src)
 }
 
 type bootComponent struct {
@@ -101,35 +104,19 @@ func (c *bootComponent) Writer(s, src string) io.WriteCloser {
 	return c.b.Writer(s, src)
 }
 
-type bootWriter struct {
-	mu          sync.Mutex
-	b           *bootLogger
-	stream, src string
-	w           io.WriteCloser
-	closed      bool
+type bootStream struct {
+	b      *bootLogger
+	stream string
 }
 
-func (w *bootWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.closed {
-		return 0, io.ErrClosedPipe
+func (s *bootStream) logRecord(src, ev string, data any, why string) {
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+	target := s.b.target
+	if s.b.path == "" && s.stream != "" && s.stream != target.stream {
+		target = target.getStreamJournal(s.stream)
 	}
-	if w.w == nil {
-		w.b.mu.Lock()
-		w.w = w.b.target.Writer(w.stream, w.src)
-		w.b.mu.Unlock()
-	}
-	return w.w.Write(p)
-}
-func (w *bootWriter) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.closed = true
-	if w.w != nil {
-		return w.w.Close()
-	}
-	return nil
+	target.logRecord(src, ev, data, why)
 }
 
 // Keep the boot logger itself valid after migration; all its views share the target.

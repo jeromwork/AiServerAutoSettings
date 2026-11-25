@@ -521,8 +521,12 @@ func (l *componentLogger) Drops() int64 {
 	return l.j.Drops()
 }
 
+type recordLogger interface {
+	logRecord(string, string, any, string)
+}
+
 type lineWriter struct {
-	j        *Journal
+	j        recordLogger
 	source   string
 	buf      bytes.Buffer
 	mu       sync.Mutex
@@ -530,7 +534,7 @@ type lineWriter struct {
 	overflow bool
 }
 
-func newLineWriter(j *Journal, source string) *lineWriter {
+func newLineWriter(j recordLogger, source string) *lineWriter {
 	return &lineWriter{
 		j:      j,
 		source: source,
