@@ -5,6 +5,7 @@ package bus
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"remoteagents/internal/api"
 )
@@ -40,6 +41,8 @@ type Bus struct {
 	nextID   int
 	overflow bool
 	closed   bool
+	count    atomic.Uint64
+	tick     func()
 }
 
 // New starts the dispatcher. A nil logger is allowed.
@@ -121,6 +124,10 @@ func (b *Bus) Close() {
 	<-b.done
 }
 
+// Count and SetTickHook mirror v2: check memory after every 1000 events.
+func (b *Bus) Count() uint64         { return b.count.Load() }
+func (b *Bus) SetTickHook(fn func()) { b.mu.Lock(); defer b.mu.Unlock(); b.tick = fn }
+
 func (b *Bus) run() {
 	defer close(b.done)
 	for {
@@ -138,6 +145,7 @@ func (b *Bus) run() {
 		if b.overflow && len(b.q) <= queueReset {
 			b.overflow = false
 		}
+		tick := b.tick
 		subs := append([]sub(nil), b.subs[ev.Topic]...)
 		b.mu.Unlock()
 		if b.log != nil {
@@ -150,6 +158,9 @@ func (b *Bus) run() {
 			default:
 			}
 			b.safe(ev, s.fn)
+		}
+		if b.count.Add(1)%1000 == 0 && tick != nil {
+			b.safe(ev, func(Event) { tick() })
 		}
 	}
 }

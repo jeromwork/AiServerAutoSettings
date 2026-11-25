@@ -26,7 +26,7 @@ import (
 const bodyMax = 1100000
 
 // statusTopics: bus events whose latest data forms the status lines on the page.
-var statusTopics = []string{"agent.ready", "singbox.started", "channel.up", "vpn.dead", "vpn.exited", "vpn.gave_up", "proc.exited"}
+var statusTopics = []string{"agent.ready", "singbox.started", "channel.up", "vpn.dead", "vpn.exited", "vpn.gave_up", "proc.exited", "control.changed", "disk.state", "settings.loaded", "channel.down", "vpn.state"}
 
 const page = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>RemoteAgents</title>
 <style>body{font:15px sans-serif;max-width:760px;margin:20px auto;padding:0 12px;color:#222}h1{font-size:20px}

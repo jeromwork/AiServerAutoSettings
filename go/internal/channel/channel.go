@@ -70,7 +70,7 @@ type Link struct {
 	unsubs                 []func()
 }
 
-var topics = []string{"settings.loaded", "settings.failed", "singbox.started", "singbox.failed", "channel.up", "channel.down", "round.done", "lan.result", "path.ok", "path.failed", "agent.ready", "singbox.exited", "uplink.selected", "vpn.state"}
+var topics = []string{"settings.loaded", "settings.failed", "singbox.started", "singbox.failed", "channel.up", "channel.down", "round.done", "lan.result", "path.ok", "path.failed", "agent.ready", "singbox.exited", "uplink.selected", "vpn.state", "disk.state", "control.changed"}
 
 func New(o Options) *Link {
 	if o.In == nil {
@@ -125,7 +125,11 @@ func (l *Link) Send(msg map[string]any) {
 	for k, v := range msg {
 		switch v := v.(type) {
 		case string:
-			clean[k] = l.o.Mask(v)
+			if msg["t"] == "ui" && k == "url" {
+				clean[k] = v
+			} else {
+				clean[k] = l.o.Mask(v)
+			}
 		case []string:
 			lines := make([]string, len(v))
 			for i, s := range v {
@@ -166,6 +170,7 @@ func (l *Link) read() {
 					if err := agent.SetEnabled(l.o.Paths, truth(msg["enabled"])); err != nil && l.o.Log != nil {
 						l.o.Log.Error("link.control", "err", err)
 					}
+					l.o.Bus.Publish("control.changed", map[string]any{"enabled": agent.Enabled(l.o.Paths)})
 					l.Refresh()
 				}
 			}

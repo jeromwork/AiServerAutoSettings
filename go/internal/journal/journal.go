@@ -381,3 +381,6 @@ func (w *lineWriter) Close() error {
 	w.buf = nil
 	return nil
 }
+
+// Mask applies the journal's shared secret masker to launcher protocol text.
+func Mask(text string) string { return maskStr(text) }

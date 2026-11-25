@@ -9,14 +9,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"remoteagents/internal/api"
+	"remoteagents/internal/bus"
 	"remoteagents/internal/journal"
 	"remoteagents/internal/procs"
 )
@@ -27,8 +30,19 @@ const (
 	maxQueued      = 1000
 )
 
+// Options supplies release trust and the tray event bridge.
+type Options struct {
+	Bus     *bus.Bus
+	Signers []string
+	Repo    string
+}
+
 // Run is the whole life of the supervisor. args are the command line after "supervise". log and pr may be nil.
-func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self string, mode api.Mode, args []string) int {
+func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self string, mode api.Mode, args []string, options ...Options) int {
+	var o Options
+	if len(options) > 0 {
+		o = options[0]
+	}
 	_ = mode // already inside args: the core gets the same flags
 	for _, d := range []string{p.State, p.Versions, p.Logs, p.Tmp} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -70,7 +84,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 	coreArgs, reset := coreArgs(args)
 	s := loadSlots(p, self, embedded, reset, log)
 	for {
-		r := runCore(ctx, log, pr, s, coreArgs)
+		r := runCore(ctx, log, pr, s, coreArgs, o)
 		if r.exiting || (r.code == api.ExitOK && r.exitMsg) {
 			log.Info("exit", "why", "ядро завершилось по просьбе владельца")
 			return api.SupExitDone
@@ -78,9 +92,47 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		act := s.onExit(r.code, r.fuse, r.ran.Seconds(), r.good, log)
 		log.Info("decision", "restart", act == actRestart, "why", s.reason)
 		if act == actStop {
-			// The v2 tray shows "stopped"; here autostart must not relaunch us (exit 0). --reset starts again.
+			// Keep the v2 stopped tray available for Exit or Rollback, without restarting the core.
 			_ = pr.KillAll(context.Background())
-			return api.SupExitDone
+			if o.Bus == nil {
+				return api.SupExitDone
+			}
+			commands := make(chan string, 1)
+			unsub := o.Bus.Subscribe("supervisor.command", func(ev bus.Event) {
+				kind, _ := ev.Data["t"].(string)
+				if kind == "exit" || kind == "rollback" {
+					select {
+					case commands <- kind:
+					default:
+					}
+				}
+			})
+			o.Bus.Publish("supervisor.message", map[string]any{"t": "core", "running": false, "rollback": s.Previous != "" || s.LastGood != ""})
+			restart := false
+			for !restart {
+				select {
+				case <-ctx.Done():
+					unsub()
+					return api.SupExitDone
+				case kind := <-commands:
+					if kind == "exit" {
+						unsub()
+						return api.SupExitDone
+					}
+					previous := s.Previous
+					if previous == "" || previous == s.Current {
+						previous = s.LastGood
+					}
+					if previous != "" && previous != s.Current && s.exists(previous) {
+						s.Current = previous
+						s.FailsGood = 0
+						s.MemRestarts = 0
+						s.save(log)
+						restart = true
+					}
+				}
+			}
+			unsub()
 		}
 	}
 }
@@ -133,6 +185,7 @@ type lineWriter struct {
 	skip bool
 	out  chan msg
 	log  api.Logger
+	bus  *bus.Bus
 }
 
 func (w *lineWriter) Write(b []byte) (int, error) {
@@ -161,6 +214,20 @@ func (w *lineWriter) line(b []byte) {
 		w.log.Warn("core.notjson", "len", len(b)) // content is not logged: it may hold secrets
 		return
 	}
+	var data map[string]any
+	if json.Unmarshal(b, &data) == nil {
+		if m.T == "ui" {
+			if value, ok := data["url"].(string); ok {
+				if u, err := url.Parse(value); err == nil {
+					w.log.Secret(u.Query().Get("t"))
+				}
+			}
+		}
+		w.bus.Publish("supervisor.message", data)
+		if m.T == api.MsgConfigOK && data["channel"] == false {
+			m.T = "config-only"
+		}
+	}
 	select {
 	case w.out <- msg{m.T}:
 	default:
@@ -168,9 +235,20 @@ func (w *lineWriter) line(b []byte) {
 	}
 }
 
-func runCore(ctx context.Context, log api.Logger, pr api.Procs, s *slots, args []string) result {
+func runCore(ctx context.Context, log api.Logger, pr api.Procs, s *slots, args []string, options ...Options) result {
+	var o Options
+	if len(options) > 0 {
+		o = options[0]
+	}
 	var res result
 	argv := append([]string(nil), args...)
+	argv = append(argv, "--launcher", s.self)
+	if len(o.Signers) > 0 {
+		argv = append(argv, "--update-signers", strings.Join(o.Signers, "\n"))
+	}
+	if o.Repo != "" {
+		argv = append(argv, "--release-repo", o.Repo)
+	}
 	if s.RollbackReason != "" {
 		argv = append(argv, "--rollback-reason", asciiClean(s.RollbackReason, 160))
 	}
@@ -181,9 +259,19 @@ func runCore(ctx context.Context, log api.Logger, pr api.Procs, s *slots, args [
 	}
 	defer func() { _ = stdinW.Close() }()
 	msgs := make(chan msg, maxQueued)
+	var inputMu sync.Mutex
+	send := func(data map[string]any) {
+		inputMu.Lock()
+		defer inputMu.Unlock()
+		_ = json.NewEncoder(stdinW).Encode(data)
+	}
+	if o.Bus != nil {
+		unsub := o.Bus.Subscribe("supervisor.command", func(ev bus.Event) { send(ev.Data) })
+		defer unsub()
+	}
 	log.Info("start", "version", s.Current, "unverified", s.unverified(), "rollback", s.RollbackReason)
 	proc, err := pr.Start(ctx, api.ProcSpec{Name: "core", Path: s.exePath(s.Current), Args: argv, Dir: s.home,
-		Stream: api.StreamCore, Stdin: stdinR, Stdout: &lineWriter{out: msgs, log: log}})
+		Stream: api.StreamCore, Stdin: stdinR, Stdout: &lineWriter{out: msgs, log: log, bus: o.Bus}})
 	_ = stdinR.Close() // the child owns its copy
 	if err != nil {
 		log.Error("start.failed", "err", err.Error())
@@ -191,6 +279,10 @@ func runCore(ctx context.Context, log api.Logger, pr api.Procs, s *slots, args [
 		return res
 	}
 	started := time.Now()
+	if o.Bus != nil {
+		o.Bus.Publish("supervisor.message", map[string]any{"t": "core", "running": true, "rollback": s.Previous != "" || (s.LastGood != "" && s.LastGood != s.Current)})
+		defer o.Bus.Publish("supervisor.message", map[string]any{"t": "core", "running": false})
+	}
 
 	// Silence timer (v2 "таймер В"): a version that was never proven must say good in time. §5б exception: no event
 	// exists for a hung new version, and the owner would be left without a link. Only a timeout of one action; success is never declared by it.
@@ -227,6 +319,8 @@ func runCore(ctx context.Context, log api.Logger, pr api.Procs, s *slots, args [
 			log.Info("good", "version", s.Current)
 		case api.MsgExit:
 			res.exitMsg = true
+		case "config-only":
+			disarm() // No SSH is configured (e.g. VPN-only); never claim channel verification.
 		case api.MsgNoConfig:
 			noConfig = true
 			disarm()
@@ -250,7 +344,7 @@ func runCore(ctx context.Context, log api.Logger, pr api.Procs, s *slots, args [
 			ctxDone = nil
 			res.exiting = true
 			disarm()
-			_, _ = stdinW.WriteString(`{"t":"exit","final":true}` + "\n")
+			send(map[string]any{"t": "exit", "final": true})
 			grace := time.NewTimer(finalExitGrace)
 			defer grace.Stop()
 			graceC = grace.C
