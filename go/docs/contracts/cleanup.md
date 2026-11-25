@@ -11,11 +11,12 @@
 
 | Режим | Функция / Точка вызова | Общий лимит | Лимит подпроцесса | Поведение |
 |---|---|---|---|---|
-| `startup` | `cleanup.run('startup', home, log)` (`cleanup.py:409–414`, `app.py:144–147`) | 59 с (`cleanup.py:42`) | min(20 с, остаток − 1 с) (`cleanup.py:53`) | Очистка хвостов прошлого запуска перед подъёмом сети. Реестр не чистится (`cleanup.py:401`). |
-| `exit` | `cleanup.run('exit', home, log)` (`cleanup.py:409–414`, `app.py:171–181`) | 28 с (`cleanup.py:42`) | min(20 с, остаток − 1 с) (`cleanup.py:53`) | Запускается только при `exit_code == 0` и `final == true` (`app.py:171`) в потоке-демоне с `join(30)` (`app.py:177–181`). Включает чистку реестра (`cleanup.py:401–402`). |
-| `check` (dry-run) | `cleanup.check(home)` (`cleanup.py:416–418`) | 28 с (`cleanup.py:42`) | min(20 с, остаток − 1 с) (`cleanup.py:53`) | `reading=True`, ничего не удаляет, собирает список проблем (`cleanup.py:418`). |
+| `startup` | `cleanup.run('startup', home, log)` (`cleanup.py:409–414`, `app.py:144–147`) | 59 с (`cleanup.py:42`) | min(20 с, остаток − 1 с) (`cleanup.py:53`) | Очистка хвостов прошлого запуска перед подъёмом сети. Реестр не чистится (`cleanup.py:401–402`). |
+| `exit` | `cleanup.run('exit', home, log)` (`cleanup.py:409–414`, `app.py:171–181`) | 28 с (`cleanup.py:42`) | min(20 с, остаток − 1 с) (`cleanup.py:53`) | Запускается только при `exit_code == 0` и `getattr(ctx, 'final_exit', False)` (`app.py:171`) в потоке-демоне с `join(30)` (`app.py:177–181`). Включает чистку реестра (`cleanup.py:401–402`). |
+| `check` (dry-run) | `cleanup.check(home)` (`cleanup.py:416–418`) | 28 с (`cleanup.py:42`) | min(20 с, остаток − 1 с) (`cleanup.py:53`) | `reading=True`, ничего не удаляет, собирает список проблем (`cleanup.py:418`). В реестре читает только `Run` без проверки контекстных ключей (`cleanup.py:272–278`), при активном сетевом процессе шаг адаптеров пропускает молча (`cleanup.py:161–164`), исключает дерево потомков текущего процесса Python (`cleanup.py:140–150`). |
 
 - Платформа: только Windows (`os.name == 'nt'`); на других ОС возвращается `['Уборка системы доступна только в Windows']` (`cleanup.py:395–396`).
+- Запрет удаления дискового корня: `self.home = Path(home).resolve()`; если `self.home == Path(self.home.anchor)` (дисковый корень, например `C:\`), выбрасывается `ValueError('Нужна папка данных программы')` (`cleanup.py:38–40`), предотвращая использование корня диска в качестве домашней папки и его случайное удаление.
 - Ошибка тайм-аута: `TimeoutError('Время уборки истекло')` (`cleanup.py:48, 55`).
 - При зависании внешней команды: `taskkill.exe /F /T /PID <pid>` (тайм-аут min(0.5 с, остаток)), затем `kill()` (тайм-аут min(0.25 с, остаток)) (`cleanup.py:60–72`).
 - Остановка TUN перед `kill_all`: `ctx.tun.stop().join(timeout=40)` (`app.py:169`).
@@ -23,19 +24,23 @@
 ## 2. Порядок шагов уборки (`cleanup.py:398–406`)
 
 1. **Процессы (`cleanup.py:129–155`):**
-   - Критерии принадлежности процесса (`cleanup.py:107–123`): `ProcessId != os.getpid()`, `ProcessId != $PID`, `ProcessId != ppid` (если `ppid > 0`), `ExecutablePath.StartsWith(<home>\)` (регистронезависимо), `ExecutablePath != RA_EXE`.
-   - Действие: `Stop-Process -Id <id> -Force` (`cleanup.py:131–135`).
-   - Контроль: если процессы остались — замечание `'Процессы: остались запущенные программы из папки данных'` (`cleanup.py:137, 154`).
+   - Критерии принадлежности процесса (`cleanup.py:106–123`): `ProcessId != os.getpid()`, `ProcessId != $PID`, `ProcessId != ppid` (если `ppid > 0`), `ExecutablePath.StartsWith(<home>\)` (регистронезависимо, `cleanup.py:111–112`), `ExecutablePath != RA_EXE` (`cleanup.py:120–122`).
+   - Рабочие режимы (`startup` / `exit`, `cleanup.py:130–137`): принудительное завершение `Stop-Process -Id <id> -Force` (`cleanup.py:131–135`), если остались неудалённые — `throw 'processes'` (`cleanup.py:134`). Если после этого процессы всё ещё найдены — замечание `'Процессы: остались запущенные программы из папки данных'` (`cleanup.py:136–137`).
+   - Режим `check` (`reading=True`, `cleanup.py:138–155`): обходит `Win32_Process` и строит очередь BFS со множеством `$desc` для всех потомков текущего процесса Python (`os.getpid()`, `cleanup.py:140–149`). Исключает всё дерево потомков текущего Python (`-not $desc.Contains([int]$_.ProcessId)`, `cleanup.py:150`), чтобы собственные запущенные подпроцессы не считались оставшимися процессами программы; при обнаружении других процессов выставляет замечание `'Процессы: остались запущенные программы из папки данных'` (`cleanup.py:153–154`).
 2. **Откат изменений (`cleanup.py:363–392`):**
    - Каталог: `<home>/undo` (`cleanup.py:364`). Пропуск, если папка или файл — симлинк/junction (`cleanup.py:365, 375`).
    - Файлы: `*.cmd`, сортировка по времени модификации `st_mtime_ns` от новых к старым (`cleanup.py:374–379`).
    - Вызов: `%ComSpec% /D /S /V:OFF /C ""%RA_UNDO_FILE%""` с `env['RA_UNDO_FILE'] = str(path)` (`cleanup.py:384–386`).
    - При успехе файл удаляется (`path.unlink()`), при ошибке остаётся на следующий запуск (`cleanup.py:387`).
 3. **Сетевые адаптеры (`cleanup.py:160–178`):**
-   - Проверка активности сети (`cleanup.py:156–159`): если процесс из `<home>` с именем `^(sing-box.*|ralab-core|RA2-VPN)\.exe$` жив, шаг пропускается с пометкой `'Адаптеры: удаление пропущено, сетевой процесс ещё работает'` (`cleanup.py:163`).
+   - Проверка активности сети (`cleanup.py:156–159`): если процесс из `<home>` с именем `^(sing-box.*|ralab-core|RA2-VPN)\.exe$` жив:
+     - в рабочих режимах (`not self.reading`) шаг пропускается с пометкой `'Адаптеры: удаление пропущено, сетевой процесс ещё работает'` (`cleanup.py:161–164`);
+     - в режиме `check` (`self.reading`) шаг пропускается молча, без вывода замечания (`cleanup.py:161–164`).
    - Фильтр адаптеров WQL/PowerShell (`cleanup.py:17–22`): `sing-tun Tunnel` или `Wintun Userspace Tunnel` с именами `RA2-LAN*`, `RA2-VPN*`, `RemoteAgents-Lab*`, `ralab-tun*`, `ralab-vpn*`.
-   - Если статус адаптера `Up` — удаление пропускается (`cleanup.py:170–172`).
-   - Удаление: `pnputil.exe /remove-device <PnPDeviceID>`, допустимые коды выхода `0, 3010` (`cleanup.py:176–177`).
+   - Если статус адаптера `Up` — удаление пропускается с пометкой `'Адаптеры: <name> в состоянии Up, удаление пропущено'` (`cleanup.py:170–172`).
+   - Удаление / диагностика:
+     - в режиме `check`: фиксация замечания `'Адаптеры: осталось устройство программы'` (`cleanup.py:173–174`);
+     - в рабочих режимах: `pnputil.exe /remove-device <PnPDeviceID>`, допустимые коды выхода `0, 3010` (`cleanup.py:176–177`).
 4. **Правила DNS NRPT (`cleanup.py:179–187`):**
    - Запрос: `Get-DnsClientNrptRule | Where-Object { $_.Comment -like 'RemoteAgents-Lab*' }` (`cleanup.py:23`).
    - Удаление: `Remove-DnsClientNrptRule -Name $_.Name -Force` (`cleanup.py:184–186`).
@@ -58,12 +63,15 @@
    - Выборка: `Get-ScheduledTask | Where-Object { $_.TaskName -like 'RemoteAgents-Lab*' }` (`cleanup.py:24`).
    - Удаление: `Unregister-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -Confirm:$false` (`cleanup.py:267–269`).
 8. **Реестр Windows (`cleanup.py:271–292`):**
-   - Выполняется при `reading=True` или `mode == 'exit'` (`cleanup.py:401`).
-   - Контекстное меню проводника: удаление ключей `HKCU:\Software\Classes\Directory\shell\RemoteAgents.LabDisk.*` (`cleanup.py:280–284`).
-   - Автозапуск: удаление значения `'RemoteAgents-Lab'` в `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run` (`cleanup.py:285–289`).
+   - Выполняется при `reading=True` или `mode == 'exit'` (`cleanup.py:401–402`).
+   - Режим `check` (`reading=True`, `cleanup.py:272–278`): читает только значение `'RemoteAgents-Lab'` в ветке автозапуска `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run` (при наличии выставляет замечание `'Реестр: осталась запись автозапуска'`, `cleanup.py:277–278`) без проверки контекстных ключей проводника.
+   - Режим `exit` (`cleanup.py:279–291`):
+     - Контекстное меню проводника: удаление ключей `HKCU:\Software\Classes\Directory\shell\RemoteAgents.LabDisk.*` (`cleanup.py:280–284`).
+     - Автозапуск: удаление значения `'RemoteAgents-Lab'` в `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run` (`cleanup.py:285–289`).
 9. **Временные файлы и ярлыки (`cleanup.py:330–362`):**
    - Внутри `<home>`: удаление файлов с суффиксами `.ralab-part` и `.ralab-tmp` (`cleanup.py:331–333`).
    - Каталоги временных файлов: `%TEMP%` / `%TMP%` (только элементы с префиксом `ralab*`) и `<home>/tmp` (все элементы) (`cleanup.py:334–355`).
+   - Защита `home` и его предков при зачистке temp: при обходе папок temp элементы, совпадающие с `<home>` или входящие в число его предков (`path == self.home or path in self.home.parents`), пропускаются (`cleanup.py:353–354`), что исключает удаление каталога программы или любого родительского каталога.
    - Ярлык остановки на рабочем столе: `[Environment]::GetFolderPath('DesktopDirectory')\RemoteAgents-Lab СТОП.cmd` (`cleanup.py:356–361`).
    - Защита от удаления чужого: папки-симлинки и directory junctions не обходятся рекурсивно (`cleanup.py:299, 312–314, 340–344`); junction удаляется через `rmdir`, symlink через `unlink` (`cleanup.py:314`).
 
@@ -109,7 +117,7 @@
 
 ## 5. Диагностические сообщения и журнал
 
-- Предупреждения `_Cleanup.note()` формируют итоговый список `issues` (`cleanup.py:96–104`):
+- Предупреждения `_Cleanup.note()` формируют итоговый список `issues` (`cleanup.py:96–105`):
   - `'Процессы: остались запущенные программы из папки данных'` (`cleanup.py:137, 154`)
   - `'Адаптеры: удаление пропущено, сетевой процесс ещё работает'` (`cleanup.py:163`)
   - `'Адаптеры: <name> в состоянии Up, удаление пропущено'` (`cleanup.py:171`)
@@ -120,10 +128,12 @@
   - `'Прокси: осталось сохранённое изменение настроек'` (`cleanup.py:226`)
   - `'Автозапуск: остались прежние задачи программы'` (`cleanup.py:265`)
   - `'Реестр: осталась запись автозапуска'` (`cleanup.py:278`)
-  - `'Файлы: остался временный файл или файл отката'` (`cleanup.py:326, 389`)
+  - `'Файлы: остался временный файл или файл отката'` (`cleanup.py:326`)
+  - `'Файлы: остался файл отката'` (`cleanup.py:389`)
   - `'Временные файлы: папка является ссылкой, обход пропущен'` (`cleanup.py:343`)
   - `'Откат изменений: папка является ссылкой, обход пропущен'` (`cleanup.py:366`)
   - `'Откат изменений: файл является ссылкой, запуск пропущен'` (`cleanup.py:376`)
+  - `<имя шага>: не удалось выполнить (<тип исключения>)` (`cleanup.py:94`)
 - Записи в журнал при сбоях в `app.py`:
   - `journal.log('app', 'cleanup', {'trace': ...}, 'уборка при старте не удалась')` (`app.py:147`)
   - `journal.log('app', 'cleanup', {'trace': ...}, 'уборка при выходе не удалась')` (`app.py:176`)
