@@ -22,6 +22,7 @@ type manager struct {
 	mu       sync.Mutex
 	procs    map[int]*proc
 	platform platformState
+	closed   bool
 }
 
 type proc struct {
@@ -31,6 +32,8 @@ type proc struct {
 	done     chan struct{}
 	mu       sync.Mutex
 	exitCode int
+	release  func()
+	stopMu   sync.Mutex
 }
 
 // New creates a new Procs manager.
@@ -52,6 +55,11 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		return nil, fmt.Errorf("procs: context-canceled: %w", err)
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil, fmt.Errorf("procs: closed: manager stopped")
+	}
 	nonceBytes := make([]byte, 8)
 	if _, err := rand.Read(nonceBytes); err != nil {
 		return nil, fmt.Errorf("procs: nonce-failed: %w", err)
@@ -59,6 +67,14 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 	nonce := hex.EncodeToString(nonceBytes)
 	traceID := fmt.Sprintf("%s-%s", s.Name, nonce)
 
+	path, err := exec.LookPath(s.Path)
+	if err != nil {
+		return nil, fmt.Errorf("procs: executable: %w", err)
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("procs: executable: %w", err)
+	}
 	dir := s.Dir
 	if dir == "" {
 		dir = filepath.Dir(s.Path)
@@ -72,7 +88,7 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 			Instance: m.tr.Instance(),
 			Owner:    "procs",
 			Data: map[string]string{
-				"exe":  s.Path,
+				"exe":  path,
 				"home": dir,
 			},
 		}
@@ -81,7 +97,8 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		}
 	}
 
-	cmd := exec.Command(s.Path, s.Args...)
+	cmd := exec.Command(path, s.Args...)
+	cmd.WaitDelay = time.Second
 	cmd.Dir = s.Dir
 	if s.Env != nil {
 		cmd.Env = s.Env
@@ -121,7 +138,7 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		return nil, fmt.Errorf("procs: setup-failed: %w", err)
 	}
 
-	if err := m.startCmd(cmd); err != nil {
+	if err := m.startCmd(cmd, ctx); err != nil {
 		if stdoutCloser != nil {
 			_ = stdoutCloser.Close()
 		}
@@ -134,8 +151,17 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		return nil, fmt.Errorf("procs: start-failed: %w", err)
 	}
 
-	if err := m.postStart(cmd); err != nil && m.log != nil {
-		m.log.Warn("procs: post-start-failed", "err", err.Error())
+	if err := m.postStart(cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		m.releaseCmd(cmd)
+		if stdoutCloser != nil {
+			_ = stdoutCloser.Close()
+		}
+		if stderrCloser != nil {
+			_ = stderrCloser.Close()
+		}
+		return nil, fmt.Errorf("procs: post-start-failed: %w", err)
 	}
 
 	started := time.Now().UTC()
@@ -143,12 +169,24 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 
 	if m.tr != nil {
 		appliedData := map[string]string{
-			"exe":   s.Path,
+			"exe":   path,
 			"home":  dir,
 			"pid":   strconv.Itoa(pid),
 			"start": started.Format(time.RFC3339Nano),
 		}
-		_ = m.tr.Applied("process", traceID, appliedData, nil)
+		if err := m.tr.Applied("process", traceID, appliedData, nil); err != nil {
+			p := &proc{cmd: cmd, pid: pid}
+			p.hardKill()
+			_ = cmd.Wait()
+			m.releaseCmd(cmd)
+			if stdoutCloser != nil {
+				_ = stdoutCloser.Close()
+			}
+			if stderrCloser != nil {
+				_ = stderrCloser.Close()
+			}
+			return nil, fmt.Errorf("procs: applied-failed: %w", err)
+		}
 	}
 
 	p := &proc{
@@ -159,12 +197,13 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 		exitCode: -1,
 	}
 
-	m.mu.Lock()
 	m.procs[pid] = p
-	m.mu.Unlock()
 
 	go func() {
 		err := cmd.Wait()
+		// Reap descendants even when the group leader exits first.
+		p.hardKill()
+		m.releaseCmd(cmd)
 
 		p.mu.Lock()
 		if err != nil {
@@ -198,36 +237,27 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 }
 
 func (m *manager) KillAll(ctx context.Context) error {
-	m.terminatePlatform()
-
 	m.mu.Lock()
-	procsList := make([]*proc, 0, len(m.procs))
+	m.closed = true
+	list := make([]*proc, 0, len(m.procs))
 	for _, p := range m.procs {
-		procsList = append(procsList, p)
+		list = append(list, p)
 	}
 	m.mu.Unlock()
-
 	var wg sync.WaitGroup
-	for _, p := range procsList {
+	errs := make(chan error, len(list))
+	for _, p := range list {
 		wg.Add(1)
-		go func(pr *proc) {
-			defer wg.Done()
-			_ = pr.Stop(ctx)
-		}(p)
+		go func() { defer wg.Done(); errs <- p.Stop(ctx) }()
 	}
-
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("procs: kill-all-canceled: %w", ctx.Err())
+	wg.Wait()
+	close(errs)
+	var result error
+	for err := range errs {
+		result = errors.Join(result, err)
 	}
+	m.terminatePlatform()
+	return result
 }
 
 func (p *proc) PID() int {
@@ -249,6 +279,8 @@ func (p *proc) ExitCode() int {
 }
 
 func (p *proc) Stop(ctx context.Context) error {
+	p.stopMu.Lock()
+	defer p.stopMu.Unlock()
 	select {
 	case <-p.done:
 		return nil
