@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,7 +17,8 @@ import (
 )
 
 type platformState struct {
-	job *winjob.JobObject
+	job  *winjob.JobObject
+	jobs *sync.Map
 }
 
 func newPlatformState() (platformState, error) {
@@ -25,7 +26,7 @@ func newPlatformState() (platformState, error) {
 	if err != nil {
 		return platformState{}, err
 	}
-	return platformState{job: job}, nil
+	return platformState{job: job, jobs: &sync.Map{}}, nil
 }
 
 func (m *manager) terminatePlatform() {
@@ -43,7 +44,37 @@ func (m *manager) setupCmd(cmd *exec.Cmd, s api.ProcSpec) error {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP
+	job, err := winjob.Create("", winjob.WithKillOnJobClose())
+	if err != nil {
+		return err
+	}
+	owned := &processJob{job: job}
+	m.platform.jobs.Store(cmd, owned)
+	cmd.Cancel = owned.terminate
 	return nil
+}
+
+type processJob struct {
+	mu  sync.Mutex
+	job *winjob.JobObject
+}
+
+func (j *processJob) terminate() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.job == nil {
+		return nil
+	}
+	return j.job.Terminate()
+}
+
+func (j *processJob) close() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.job != nil {
+		_ = j.job.Close()
+		j.job = nil
+	}
 }
 
 func (m *manager) startCmd(cmd *exec.Cmd, _ context.Context) error {
@@ -52,7 +83,12 @@ func (m *manager) startCmd(cmd *exec.Cmd, _ context.Context) error {
 
 func (m *manager) postStart(cmd *exec.Cmd) error {
 	if m.platform.job != nil && cmd.Process != nil {
-		return m.platform.job.Assign(cmd.Process)
+		if err := m.platform.job.Assign(cmd.Process); err != nil {
+			return err
+		}
+		if v, ok := m.platform.jobs.Load(cmd); ok {
+			return v.(*processJob).job.Assign(cmd.Process)
+		}
 	}
 	return nil
 }
@@ -64,18 +100,19 @@ func (p *proc) softStop() {
 }
 
 func (p *proc) hardKill() {
-	if p.pid > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		killCmd := exec.CommandContext(ctx, "taskkill", "/F", "/T", "/PID", strconv.Itoa(p.pid))
-		_ = killCmd.Run()
+	if p.cmd != nil && p.cmd.Cancel != nil {
+		_ = p.cmd.Cancel()
 	}
 	if p.cmd != nil && p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
 	}
 }
 
-func (m *manager) releaseCmd(_ *exec.Cmd) {}
+func (m *manager) releaseCmd(cmd *exec.Cmd) {
+	if v, ok := m.platform.jobs.LoadAndDelete(cmd); ok {
+		v.(*processJob).close()
+	}
+}
 
 func processStarted(_ context.Context, cmd *exec.Cmd) (time.Time, error) {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(cmd.Process.Pid))

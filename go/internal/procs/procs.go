@@ -32,7 +32,7 @@ type proc struct {
 	done     chan struct{}
 	mu       sync.Mutex
 	exitCode int
-	stopMu   sync.Mutex
+	stopOnce sync.Once
 }
 
 // New creates a new Procs manager.
@@ -59,6 +59,10 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 	if m.closed {
 		return nil, fmt.Errorf("procs: closed: manager stopped")
 	}
+	if len(m.procs) >= 64 {
+		return nil, fmt.Errorf("procs: limit: maximum 64 processes")
+	}
+
 	nonceBytes := make([]byte, 8)
 	if _, err := rand.Read(nonceBytes); err != nil {
 		return nil, fmt.Errorf("procs: nonce-failed: %w", err)
@@ -138,6 +142,7 @@ func (m *manager) Start(ctx context.Context, s api.ProcSpec) (api.Process, error
 	}
 
 	if err := m.startCmd(cmd, ctx); err != nil {
+		m.releaseCmd(cmd)
 		if stdoutCloser != nil {
 			_ = stdoutCloser.Close()
 		}
@@ -291,15 +296,17 @@ func (p *proc) ExitCode() int {
 }
 
 func (p *proc) Stop(ctx context.Context) error {
-	p.stopMu.Lock()
-	defer p.stopMu.Unlock()
 	select {
 	case <-p.done:
 		return nil
 	default:
 	}
 
-	p.softStop()
+	if ctx.Err() != nil {
+		p.hardKill()
+		return fmt.Errorf("procs: stop-canceled: %w", ctx.Err())
+	}
+	p.stopOnce.Do(p.softStop)
 
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
