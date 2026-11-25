@@ -2,5 +2,7 @@
 
 package platform
 
-// DefaultHome — заглушка до P5b.
-func (p *stubPlatform) DefaultHome() string { return "" }
+// DefaultHome returns the default home directory on Linux.
+func (p *stubPlatform) DefaultHome() string {
+	return "/var/lib/remoteagents3"
+}
