@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"syscall"
 	"time"
 
 	"remoteagents/internal/api"
@@ -552,6 +554,18 @@ func (a *Agent) handleExpose(body []byte) response {
 	}
 	exp, err := a.d.Fwd().Expose(req.Name, req.ServerPort, req.PCPort)
 	if err != nil {
+		// Match wrapped OS errors as well; validation errors retain HTTP 400.
+		var pathErr *os.PathError
+		var linkErr *os.LinkError
+		var syscallErr *os.SyscallError
+		var netErr *net.OpError
+		var errno syscall.Errno
+		if errors.As(err, &pathErr) || errors.As(err, &linkErr) ||
+			errors.As(err, &syscallErr) || errors.As(err, &netErr) ||
+			errors.As(err, &errno) || os.IsPermission(err) ||
+			os.IsExist(err) || os.IsNotExist(err) {
+			return failure(http.StatusConflict, err.Error())
+		}
 		return failure(400, err.Error())
 	}
 	if exp.Err != "" {
