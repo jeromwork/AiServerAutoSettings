@@ -8,13 +8,22 @@
          collect [--every 20]   (долгая: докачивает журнал ПК в ~/work/logs-in/lab/<ПК>/, живёт и после закрытия лаборатории)
   ra-lab expose <имя> <порт сервера> [--pc-port N]   открыть TCP-порт на localhost ПК; повтор меняет цель
   ra-lab unexpose <имя>                            снять проброс и удалить запись
+  ra-lab autoforward                              служба devports-auto: сама выкладывает dev-серверы на все ПК, страница http://localhost:8199
   ra-lab ports                                    слушатели сервера и действующие пробросы ПК
   ra-lab free-port [--from 8200] [--to 8999]        выбрать и зарезервировать порт на 10 минут
 Состояние: ~/.local/state/ra-lab/ (0700): <ПК>.json {port, token, version, rollback} (0600) и <ПК>.events (unix-сокет wait-up).
 Реестры exposed.json [{name, serverPort, pcPort, cwd, ts}] и reserved.json [{port, expires}]: атомарно, 0600, под flock.
 Токен агента никогда не печатается. Стандартная библиотека, Python 3.8+.
 """
-import argparse, base64, codecs, contextlib, datetime, fcntl, glob, hashlib, io, json, os, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, zipfile
+import argparse, http.server, re, base64, codecs, contextlib, datetime, fcntl, glob, hashlib, io, json, os, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, zipfile
+
+# Чёрный список автопроброса (не выкладывать): порты, части имени/командной строки процесса.
+NO_AUTO_PORTS = [22, 53, 443, 1080, 2053, 3306, 5432, 8199, 8444, 9222, 47831, 55432, 8384, 22000, 21027,
+                 range(13340, 13400),   # каналы Лаборатории
+                 range(32768, 65536)]   # эфемерные порты (VS Code, happier, отладка и пр. — не dev-серверы)
+NO_AUTO_PROCS = ['happier', 'chrome', 'chromium', 'syncthing', 'postgres', 'mysql', 'mariadb', 'sing-box', 'tailscale',
+                 '.vscode-server', 'code-', 'antigravity', 'ra_lab', 'sshd', 'docker']
+PAGE_PORT = 8199
 
 STATE = os.path.expanduser('~/.local/state/ra-lab')
 SIZE = 65536
@@ -279,32 +288,80 @@ def server_listeners():
     return sorted(rows, key=lambda row: (row['port'], row['address']))
 
 
+def pc_names():
+    return sorted(os.path.basename(p)[:-5] for p in glob.glob(os.path.join(state_dir(), '*.json')) if os.path.basename(p) not in REGISTRIES)
+
+
+def pc_online(only=None):
+    """-> [(состояние ПК, [проброшенное на ПК])] для ПК, чей канал ответил за 3 с; остальные пропускаем с предупреждением."""
+    res = []
+    for pc in [only] if only else pc_names():
+        try:
+            st = read_state(pc)
+            code, r = call(st, 'GET', '/exposed', timeout=3)
+            if code != 200 or not r.get('channel', True):
+                raise SystemExit('канал не готов')
+            res.append((st, r['exposed']))
+        except (SystemExit, OSError, ValueError, KeyError) as e:
+            print('ra-lab: предупреждение: ПК %s недоступен (%s), пропущен' % (pc, e), file=sys.stderr)
+    return res
+
+
+def place(name, server_port, want, pcs):
+    """Выложить name на все ПК одним номером порта: ПК вернул другой (занят) -> берём его и повторяем на всех. -> порт|None."""
+    pcs = list(pcs)
+    for _ in range(30):
+        ports = []
+        for st in list(pcs):
+            try:
+                ports.append(ok(st, 'POST', '/expose', {'name': name, 'serverPort': server_port, 'pcPort': want}, timeout=15)['pcPort'])
+            except SystemExit as e:
+                print('ra-lab: предупреждение: ПК %s: %s' % (st['pc'], e), file=sys.stderr)
+                pcs.remove(st)
+        if not ports:
+            return None
+        if set(ports) == {want}:
+            return want
+        want = max(ports)
+    return None
+
+
 def cmd_expose(a):
-    """Открыть порт сервера на localhost ПК; сохранить имя и напечатать URL."""
+    """Открыть порт сервера на localhost ВСЕХ подключённых ПК (одним номером); сохранить имя и напечатать URL."""
     try:
         if a.server_port not in {row['port'] for row in server_listeners()}:
             print('ra-lab: предупреждение: порт %d на сервере пока не слушается' % a.server_port, file=sys.stderr)
     except OSError as e:
         print('ra-lab: предупреждение: %s' % e, file=sys.stderr)
-    st = read_state(a.pc)
+    pcs = pc_online(a.pc)
+    if not pcs:
+        sys.exit('ra-lab: нет подключённых ПК')
     with registry_lock():
         rows = read_registry('exposed.json')
-        body = {'name': a.name, 'serverPort': a.server_port}
-        if a.pc_port is not None:
-            body['pcPort'] = a.pc_port
-        r = ok(st, 'POST', '/expose', body, timeout=15)
-        record = {'name': a.name, 'serverPort': a.server_port, 'pcPort': r['pcPort'],
+        old = next((row for row in rows if row['name'] == a.name), None)
+        want = a.pc_port or (old['pcPort'] if old else a.server_port)
+        port = place(a.name, a.server_port, want, [p[0] for p in pcs])
+        if port is None:
+            sys.exit('ra-lab: не удалось выложить %s' % a.name)
+        record = {'name': a.name, 'serverPort': a.server_port, 'pcPort': port,
                   'cwd': os.getcwd(), 'ts': datetime.datetime.now().astimezone().isoformat(timespec='seconds')}
-        write_registry('exposed.json', [row for row in rows if row['name'] != a.name] + [record])
-    print('http://localhost:%d' % r['pcPort'])
+        write_registry('exposed.json', [row for row in rows if row['name'] != a.name] + [record])  # ручной: без auto
+    print('http://localhost:%d' % port)
+
+
+def unexpose_all(name, only=None):
+    for st, _ in pc_online(only):
+        try:
+            call(st, 'POST', '/unexpose', {'name': name}, timeout=15)
+        except SystemExit:
+            pass
 
 
 def cmd_unexpose(a):
-    """Закрыть именованный проброс на ПК и удалить его из серверного реестра."""
-    st = read_state(a.pc)
+    """Закрыть именованный проброс на всех подключённых ПК и удалить его из серверного реестра."""
     with registry_lock():
         rows = read_registry('exposed.json')
-        ok(st, 'POST', '/unexpose', {'name': a.name}, timeout=15)
+        unexpose_all(a.name, a.pc)
         write_registry('exposed.json', [row for row in rows if row['name'] != a.name])
     print('снят: %s' % a.name)
 
@@ -362,6 +419,114 @@ def cmd_free_port(a):
             sys.exit('ra-lab: нет свободного порта в диапазоне %d–%d' % (a.port_from, a.port_to))
         write_registry('reserved.json', reserved + [{'port': port, 'expires': now + 600}])
     print(port)
+
+
+# --- автопроброс: dev-серверы сервера сразу на localhost всех ПК + страница-список ---
+PAGE = {'rows': []}
+
+
+def auto_candidates(blocked):
+    """{порт: (имя, процесс)} для слушающих dev-серверов пользователя вне чёрного списка."""
+    res = {}
+    for row in server_listeners():
+        host, port = row['address'].rsplit(':', 1)[0], row['port']
+        m = re.search(r'\("([^"]+)",pid=(\d+)', row['process'])
+        if host not in ('127.0.0.1', '0.0.0.0', '*', '[::]', '[::1]') or port < 1024 or port in blocked or not m:
+            continue
+        if any(port == b or (isinstance(b, range) and port in b) for b in NO_AUTO_PORTS):
+            continue
+        comm, pid = m.group(1), m.group(2)
+        try:
+            if os.stat('/proc/%s' % pid).st_uid != os.getuid():
+                continue
+            cmdline = open('/proc/%s/cmdline' % pid, 'rb').read().replace(b'\0', b' ').decode('utf-8', 'replace').lower()
+            cwd = os.readlink('/proc/%s/cwd' % pid)
+        except OSError:
+            continue
+        if any(x in comm.lower() or x in cmdline for x in NO_AUTO_PROCS):
+            continue
+        res.setdefault(port, ('%s-%d' % (os.path.basename(cwd.rstrip('/')) or comm, port), comm, cwd))
+    return res
+
+
+def autoforward_step(miss):
+    pcs = pc_online()
+    if not pcs:
+        return
+    sts = [p[0] for p in pcs]
+    blocked = {st['port'] for st in sts}
+    listening = {r['port']: r['process'] for r in server_listeners()}
+    cand = auto_candidates(blocked)
+    with registry_lock():
+        rows = read_registry('exposed.json')
+        known = {r['serverPort'] for r in rows}
+        for port, (name, comm, cwd) in sorted(cand.items()):
+            if port in known:
+                continue
+            got = place(name, port, port, sts)
+            if got:
+                rows.append({'name': name, 'serverPort': port, 'pcPort': got, 'cwd': cwd, 'proc': comm, 'auto': True,
+                             'ts': datetime.datetime.now().astimezone().isoformat(timespec='seconds')})
+                print('autoforward: +%s -> localhost:%d' % (name, got), flush=True)
+        if not any(r['name'] == 'devports' for r in rows):
+            rows.append({'name': 'devports', 'serverPort': PAGE_PORT, 'pcPort': PAGE_PORT, 'cwd': STATE, 'proc': 'ra-lab autoforward'})
+        keep = []
+        for r in rows:
+            if r.get('auto') and r['serverPort'] not in listening:
+                miss[r['name']] = miss.get(r['name'], 0) + 1
+                if miss[r['name']] >= 3:  # 3 проверки подряд (~6 с): порт ушёл
+                    unexpose_all(r['name'])
+                    print('autoforward: -%s' % r['name'], flush=True)
+                    continue
+            else:
+                miss.pop(r['name'], None)
+            keep.append(r)
+        # ПК подключился позже / потерял проброс: догнать всё из реестра тем же портом
+        for r in keep:
+            for st, exp in pcs:
+                have = {e['name']: e for e in exp}.get(r['name'])
+                if not have or have['pcPort'] != r['pcPort'] or have['serverPort'] != r['serverPort']:
+                    got = place(r['name'], r['serverPort'], r['pcPort'], sts)
+                    if got:
+                        r['pcPort'] = got
+                    break
+        write_registry('exposed.json', keep)
+        PAGE['rows'] = [{'name': r['name'], 'port': r['pcPort'], 'proc': r.get('proc') or ((re.search(r'"([^"]+)"', listening.get(r['serverPort']) or '') or [0, '-'])[1]),
+                         'auto': bool(r.get('auto')), 'pcs': [st['pc'] for st, exp in pcs if any(e['name'] == r['name'] for e in exp)]}
+                        for r in keep]
+
+
+class PageHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        import html
+        trs = ''.join('<tr><td>%s</td><td>%d</td><td><a href="http://localhost:%d">http://localhost:%d</a></td><td>%s</td><td>%s</td><td>%s</td></tr>' % (
+            html.escape(r['name']), r['port'], r['port'], r['port'], html.escape(r['proc']), 'авто' if r['auto'] else 'вручную',
+            html.escape(', '.join(r['pcs']) or '-')) for r in sorted(PAGE['rows'], key=lambda r: r['port']))
+        body = ('<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=5><title>devports</title>'
+                '<style>body{font:14px sans-serif;margin:2em}td,th{padding:4px 12px;border-bottom:1px solid #ccc;text-align:left}</style>'
+                '<h2>Dev-серверы на localhost</h2><table><tr><th>имя<th>порт<th>ссылка<th>процесс<th>как<th>открыто на ПК</tr>%s</table>' % trs).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+def cmd_autoforward(a):
+    """Служба: раз в ~2 с выкладывать новые dev-серверы на все ПК, снимать пропавшие; страница-список на 127.0.0.1:8199."""
+    http.server.ThreadingHTTPServer.allow_reuse_address = True
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', PAGE_PORT), PageHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    miss = {}
+    while True:
+        try:
+            autoforward_step(miss)
+        except (SystemExit, Exception) as e:
+            print('autoforward: ошибка: %s' % e, flush=True)
+        time.sleep(a.every)
 
 
 def cmd_status(a):
@@ -582,6 +747,7 @@ def main():
     add('unexpose', cmd_unexpose, P('name', type=name_arg))
     add('ports', cmd_ports)
     add('free-port', cmd_free_port, P('--from', dest='port_from', type=port_arg, default=8200), P('--to', dest='port_to', type=port_arg, default=8999))
+    add('autoforward', cmd_autoforward, P('--every', type=float, default=2))
     add('collect', cmd_collect, P('--every', type=int, default=20))
     add('push', cmd_push, P('--wait', action='store_true'), P('--deadline', type=int, default=90))
     a = ap.parse_args()
