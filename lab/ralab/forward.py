@@ -4,7 +4,7 @@ http://127.0.0.1:<lanProxy.port>/lan.pac, владелец подставляе�
 канал - сокеты закрываются, потоки завершаются сами.
 Конфиг (lab config.json главнее): forwards [{listen,to:"host:port"}], lanProxy {port}. Без forwards берётся happier.localWeb установленной программы.
 """
-import fnmatch, ipaddress, json, os, re, socket, struct, tempfile, threading
+import fnmatch, ipaddress, json, os, re, socket, struct, tempfile, threading, time
 
 from . import journal
 from .bus import bus
@@ -198,16 +198,30 @@ class Forward:
         if not isinstance(fw, list):
             web = ((cfg.get('profile') or {}).get('happier') or cfg.get('happier') or {}).get('localWeb') or {}
             fw = [{'listen': web.get('port'), 'to': '127.0.0.1:%s' % web.get('serverPort')}] if web.get('enabled') and web.get('port') and web.get('serverPort') else []
+        self.static = []
         for f in fw[:16]:
             try:
                 host, port = str(f['to']).rsplit(':', 1)
-                self._listen('forward:%d' % int(f['listen']), int(f['listen']), lambda c, h=host, p=int(port): self._forward(c, h, p))
+                h = lambda c, h=host, p=int(port): self._forward(c, h, p)
+                self.static.append(('forward:%d' % int(f['listen']), int(f['listen']), h))
+                self._listen('forward:%d' % int(f['listen']), int(f['listen']), h)
             except (KeyError, ValueError, TypeError):
                 journal.log('forward', 'bad.config', {'item': f}, 'пропущен: нужны listen и to=host:port')
         pp = (cfg.get('lanProxy') or {}).get('port') or PROXY_PORT
-        self._listen('lanProxy', int(pp), lambda c: self._proxy(c, int(pp)))
+        ph = lambda c: self._proxy(c, int(pp))
+        self.static.append(('lanProxy', int(pp), ph))
+        self._listen('lanProxy', int(pp), ph)
+        threading.Thread(target=self._retry_static, daemon=True).start()
         if self.socks:
             self._restore_exposed()
+
+    def _retry_static(self):
+        # порт мог быть временно закрыт Windows (WinError 10013: Hyper-V/WSL) — открываем повторно, пока не получится
+        while True:
+            time.sleep(10)
+            for name, port, h in list(getattr(self, 'static', [])):
+                if not self.listeners.get(name, {}).get('ok'):
+                    self._listen(name, port, h)
 
     def _load_exposed(self):
         try:
