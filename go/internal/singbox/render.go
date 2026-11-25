@@ -142,11 +142,11 @@ func wsOutbound(server, domain any, port int, uuid, path any, insecure, early bo
 func BuildPaths(cfg *api.Config, proxyPorts []int, vpnInterface string) ([]api.ChannelPath, map[string]string) {
 	paths := []api.ChannelPath{}
 	miss := map[string]string{}
-	if cfg == nil || len(cfg.Paths.Channel) == 0 {
+	if cfg == nil {
 		return paths, miss
 	}
 	var channel object
-	if json.Unmarshal(cfg.Paths.Channel, &channel) != nil {
+	if len(cfg.Paths.Channel) > 0 && json.Unmarshal(cfg.Paths.Channel, &channel) != nil {
 		miss["channel"] = "неверный JSON"
 		return paths, miss
 	}
