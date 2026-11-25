@@ -2,8 +2,10 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -154,16 +156,23 @@ func (a *Agent) handleExec(r *http.Request, body []byte) response {
 			a.execMu.Unlock()
 			return failure(429, "слишком много запущенных процессов")
 		}
+		a.execs[exitedID].release()
 		delete(a.execs, exitedID)
 	}
 
-	proc, err := a.d.Shell.Start(a.ctx, api.ExecReq{
+	// Detached commands live until Agent.Close, not until the HTTP response.
+	// BaseContext is a.ctx, so removing request cancellation retains agent values.
+	execCtx, cancelExec := context.WithCancel(context.WithoutCancel(r.Context()))
+	stopExec := context.AfterFunc(a.ctx, cancelExec) //nolint:contextcheck // Agent shutdown must cancel commands independently of the HTTP request.
+	proc, err := a.d.Shell.Start(execCtx, api.ExecReq{
 		Cmd:   req.Cmd,
 		Shell: req.Shell,
 		Cwd:   req.Cwd,
 		Wait:  req.Wait,
 	})
 	if err != nil {
+		stopExec()
+		cancelExec()
 		a.execMu.Unlock()
 		return response{
 			code: http.StatusInternalServerError,
@@ -174,14 +183,10 @@ func (a *Agent) handleExec(r *http.Request, body []byte) response {
 		}
 	}
 	eid := proc.ID()
-	a.execs[eid] = execution{id: eid, cmd: req.Cmd, proc: proc}
+	a.execs[eid] = execution{id: eid, cmd: req.Cmd, proc: proc, release: func() { stopExec(); cancelExec() }}
 	a.execMu.Unlock()
 
-	cmdTrunc := req.Cmd
-	if len(cmdTrunc) > 500 {
-		cmdTrunc = cmdTrunc[:500]
-	}
-	a.d.Log.Info("exec", "id", eid, "shell", req.Shell, "cmd", cmdTrunc, "cwd", req.Cwd)
+	a.d.Log.Info("exec", "id", eid)
 
 	if !req.Wait {
 		return ok(map[string]any{"id": eid})
@@ -357,6 +362,10 @@ func (a *Agent) handleWrite(body []byte) response {
 	if req.Offset < 0 {
 		return failure(400, "agent: offset: must be nonnegative")
 	}
+	req.Path, err = filepath.Abs(req.Path)
+	if err != nil {
+		return failure(400, "agent: path: invalid path")
+	}
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
 	part := req.Path + ".ralab-part"
@@ -379,7 +388,19 @@ func (a *Agent) handleWrite(body []byte) response {
 				return failure(500, err.Error())
 			}
 		}
+		if _, err := os.Lstat(part); err == nil || !os.IsNotExist(err) {
+			return failure(409, "agent: upload: part already exists or is inaccessible")
+		}
+		a.parts[part] = struct{}{}
+		if err := a.saveParts(); err != nil {
+			delete(a.parts, part)
+			return failure(500, err.Error())
+		}
 		f, err = os.OpenFile(part, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			delete(a.parts, part)
+			err = errors.Join(err, a.saveParts())
+		}
 	} else {
 		f, err = os.OpenFile(part, os.O_WRONLY, 0600)
 		if err == nil {
@@ -407,6 +428,9 @@ func (a *Agent) handleWrite(body []byte) response {
 			return failure(500, err.Error())
 		}
 		delete(a.parts, part)
+		if err := a.saveParts(); err != nil {
+			return failure(500, err.Error())
+		}
 	}
 
 	return ok(map[string]any{

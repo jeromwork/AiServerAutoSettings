@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -48,9 +49,10 @@ type Agent struct {
 }
 
 type execution struct {
-	id   string
-	cmd  string
-	proc api.ExecProc
+	id      string
+	cmd     string
+	proc    api.ExecProc
+	release func()
 }
 
 var _ api.AgentHost = (*Agent)(nil)
@@ -72,7 +74,7 @@ func New(d api.AgentDeps) (*Agent, error) {
 		d.MaxDev = devMax
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Agent{
+	a := &Agent{
 		d:        d,
 		token:    token,
 		instance: hex.EncodeToString(secret[32:]),
@@ -83,7 +85,35 @@ func New(d api.AgentDeps) (*Agent, error) {
 		execs:    make(map[string]execution),
 		parts:    make(map[string]struct{}),
 		started:  time.Now(),
-	}, nil
+	}
+	// AgentDeps has no Traces dependency. Keep a private write-ahead journal
+	// so startup can remove uploads interrupted by a crash, including outside Home.
+	data, err := os.ReadFile(a.partsJournal())
+	if err != nil && !os.IsNotExist(err) {
+		cancel()
+		return nil, fmt.Errorf("agent: uploads: %w", err)
+	}
+	if err == nil {
+		if err = json.Unmarshal(data, &a.parts); err == nil {
+			if a.parts == nil {
+				a.parts = make(map[string]struct{})
+			}
+			for part := range a.parts {
+				if !filepath.IsAbs(part) || !strings.HasSuffix(part, ".ralab-part") {
+					err = errors.New("invalid upload journal path")
+					break
+				}
+			}
+			if err == nil {
+				err = a.cleanParts()
+			}
+		}
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("agent: uploads: %w", err)
+		}
+	}
+	return a, nil
 }
 
 func (a *Agent) Token() string { return a.token }
@@ -157,6 +187,7 @@ func (a *Agent) Close() error {
 
 	a.execMu.Lock()
 	for _, e := range a.execs {
+		e.release()
 		if !e.proc.Exited() {
 			if err := e.proc.Kill(); err != nil {
 				errs = append(errs, err)
@@ -178,10 +209,44 @@ func (a *Agent) cleanParts() error {
 	for part := range a.parts {
 		if err := os.Remove(part); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, err)
+			continue
 		}
 		delete(a.parts, part)
 	}
+	if err := a.saveParts(); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
+}
+
+func (a *Agent) partsJournal() string {
+	return filepath.Join(a.d.Paths.State, "agent-parts.json")
+}
+
+// saveParts commits ownership before creating a part. A failed commit must
+// prevent the upload; a completed rename/removal makes a stale entry harmless.
+func (a *Agent) saveParts() error {
+	if err := os.MkdirAll(a.d.Paths.State, 0700); err != nil {
+		return err
+	}
+	data, err := json.Marshal(a.parts)
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(a.d.Paths.State, "agent-parts-*.ralab-tmp")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(f.Name()) }()
+	_, writeErr := f.Write(data)
+	if writeErr == nil {
+		writeErr = f.Sync()
+	}
+	closeErr := f.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), a.partsJournal())
 }
 
 type response struct {
@@ -285,6 +350,18 @@ func (a *Agent) handle(w http.ResponseWriter, r *http.Request) response {
 				return failure(413, "тело слишком большое")
 			}
 			return failure(400, "agent: body: incomplete request")
+		}
+	}
+	if route == "exec" {
+		var req struct {
+			Wait bool `json:"wait"`
+		}
+		if json.Unmarshal(body, &req) == nil && req.Wait {
+			rc := http.NewResponseController(w)
+			if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+				return failure(500, "agent: deadline: cannot wait for execution")
+			}
+			defer func() { _ = rc.SetWriteDeadline(time.Now().Add(35 * time.Second)) }()
 		}
 	}
 	return a.dispatch(r, route, body)

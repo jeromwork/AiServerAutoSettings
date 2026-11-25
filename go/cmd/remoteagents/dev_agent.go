@@ -185,7 +185,8 @@ func (s *devFakeShell) KillAll() error {
 }
 
 func devAgent(ctx context.Context, args []string) int {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agent: listen: %v\n", err)
 		return 1
@@ -300,7 +301,7 @@ func devAgent(ctx context.Context, args []string) int {
 	fmt.Printf("agent dev driver OK: /status -> 200 with platform=%v, /exec -> out contains hi, auth -> 403, /code -> 501\n", st["platform"])
 
 	if len(args) > 0 && args[0] == "listen" {
-		fmt.Printf("agent listening on %s (token: %s)\n", baseURL, ag.Token())
+		fmt.Printf("agent listening on %s\n", baseURL)
 		<-ctx.Done()
 	}
 
