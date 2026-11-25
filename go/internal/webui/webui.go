@@ -1,5 +1,5 @@
 // Package webui mirrors v2 webui.py: local control page on 127.0.0.1:<port>/?t=<token>.
-// Token and Host are checked on every request. Status changes arrive from the bus over SSE.
+// Token and Host are checked on every request. Bus events notify the page over SSE to fetch JSON status.
 package webui
 
 import (
@@ -49,14 +49,21 @@ pre{background:#f4f4f4;padding:8px;white-space:pre-wrap}.err{color:#b00020}.ok{c
 <script>
 var T="__T__",S=null;
 function post(p,d){var b=new URLSearchParams(d||{});b.set("t",T);return fetch(p+"?t="+T,{method:"POST",body:b}).then(function(r){return r.json()})}
-function show(s){S=s;document.getElementById("ver").textContent=s.version;document.getElementById("lines").textContent=s.lines.join("\n");
-var c=s.config,e=document.getElementById("cfg");
-if(c.has){e.textContent="Конфиг: "+c.name+", сервер "+c.server+", от "+c.time}else{e.innerHTML='<div class="big">Вставьте конфиг, который вам прислали</div>'}
-if(c.has){document.getElementById("other").style.display="";document.getElementById("revert").style.display=""}
-else{document.getElementById("other").style.display="none";document.getElementById("revert").style.display="none";document.getElementById("cform").style.display=""}
-document.getElementById("ctl").textContent=s.control?"разрешено":"запрещено";
-document.getElementById("ctlb").textContent=s.control?"Запретить":"Разрешить";
-document.getElementById("auto").checked=s.autostart}
+function set(id,key,value){var e=document.getElementById(id);if(e[key]!==value)e[key]=value}
+function display(id,value){var e=document.getElementById(id);if(e.style.display!==value)e.style.display=value}
+function show(s){S=s;set("ver","textContent",s.version);set("lines","textContent",s.lines.join("\n"));
+var c=s.config;
+set("cfg","textContent",c.has?"Конфиг: "+c.name+", сервер "+c.server+", от "+c.time:"Вставьте конфиг, который вам прислали");
+set("cfg","className",c.has?"":"big");
+display("other",c.has?"":"none");display("revert",c.has?"":"none");
+if(!c.has)display("cform","");
+set("ctl","textContent",s.control?"разрешено":"запрещено");
+set("ctlb","textContent",s.control?"Запретить":"Разрешить");
+set("auto","checked",s.autostart)}
+var loading=false,pending=false;
+async function refresh(){pending=true;if(loading)return;loading=true;
+try{while(pending){pending=false;var r=await fetch("/state?t="+T);if(r.ok)show(await r.json())}}
+catch(e){}finally{loading=false}}
 document.getElementById("other").onclick=function(){document.getElementById("cform").style.display=""};
 document.getElementById("revert").onclick=function(){post("/revert").then(function(r){msg(r)})};
 document.getElementById("ctlb").onclick=function(){if(S)post("/control",{on:S.control?"0":"1"})};
@@ -64,7 +71,7 @@ document.getElementById("auto").onchange=function(){var x=this.checked;post("/au
 document.getElementById("chk").onclick=function(){document.getElementById("cres").textContent="Проверяю...";post("/check").then(function(r){document.getElementById("cres").textContent=r.items.length?r.items.join("\n"):"Чисто"})};
 function msg(r){var m=document.getElementById("cmsg");m.className=r.ok?"ok":"err";m.textContent=r.ok?"Конфиг принят, перезапускаю…":(r.problems||[]).join("\n");m.style.whiteSpace="pre-wrap"}
 document.getElementById("cform").onsubmit=function(e){e.preventDefault();var f=new FormData(this),d={};f.forEach(function(v,k){d[k]=v});post("/config",d).then(msg);return false};
-var events=new EventSource("/events?t="+T);events.onmessage=function(e){show(JSON.parse(e.data))};
+var events=new EventSource("/events?t="+T);events.onmessage=refresh;
 </script></body></html>`
 
 // UI is the web page server.
@@ -210,8 +217,7 @@ func (u *UI) stream(w http.ResponseWriter, r *http.Request) {
 		u.mu.Lock()
 		changed := u.changed
 		u.mu.Unlock()
-		data, _ := json.Marshal(u.state())
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+		if _, err := io.WriteString(w, "data: {}\n\n"); err != nil {
 			return
 		}
 		if err := http.NewResponseController(w).Flush(); err != nil {
