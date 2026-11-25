@@ -164,7 +164,9 @@ func windowsPS(ctx context.Context, script string) (string, error) {
 	for i, unit := range units {
 		binary.LittleEndian.PutUint16(buf[2*i:], unit)
 	}
-	out, err := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.StdEncoding.EncodeToString(buf)).Output()
+	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.StdEncoding.EncodeToString(buf))
+	cmd.WaitDelay = 100 * time.Millisecond
+	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("cleanup: powershell: %w", err)
 	}
@@ -175,48 +177,56 @@ func windowsQuote(value string) string { return "'" + strings.ReplaceAll(value, 
 
 var windowsOwnedName = regexp.MustCompile(`^ra3-[0-9a-f]{8}-(vpn|lan|[A-Za-z0-9_.-]+)$`)
 
-func windowsAdapterQuery(name string) (string, error) {
+// Enumerate first: cmdlet selectors can interpret names as wildcard patterns.
+func windowsQuery(kind, name string) (string, error) {
 	if !windowsOwnedName.MatchString(name) {
-		return "", fmt.Errorf("cleanup: ownership: invalid adapter name")
+		return "", fmt.Errorf("cleanup: ownership: invalid %s name", kind)
 	}
-	return "$a=@(Get-NetAdapter -IncludeHidden | Where-Object { $_.Name -ceq " + windowsQuote(name) + " }); " +
-		"if ($a.Count -gt 1) { throw 'ambiguous adapter' }; ", nil
+	command, field := "Get-NetAdapter -IncludeHidden", "Name"
+	switch kind {
+	case "route":
+		command, field = "Get-NetRoute", "InterfaceAlias"
+	case "firewall":
+		command, field = "Get-NetFirewallRule", "DisplayName"
+	}
+	return "$r=@(" + command + " | Where-Object { $_." + field + " -ceq " + windowsQuote(name) + " }); ", nil
 }
 
-func (s *windowsSteps) checkAdapter(ctx context.Context, name string) bool {
-	query, err := windowsAdapterQuery(name)
+func windowsStep(ctx context.Context, kind, name, dest, action string) (string, error) {
+	query, err := windowsQuery(kind, name)
 	if err != nil {
-		return true
+		return "", err
 	}
-	out, err := windowsPS(ctx, query+"if ($a.Count) { 'present' }")
+	if kind == "route" {
+		if dest == "" {
+			return "", fmt.Errorf("cleanup: ownership: missing route destination")
+		}
+		query += "$r=@($r | Where-Object { $_.DestinationPrefix -ceq " + windowsQuote(dest) + " }); "
+	}
+	return windowsPS(ctx, query+action)
+}
+
+func windowsPresent(ctx context.Context, kind, name, dest string) bool {
+	out, err := windowsStep(ctx, kind, name, dest, "if ($r.Count) { 'present' }")
 	return err != nil || out != ""
 }
 
+func (s *windowsSteps) checkAdapter(ctx context.Context, name string) bool {
+	return windowsPresent(ctx, "adapter", name, "")
+}
+
 func (s *windowsSteps) removeAdapter(ctx context.Context, name string) error {
-	query, err := windowsAdapterQuery(name)
+	// Bound retries in one child; CommandContext cancels its waits too.
+	query, err := windowsQuery("adapter", name)
 	if err != nil {
 		return err
 	}
-	for attempt := 0; attempt <= 3; attempt++ {
-		out, err := windowsPS(ctx, query+"if ($a.Count) { if ($a[0].Status -eq 'Up') { 'up' } else { 'down' } }")
-		if err != nil || out == "" {
-			return err
-		}
-		if out != "up" || attempt == 3 {
-			break
-		}
-		timer := time.NewTimer(2 * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
-	// Requery immediately before deletion, and resolve the exact PnP ID only
-	// from the adapter whose full friendly name we just checked.
-	_, err = windowsPS(ctx, query+`if ($a.Count) {
- $id=$a[0].PNPDeviceID; if (-not $id) { throw 'missing PnP identity' };
+	query += "if ($r.Count -gt 1) { throw 'ambiguous adapter' }; "
+	_, err = windowsPS(ctx, `for ($i=0; $i -le 3; $i++) { `+query+`
+ if (-not $r.Count) { return };
+ if ($r[0].Status -ne 'Up' -or $i -eq 3) { break }; Start-Sleep -Seconds 2
+}; `+query+`if ($r.Count) {
+ $id=$r[0].PNPDeviceID; if (-not $id) { throw 'missing PnP identity' };
  $p=Get-PnpDevice -InstanceId $id;
  if ($p.FriendlyName -cne `+windowsQuote(name)+`) { throw 'adapter identity changed' };
  & pnputil.exe /remove-device $id;
@@ -225,62 +235,27 @@ func (s *windowsSteps) removeAdapter(ctx context.Context, name string) error {
 	return err
 }
 
-func windowsRouteQuery(dest, iface string) (string, error) {
-	if !windowsOwnedName.MatchString(iface) || dest == "" {
-		return "", fmt.Errorf("cleanup: ownership: invalid route identity")
-	}
-	// Enumerate then compare exactly: cmdlet parameters may accept wildcards.
-	return "$r=@(Get-NetRoute | Where-Object { $_.DestinationPrefix -ceq " + windowsQuote(dest) +
-		" -and $_.InterfaceAlias -ceq " + windowsQuote(iface) + " }); ", nil
-}
-
 func (s *windowsSteps) removeRoute(ctx context.Context, dest, iface string) error {
-	query, err := windowsRouteQuery(dest, iface)
-	if err != nil {
-		return err
-	}
-	_, err = windowsPS(ctx, query+"$r | Remove-NetRoute -Confirm:$false")
+	_, err := windowsStep(ctx, "route", iface, dest, "$r | Remove-NetRoute -Confirm:$false")
 	return err
 }
 
 func (s *windowsSteps) checkRoute(ctx context.Context, dest, iface string) bool {
-	query, err := windowsRouteQuery(dest, iface)
-	if err != nil {
-		return true
-	}
-	out, err := windowsPS(ctx, query+"if ($r.Count) { 'present' }")
-	return err != nil || out != ""
+	return windowsPresent(ctx, "route", iface, dest)
 }
 
 func (s *windowsSteps) removeRule(_ context.Context, _, _ string) error {
-	// The dispatcher passes Linux table/prio, not the Windows rule's name.
+	// run.go passes Linux table/prio, not the Windows rule's name.
 	return fmt.Errorf("cleanup: rule: Windows rule name unavailable; rule preserved")
 }
 
 func (s *windowsSteps) checkRule(_ context.Context, _, _ string) bool { return true }
 
-func windowsFirewallQuery(name string) (string, error) {
-	if !windowsOwnedName.MatchString(name) {
-		return "", fmt.Errorf("cleanup: ownership: invalid firewall name")
-	}
-	return "$r=@(Get-NetFirewallRule | Where-Object { $_.DisplayName -ceq " + windowsQuote(name) + " }); ", nil
-}
-
 func (s *windowsSteps) removeFirewall(ctx context.Context, name string) error {
-	query, err := windowsFirewallQuery(name)
-	if err != nil {
-		return err
-	}
-	// Delete the selected objects, rather than interpreting the name as a glob.
-	_, err = windowsPS(ctx, query+"$r | Remove-NetFirewallRule")
+	_, err := windowsStep(ctx, "firewall", name, "", "$r | Remove-NetFirewallRule")
 	return err
 }
 
 func (s *windowsSteps) checkFirewall(ctx context.Context, name string) bool {
-	query, err := windowsFirewallQuery(name)
-	if err != nil {
-		return true
-	}
-	out, err := windowsPS(ctx, query+"if ($r.Count) { 'present' }")
-	return err != nil || out != ""
+	return windowsPresent(ctx, "firewall", name, "")
 }
