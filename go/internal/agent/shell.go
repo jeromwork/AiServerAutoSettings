@@ -68,6 +68,13 @@ func (s sink) Write(p []byte) (int, error) {
 
 func isCmd(shell string) bool { return runtime.GOOS == "windows" && shell == "cmd" }
 
+func defaultShell() string {
+	if runtime.GOOS == "windows" {
+		return "powershell"
+	}
+	return "/bin/sh"
+}
+
 // buildCommand: Windows cmd — одна командная строка; powershell — -EncodedCommand (UTF-16LE base64); иначе /bin/sh -c.
 func buildCommand(cmd, shell string) (path string, args []string, line string) {
 	if runtime.GOOS != "windows" {

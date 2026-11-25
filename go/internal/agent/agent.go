@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -98,7 +99,12 @@ func New(d api.AgentDeps) (*Agent, error) {
 func (a *Agent) Token() string { return a.token }
 
 // Serve обслуживает слушателя, пока не Close.
-func (a *Agent) Serve(l net.Listener) { _ = a.srv.Serve(l) }
+func (a *Agent) Serve(l net.Listener) {
+	a.once.Do(func() {
+		a.d.Log.Info("agent.ready", "address", l.Addr().String(), "os", runtime.GOOS, "arch", runtime.GOARCH)
+	})
+	_ = a.srv.Serve(l)
+}
 
 func (a *Agent) Close() error {
 	_ = a.shell.KillAll()
@@ -244,7 +250,12 @@ func oserr(err error) string {
 // --- ручки ---
 
 func (a *Agent) rStatus(*http.Request, url.Values, []byte) result {
-	return result{code: 200, obj: a.d.Status()}
+	st := map[string]any{}
+	for k, v := range a.d.Status() {
+		st[k] = v
+	}
+	st["os"], st["arch"] = runtime.GOOS, runtime.GOARCH
+	return result{code: 200, obj: st}
 }
 
 func (a *Agent) rLog(_ *http.Request, q url.Values, _ []byte) result {
@@ -270,7 +281,7 @@ func (a *Agent) rExec(r *http.Request, _ url.Values, body []byte) result {
 		return result{code: 400, obj: errObj("нет cmd")}
 	}
 	if sh == "" {
-		sh = "powershell"
+		sh = defaultShell()
 	}
 	cwd := str(d["cwd"])
 	if cwd == "" {

@@ -32,6 +32,7 @@ const (
 	maxBinary   = 100 << 20 // v2 MAX_SIZE
 	maxMetadata = 1 << 20
 	namespace   = "ra3-release" // sshsig namespace of checksums.txt.sig
+	stagePrefix = ".stage-"     // cannot match VersionRe; never a version slot
 )
 
 var (
@@ -326,20 +327,37 @@ func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 		_ = os.Remove(candidate)
 		return fail("candidate", "does not start or does not report its version")
 	}
-	final, tmp := filepath.Join(u.p.Versions, version), filepath.Join(u.p.Versions, version+".tmp")
-	_ = os.RemoveAll(tmp)
-	if err := os.MkdirAll(tmp, 0o700); err != nil {
-		return fail("write", err.Error())
-	}
-	if _, err := os.Stat(final); err == nil { // the same version is already unpacked
-		_ = os.RemoveAll(tmp)
+	final := filepath.Join(u.p.Versions, version)
+	if _, err := os.Stat(final); err == nil {
+		old, err := fileHash(filepath.Join(final, u.exeName()))
+		if err != nil {
+			return fail("slot", err.Error())
+		}
+		got, err := fileHash(candidate)
+		if err != nil {
+			return fail("candidate", err.Error())
+		}
+		if old != got {
+			return fail("version", "slot already exists with different binary")
+		}
 		_ = os.Remove(candidate)
-	} else if err := os.Rename(candidate, filepath.Join(tmp, u.exeName())); err != nil {
-		_ = os.RemoveAll(tmp)
+	} else if !os.IsNotExist(err) {
 		return fail("write", err.Error())
-	} else if err := os.Rename(tmp, final); err != nil {
-		_ = os.RemoveAll(tmp)
-		return fail("write", err.Error())
+	} else {
+		if err := os.MkdirAll(u.p.Versions, 0o700); err != nil {
+			return fail("write", err.Error())
+		}
+		tmp, err := os.MkdirTemp(u.p.Versions, stagePrefix)
+		if err != nil {
+			return fail("write", err.Error())
+		}
+		defer os.RemoveAll(tmp)
+		if err := os.Rename(candidate, filepath.Join(tmp, u.exeName())); err != nil {
+			return fail("write", err.Error())
+		}
+		if err := os.Rename(tmp, final); err != nil {
+			return fail("write", err.Error())
+		}
 	}
 	b, _ := json.Marshal(map[string]string{"dir": version})
 	pending := filepath.Join(u.p.Versions, "pending.json")
@@ -356,7 +374,19 @@ func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 	return nil
 }
 
-// prune is v2 _prune: keep the new slot and everything named in state.json, delete *.tmp, then keep at most 5 slots (newest first).
+func fileHash(path string) ([sha256.Size]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	_, err = io.Copy(h, f)
+	return [sha256.Size]byte(h.Sum(nil)), err
+}
+
+// prune keeps the new slot and everything named in state.json, removes abandoned
+// staging directories, then keeps at most 5 slots (newest first).
 func (u *updater) prune(keep string) {
 	protect := map[string]bool{keep: true}
 	if b, err := os.ReadFile(filepath.Join(u.p.Versions, "state.json")); err == nil {
@@ -383,9 +413,11 @@ func (u *updater) prune(keep string) {
 			continue
 		}
 		switch n := e.Name(); {
-		case strings.HasSuffix(n, ".tmp"):
+		case protect[n]:
+			continue
+		case strings.HasPrefix(n, stagePrefix):
 			_ = os.RemoveAll(filepath.Join(u.p.Versions, n))
-		case !protect[n]:
+		case versionRe.MatchString(n):
 			if fi, err := e.Info(); err == nil {
 				ours = append(ours, slot{n, fi.ModTime()})
 			}
