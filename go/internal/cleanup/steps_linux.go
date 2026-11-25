@@ -35,7 +35,19 @@ func (s *linuxSteps) removeProcess(ctx context.Context, t api.Trace) error {
 	if err != nil || !matches {
 		return err
 	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+	// Only a dedicated group led by the verified process belongs to this trace.
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil {
+		return err
+	}
+	if pgid != pid {
+		return fmt.Errorf("process: refusing non-isolated process group")
+	}
+	identity, err := groupLeaderIdentity(ctx, pid)
+	if err != nil {
+		return err
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
 		return err
 	}
 	timer := time.NewTimer(500 * time.Millisecond)
@@ -44,26 +56,36 @@ func (s *linuxSteps) removeProcess(ctx context.Context, t api.Trace) error {
 	case <-ctx.Done():
 	case <-timer.C:
 	}
-	matches, err = processMatches(ctx, t, pid)
-	if err != nil || !matches {
-		return err
-	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-		return err
-	}
-	for i := 0; i < 20; i++ {
-		matches, err = processMatches(ctx, t, pid)
-		if err != nil || !matches {
-			return err
+	// The leader may have exited on TERM while its children remain in the group.
+	// If the PID was reused, do not signal the new process's group.
+	if err := syscall.Kill(pid, 0); err == nil {
+		current, identityErr := groupLeaderIdentity(ctx, pid)
+		if identityErr != nil {
+			return identityErr
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(25 * time.Millisecond):
+		if current != identity {
+			return fmt.Errorf("process: leader identity changed; group preserved")
 		}
 	}
-	return fmt.Errorf("process: still alive after kill")
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		return err
+	}
+	return nil
 }
+
+// Start ticks remain readable for a zombie leader until it is reaped.
+func groupLeaderIdentity(_ context.Context, pid int) (string, error) {
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(stat)[strings.LastIndex(string(stat), ")")+1:])
+	if len(fields) < 20 {
+		return "", fmt.Errorf("process: invalid stat")
+	}
+	return fields[19], nil
+}
+
 func (s *linuxSteps) checkProcess(ctx context.Context, t api.Trace) bool {
 	pid, err := strconv.Atoi(t.Data["pid"])
 	if err != nil || pid <= 1 {
@@ -120,11 +142,15 @@ func processMatches(ctx context.Context, t api.Trace, pid int) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("process: invalid start identity")
 	}
-	delta := started.Sub(time.Unix(base+n/100, (n%100)*10000000))
-	if delta < 0 {
-		delta = -delta
+	clock, err := exec.CommandContext(ctx, "getconf", "CLK_TCK").Output()
+	if err != nil {
+		return false, err
 	}
-	return delta < time.Second, nil
+	hz, err := strconv.ParseInt(strings.TrimSpace(string(clock)), 10, 64)
+	if err != nil || hz <= 0 || base <= 0 || n < 0 {
+		return false, fmt.Errorf("process: invalid clock identity")
+	}
+	return started.Equal(time.Unix(base+n/hz, (n%hz)*int64(time.Second)/hz)), nil
 }
 
 func (s *linuxSteps) removeAdapter(ctx context.Context, name string) error {

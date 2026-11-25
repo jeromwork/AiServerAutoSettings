@@ -515,7 +515,7 @@ func (c *Cleaner) validate(t api.Trace) error {
 			return fmt.Errorf("cleanup: ownership: adapter")
 		}
 	case "route":
-		if !owned(t.Data["iface"]) {
+		if !ownedInterface(t.Data["iface"]) {
 			return fmt.Errorf("cleanup: ownership: route")
 		}
 	case "dns":

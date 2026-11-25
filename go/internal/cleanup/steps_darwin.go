@@ -35,7 +35,19 @@ func (s *darwinSteps) removeProcess(ctx context.Context, t api.Trace) error {
 	if err != nil || !matches {
 		return err
 	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+	// Only a dedicated group led by the verified process belongs to this trace.
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil {
+		return err
+	}
+	if pgid != pid {
+		return fmt.Errorf("process: refusing non-isolated process group")
+	}
+	identity, err := groupLeaderIdentity(ctx, pid)
+	if err != nil {
+		return err
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
 		return err
 	}
 	timer := time.NewTimer(500 * time.Millisecond)
@@ -44,15 +56,34 @@ func (s *darwinSteps) removeProcess(ctx context.Context, t api.Trace) error {
 	case <-ctx.Done():
 	case <-timer.C:
 	}
-	matches, err = processMatches(ctx, t, pid)
-	if err != nil || !matches {
-		return err
+	// The leader may have exited on TERM while its children remain in the group.
+	// If the PID was reused, do not signal the new process's group.
+	if err := syscall.Kill(pid, 0); err == nil {
+		current, identityErr := groupLeaderIdentity(ctx, pid)
+		if identityErr != nil {
+			return identityErr
+		}
+		if current != identity {
+			return fmt.Errorf("process: leader identity changed; group preserved")
+		}
 	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
 		return err
 	}
 	return nil
 }
+func groupLeaderIdentity(ctx context.Context, pid int) (string, error) {
+	out, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
+	if err != nil {
+		return "", err
+	}
+	identity := strings.TrimSpace(string(out))
+	if identity == "" {
+		return "", fmt.Errorf("process: missing leader identity")
+	}
+	return identity, nil
+}
+
 func (s *darwinSteps) checkProcess(ctx context.Context, t api.Trace) bool {
 	pid, err := strconv.Atoi(t.Data["pid"])
 	if err != nil || pid <= 1 {
