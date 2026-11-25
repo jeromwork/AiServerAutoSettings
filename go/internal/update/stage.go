@@ -17,9 +17,6 @@ import (
 func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 	u.stageMu.Lock()
 	defer u.stageMu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return fail("cancelled", err.Error())
-	}
 	// Only consume candidates created in this updater's temporary directory.
 	candidate, err := filepath.Abs(candidate)
 	if err != nil {
@@ -30,6 +27,9 @@ func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 		return fail("candidate", "candidate must be in Tmp")
 	}
 	defer func() { _ = os.Remove(candidate) }()
+	if err := ctx.Err(); err != nil {
+		return fail("cancelled", err.Error())
+	}
 	// Block C, C5: Checks before pending.json
 	// 1. Size <= 100 MiB and non-empty.
 	info, err := os.Lstat(candidate)

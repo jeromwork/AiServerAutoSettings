@@ -150,6 +150,15 @@ func (u *updater) get(ctx context.Context, address string) (*http.Response, erro
 }
 
 func (u *updater) ReceiveDev(ctx context.Context, body io.Reader, sha256Hex, version string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fail("cancelled", err.Error())
+	}
+	// HTTP bodies and pipes can unblock Read on Close. An arbitrary io.Reader
+	// has no cancellation operation; it must itself honor the caller's context.
+	if closer, ok := body.(io.ReadCloser); ok {
+		stop := context.AfterFunc(ctx, func() { _ = closer.Close() })
+		defer stop()
+	}
 	if !versionPattern.MatchString(version) {
 		return "", fail("version", "invalid version: "+version)
 	}
@@ -184,6 +193,9 @@ func (u *updater) ReceiveDev(ctx context.Context, body io.Reader, sha256Hex, ver
 	hasher := sha256.New()
 	writer := io.MultiWriter(tmpFile, hasher)
 	written, err := io.Copy(writer, io.LimitReader(&contextReader{ctx: ctx, r: body}, maxBinary+1))
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
 	if closeErr := tmpFile.Close(); err == nil {
 		err = closeErr
 	}
