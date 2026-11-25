@@ -3,12 +3,15 @@
 package platform
 
 import (
-	"errors"
+	"strings"
 
 	"remoteagents/internal/api"
 )
 
-// RunAsUser — заглушка до P5b.
+// RunAsUser determines the user for executing user-level commands.
 func (p *stubPlatform) RunAsUser(cfg api.ControlCfg) (string, error) {
-	return "", errors.New("platform: not-implemented")
+	if runAs := strings.TrimSpace(cfg.RunAs); runAs != "" {
+		return runAs, nil
+	}
+	return "", nil
 }

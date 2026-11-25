@@ -2,5 +2,9 @@
 
 package platform
 
-// IsAdmin — заглушка до P5b.
-func (p *stubPlatform) IsAdmin() bool { return false }
+import "os"
+
+// IsAdmin reports whether the process has administrator (root) privileges.
+func (p *stubPlatform) IsAdmin() bool {
+	return os.Geteuid() == 0
+}

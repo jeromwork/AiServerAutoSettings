@@ -8,7 +8,7 @@ import (
 	"remoteagents/internal/api"
 )
 
-// Current — заглушка до P5b.
+// Current returns the platform implementation for Windows.
 func Current() api.Platform { return &stubPlatform{} }
 
 func (p *stubPlatform) OS() string   { return runtime.GOOS }

@@ -2,9 +2,14 @@
 
 package platform
 
-import "errors"
+import (
+	"errors"
+	"strings"
+)
 
-// OpenBrowser — заглушка до P5b.
 func (p *stubPlatform) OpenBrowser(url, runAs string) error {
-	return errors.New("platform: not-implemented")
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		return errors.New("platform: browser-url: expected HTTP(S) URL")
+	}
+	return errors.New("platform: browser-unavailable: tracked process launch requires Procs and Traces integration")
 }
