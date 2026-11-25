@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"remoteagents/internal/api"
 	"runtime"
 	"strings"
 	"time"
@@ -23,7 +25,8 @@ const assetLimit = 128 << 20
 type asset struct{ OS, Arch, URL, SHA256, BinPath string }
 
 // Install only the platform asset authenticated by the pinned archive digest.
-func installBinary(ctx context.Context, binDir, lockPath string) (string, error) {
+func installBinary(ctx context.Context, p api.Paths, tr api.Traces, lockPath string) (string, error) {
+	binDir := p.Bin
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		return "", fmt.Errorf("singbox: lock: cannot read lock")
@@ -50,7 +53,12 @@ func installBinary(ctx context.Context, binDir, lockPath string) (string, error)
 	if err = os.MkdirAll(binDir, 0700); err != nil {
 		return "", fmt.Errorf("singbox: binary: create directory: %w", err)
 	}
-	archive, err := os.CreateTemp(binDir, ".ra-core-archive-*")
+	archivePath, archiveRelease, err := tempFile(p, tr, "archive-*")
+	if err != nil {
+		return "", err
+	}
+	defer archiveRelease()
+	archive, err := os.OpenFile(archivePath, os.O_RDWR, 0600)
 	if err != nil {
 		return "", fmt.Errorf("singbox: binary: temporary archive: %w", err)
 	}
@@ -120,7 +128,12 @@ func installBinary(ctx context.Context, binDir, lockPath string) (string, error)
 	if reader == nil {
 		return "", fmt.Errorf("singbox: archive: binary entry missing")
 	}
-	tmp, err := os.CreateTemp(binDir, ".ra-core-*")
+	tmpPath, tmpRelease, err := tempFile(p, tr, "binary-*")
+	if err != nil {
+		return "", err
+	}
+	defer tmpRelease()
+	tmp, err := os.OpenFile(tmpPath, os.O_RDWR, 0600)
 	if err != nil {
 		return "", fmt.Errorf("singbox: binary: create file: %w", err)
 	}
@@ -147,4 +160,36 @@ func installBinary(ctx context.Context, binDir, lockPath string) (string, error)
 		return "", fmt.Errorf("singbox: binary: replace: %w", err)
 	}
 	return dst, nil
+}
+
+// tempFile records the path before creating it, so crash cleanup can recover it.
+func tempFile(p api.Paths, tr api.Traces, pattern string) (string, func(), error) {
+	if err := os.MkdirAll(p.Tmp, 0700); err != nil {
+		return "", nil, fmt.Errorf("singbox: tmp: %w", err)
+	}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", nil, err
+	}
+	path := filepath.Join(p.Tmp, strings.ReplaceAll(pattern, "*", hex.EncodeToString(nonce)))
+	if err := tr.Intent(api.Trace{Kind: "tmp", ID: path, Owner: "singbox", Data: map[string]string{"path": path}}); err != nil {
+		return "", nil, err
+	}
+	release := func() {
+		if err := os.Remove(path); err == nil || os.IsNotExist(err) {
+			_ = tr.Done("tmp", path)
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return "", nil, fmt.Errorf("singbox: tmp: %w", err)
+	}
+	if err = f.Close(); err == nil {
+		err = tr.Applied("tmp", path, map[string]string{"path": path}, nil)
+	}
+	if err != nil {
+		release()
+		return "", nil, err
+	}
+	return path, release, nil
 }
