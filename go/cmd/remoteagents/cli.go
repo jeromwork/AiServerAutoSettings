@@ -210,6 +210,10 @@ func cliRollback(ctx context.Context, p api.Paths, log api.Logger) int {
 // checkCurrentConfig — `config check --current` (его вызывает кандидат обновления, update.Stage): новая версия
 // обязана прочитать сохранённое текущее поколение. Нет конфига вообще — не ошибка (обновляться можно и без него).
 func checkCurrentConfig(p api.Paths) int {
+	if testFault == "reject-config" {
+		fmt.Fprintln(os.Stderr, "testFault: reject-config")
+		return 1
+	}
 	err := config.CheckCurrent(p)
 	if err == nil || errors.Is(err, config.ErrNoConfig) {
 		fmt.Println("ok")

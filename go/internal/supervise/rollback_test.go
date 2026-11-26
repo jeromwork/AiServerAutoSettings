@@ -5,6 +5,7 @@ package supervise
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -234,5 +235,57 @@ func TestNetworkErrorKeepsVersion(t *testing.T) {
 	_ = json.Unmarshal(b, &st)
 	if st.Current != "3.0.2" || st.LastGood != "3.0.2" {
 		t.Fatalf("state %+v: version must stay 3.0.2", st)
+	}
+}
+
+// `remoteagents rollback` без запущенного ядра: версия и конфиг возвращаются, версия помечена Bad
+// (автообновление не поставит её снова), ReadInfo показывает, куда откатываться.
+func TestRollbackOfflineReturnsVersionAndConfig(t *testing.T) {
+	r := newRig(t, 2)
+	r.slot("3.0.0", 1, "  exit 0")
+	r.gen("gen-1", 1, true)
+	r.gen("gen-2", 2, true)
+	r.ptr("lastgood", "gen-2")
+	r.ptr("current", "gen-2")
+	b, _ := json.Marshal(slotState{Schema: 1, Current: "3.0.1", LastGood: "3.0.1", PrevGood: "3.0.0", EmbeddedSeen: "3.0.1"})
+	if err := os.WriteFile(filepath.Join(r.p.Versions, "state.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if info := ReadInfo(r.p); info.Previous != "3.0.0" {
+		t.Fatalf("ReadInfo: %+v", info)
+	}
+	to, err := RollbackOffline(context.Background(), r.p, r.self, "3.0.1", &fake.Logger{})
+	if err != nil || to != "3.0.0" {
+		t.Fatalf("got %q %v", to, err)
+	}
+	var st slotState
+	raw, _ := os.ReadFile(filepath.Join(r.p.Versions, "state.json"))
+	_ = json.Unmarshal(raw, &st)
+	if st.Current != "3.0.0" || st.Bad != "3.0.1" || st.RollbackReason == "" {
+		t.Fatalf("state %+v", st)
+	}
+	ptr, _ := config.ReadPointers(r.p)
+	if ptr.Current != "gen-1" {
+		t.Fatalf("config current %s, want gen-1 (3.0.0 читает схему 1)", ptr.Current)
+	}
+}
+
+func TestRollbackOfflineWithoutPreviousFails(t *testing.T) {
+	r := newRig(t, 1)
+	b, _ := json.Marshal(slotState{Schema: 1, Current: "3.0.1", LastGood: "3.0.1", EmbeddedSeen: "3.0.1"})
+	_ = os.WriteFile(filepath.Join(r.p.Versions, "state.json"), b, 0o600)
+	if _, err := RollbackOffline(context.Background(), r.p, r.self, "3.0.1", &fake.Logger{}); !errors.Is(err, ErrNoPrevious) {
+		t.Fatalf("want ErrNoPrevious, got %v", err)
+	}
+}
+
+// Автоматический откат запоминает плохую версию.
+func TestAutoRollbackMarksBad(t *testing.T) {
+	r := newRig(t, 1)
+	r.slot("3.0.2", 1, "  exit 1")
+	r.state("3.0.2", "3.0.1")
+	st := r.run()
+	if st.Bad != "3.0.2" {
+		t.Fatalf("Bad=%q, want 3.0.2", st.Bad)
 	}
 }

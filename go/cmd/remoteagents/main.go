@@ -17,6 +17,10 @@ var build = "0"
 var pubKeys = ""
 var releaseRepo = ""
 
+// testFault — только для проверки обновления/отката на тестовых сборках (-X main.testFault=…); в выпуске пусто.
+// crash: ядро падает сразу; hang: ядро живёт, но не шлёт good; reject-config: `config check --current` отказывает.
+var testFault = ""
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := dispatch(ctx, os.Args[1:])

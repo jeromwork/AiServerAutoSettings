@@ -306,6 +306,7 @@ func (s *slots) markGood() {
 	if s.Bad == s.Current {
 		s.Bad = ""
 	}
+	s.RollbackReason = "" // версия подтверждена: причина прошлого отката больше не передаётся
 	s.FailsBoot = 0
 }
 

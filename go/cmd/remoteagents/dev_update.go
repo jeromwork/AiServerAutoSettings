@@ -8,7 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,7 +32,7 @@ func init() {
 	for _, name := range []string{"update", "p9"} {
 		api.RegisterDev(api.DevCmd{
 			Name: name,
-			Help: "fake-release [dir]",
+			Help: "fake-release [dir] | serve --dir D --key K [--listen A] [--os O --arch A]",
 			Run:  devUpdate,
 		})
 	}
@@ -48,6 +50,12 @@ func devUpdate(ctx context.Context, args []string) int {
 			dir = args[1]
 		}
 		if err := runFakeRelease(ctx, dir); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	case "serve":
+		if err := runServe(ctx, args[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
@@ -272,5 +280,91 @@ func main() {
 	}
 	fmt.Println("signature: invalid, слота нет")
 
+	return nil
+}
+
+// runServe поднимает тестовый «GitHub»: отдаёт из каталога --dir файлы remoteagents-<os>-<arch>[.exe] и version.txt,
+// подписывая checksums.txt тестовым ключом --key (OpenSSH-секретный ключ без пароля). Файлы читаются при каждом
+// запросе: подмена версии в каталоге не требует перезапуска. Проверка: docs/update-test.md.
+func runServe(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	dir := fs.String("dir", "", "directory with the binary and version.txt")
+	keyFile := fs.String("key", "", "test private key (OpenSSH, no passphrase)")
+	listen := fs.String("listen", "127.0.0.1:0", "listen address")
+	repo := fs.String("repo", "", "owner/repository (default: as built into the exe, see release-base docs)")
+	channel := fs.String("channel", "v3-latest", "release tag")
+	goos := fs.String("os", "windows", "target os")
+	goarch := fs.String("arch", "amd64", "target arch")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dir == "" || *keyFile == "" || *repo == "" {
+		return errors.New("usage: dev update serve --dir D --key K --repo owner/repo [--listen A] [--channel T] [--os O] [--arch A]")
+	}
+	raw, err := os.ReadFile(*keyFile)
+	if err != nil {
+		return err
+	}
+	signer, err := ssh.ParsePrivateKey(raw)
+	if err != nil {
+		return fmt.Errorf("serve: key: %w", err)
+	}
+	binName := "remoteagents-" + *goos + "-" + *goarch
+	if *goos == "windows" {
+		binName += ".exe"
+	}
+	snapshot := func() (bin, ver, sums, sig []byte, err error) {
+		if bin, err = os.ReadFile(filepath.Join(*dir, binName)); err != nil {
+			return
+		}
+		if ver, err = os.ReadFile(filepath.Join(*dir, "version.txt")); err != nil {
+			return
+		}
+		bs, vs := sha256.Sum256(bin), sha256.Sum256(ver)
+		sums = []byte(fmt.Sprintf("%s  version.txt\n%s  %s\n", hex.EncodeToString(vs[:]), hex.EncodeToString(bs[:]), binName))
+		s, e := sshsig.Sign(strings.NewReader(string(sums)), signer, sshsig.HashSHA256, "ra3-release")
+		if e != nil {
+			err = e
+			return
+		}
+		sig = sshsig.Armor(s)
+		return
+	}
+	ln, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bin, ver, sums, sig, err := snapshot()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		base := "http://" + r.Host
+		switch r.URL.Path {
+		case "/repos/" + *repo + "/releases/tags/" + *channel:
+			asset := func(name string, b []byte) map[string]any {
+				return map[string]any{"name": name, "browser_download_url": base + "/assets/" + name, "size": len(b)}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": *channel, "assets": []map[string]any{
+				asset("checksums.txt", sums), asset("checksums.txt.sig", sig), asset("version.txt", ver), asset(binName, bin)}})
+		case "/assets/checksums.txt":
+			_, _ = w.Write(sums)
+		case "/assets/checksums.txt.sig":
+			_, _ = w.Write(sig)
+		case "/assets/version.txt":
+			_, _ = w.Write(ver)
+		case "/assets/" + binName:
+			_, _ = w.Write(bin)
+		default:
+			http.NotFound(w, r)
+		}
+	})}
+	go func() { <-ctx.Done(); _ = srv.Close() }()
+	fmt.Println("release-base: http://" + ln.Addr().String())
+	fmt.Println("public key (for SIGNERS_FILE): ra3 " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey()))))
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
 	return nil
 }

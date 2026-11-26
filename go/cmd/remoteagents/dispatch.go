@@ -40,6 +40,14 @@ func dispatch(ctx context.Context, args []string) int {
 		if err != nil {
 			return 2
 		}
+		switch testFault {
+		case "crash":
+			fmt.Fprintln(os.Stderr, "testFault: crash")
+			return 1
+		case "hang":
+			<-ctx.Done()
+			return api.ExitOK
+		}
 		return core.Run(ctx, withBuildInfo(f))
 
 	case "supervise":
