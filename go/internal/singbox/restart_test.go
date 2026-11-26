@@ -62,7 +62,7 @@ func TestRecoverSkipsWhenAlreadyRunning(t *testing.T) {
 }
 
 func TestRenderUsesDefaultInterface(t *testing.T) {
-	out, err := Render(api.RenderContext{Cfg: &api.Config{}, DefaultIface: "Wi-Fi", ChanPort: 1, ClashPort: 2})
+	out, err := Render(api.RenderContext{Cfg: &api.Config{Servers: []api.Server{{Host: "203.0.113.5", Port: 22}}}, DefaultIface: "Wi-Fi", ChanPort: 1, ClashPort: 2})
 	if err != nil {
 		t.Skip("минимальный конфиг не рендерится: ", err)
 	}
@@ -75,7 +75,7 @@ func TestRenderUsesDefaultInterface(t *testing.T) {
 	if v.Route["default_interface"] != "Wi-Fi" || v.Route["auto_detect_interface"] != nil {
 		t.Fatalf("route=%v", v.Route)
 	}
-	out, _ = Render(api.RenderContext{Cfg: &api.Config{}, ChanPort: 1, ClashPort: 2})
+	out, _ = Render(api.RenderContext{Cfg: &api.Config{Servers: []api.Server{{Host: "203.0.113.5", Port: 22}}}, ChanPort: 1, ClashPort: 2})
 	if !strings.Contains(string(out), `"auto_detect_interface":true`) {
 		t.Fatalf("без интерфейса должен остаться auto_detect: %s", out)
 	}
