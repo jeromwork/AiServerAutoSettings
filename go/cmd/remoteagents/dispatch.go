@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"remoteagents/internal/api"
+	"remoteagents/internal/config"
 	"remoteagents/internal/core"
 	"remoteagents/internal/supervise"
 )
@@ -21,11 +22,12 @@ func dispatch(ctx context.Context, args []string) int {
 	switch args[0] {
 	case "version":
 		if len(args) > 1 && args[1] == "--json" {
-			b, _ := json.Marshal(map[string]string{
+			b, _ := json.Marshal(map[string]any{
 				"version": version,
 				"build":   build,
 				"os":      runtime.GOOS,
 				"arch":    runtime.GOARCH,
+				"schema":  config.SchemaVersion,
 			})
 			fmt.Println(string(b))
 		} else {

@@ -242,6 +242,12 @@ func (c *core) startComponents(ctx context.Context) {
 	if err != nil || c.cfg == nil {
 		log.Warn("core: no-config, page only", "err", fmt.Sprint(err))
 		c.cfg = nil
+		if errors.Is(err, config.ErrNewerSchema) {
+			// Откат версии оставил конфиг более новой схемы: показать причину и путь («config revert»), а не молчать.
+			c.errMu.Lock()
+			c.lastErr = sanitize(err.Error())
+			c.errMu.Unlock()
+		}
 	}
 	if c.cfg != nil {
 		c.control.Store(c.cfg.Control.Enabled)

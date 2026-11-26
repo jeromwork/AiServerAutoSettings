@@ -19,6 +19,7 @@ import (
 
 	"remoteagents/internal/api"
 	"remoteagents/internal/cleanup"
+	"remoteagents/internal/config"
 	"remoteagents/internal/journal"
 
 	"remoteagents/internal/platform"
@@ -258,9 +259,37 @@ func rotateSelfUpdate(ctx context.Context, p api.Paths) error {
 }
 
 func binaryVersion(parent context.Context, self string) (string, error) {
+	v, err := binaryOutput(parent, self, "version")
+	if err != nil {
+		return "", err
+	}
+	v = strings.TrimSpace(v)
+	if !versionName.MatchString(v) {
+		return "", fmt.Errorf("supervise: version: invalid version")
+	}
+	return v, nil
+}
+
+// binarySchema — формат конфига, который читает версия (`version --json`, поле schema). Старые сборки поля
+// не знают: для них 1 (поколения конфига до появления схемы).
+func binarySchema(parent context.Context, self string) int {
+	out, err := binaryOutput(parent, self, "version", "--json")
+	if err != nil {
+		return 1
+	}
+	var v struct {
+		Schema int `json:"schema"`
+	}
+	if json.Unmarshal([]byte(out), &v) != nil || v.Schema < 1 {
+		return 1
+	}
+	return v.Schema
+}
+
+func binaryOutput(parent context.Context, self string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, self, "version")
+	cmd := exec.CommandContext(ctx, self, args...)
 	tree := prepareCommand(cmd)
 	// A broken executable must not consume unlimited memory or keep inherited
 	// pipes open beyond the command deadline and WaitDelay.
@@ -282,11 +311,7 @@ func binaryVersion(parent context.Context, self string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	v := strings.TrimSpace(out.String())
-	if !versionName.MatchString(v) {
-		return "", fmt.Errorf("supervise: version: invalid version")
-	}
-	return v, nil
+	return out.String(), nil
 }
 
 type versionOutput struct{ buf bytes.Buffer }
@@ -294,7 +319,7 @@ type versionOutput struct{ buf bytes.Buffer }
 func (b *versionOutput) String() string { return b.buf.String() }
 
 func (b *versionOutput) Write(p []byte) (int, error) {
-	if len(p) > 256-b.buf.Len() {
+	if len(p) > 512-b.buf.Len() {
 		return 0, fmt.Errorf("supervise: version-size: excessive output")
 	}
 	return b.buf.Write(p)
@@ -408,6 +433,24 @@ func checkSwitchExpire(p api.Paths, log api.Logger) (bool, error) {
 	}
 	log.Warn("supervise: config switch expired")
 	return true, nil
+}
+
+// alignConfig: после отката версии конфиг должен быть таким, какой откатываемая версия читает. Версия-цель сама
+// сообщает свою схему (`version --json`); если current записан более новой схемой — возврат на совместимое поколение.
+func (s *slots) alignConfig(ctx context.Context, log api.Logger) {
+	schema := binarySchema(ctx, s.path(s.Current))
+	unlock, err := lockOperation(ctx, s.p)
+	if err != nil {
+		log.Warn("supervise: config-align-lock", "err", err)
+		return
+	}
+	defer unlock()
+	gen, err := config.CompatRollback(s.p, schema, log)
+	if err != nil {
+		log.Warn("supervise: config-align", "err", err)
+	} else if gen != "" {
+		log.Warn(fmt.Sprintf("откат версии на %s: конфиг возвращён на %s (схема не новее %d)", s.Current, gen, schema))
+	}
 }
 
 // OnUI вызывается, когда ядро сообщило адрес страницы (сообщение "ui"); nil — не нужно.
@@ -876,6 +919,9 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 			return 1
 		}
 
+		if s.Current != prevCurrent {
+			s.alignConfig(ctx, log)
+		}
 		if unverifiedBefore && s.Current == prevLastGood && prevLastGood != "" {
 			log.Info(fmt.Sprintf("непроверенная → lastGood: откат с %s на %s (%s)", prevCurrent, s.Current, reason))
 		}

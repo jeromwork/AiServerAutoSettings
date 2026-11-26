@@ -21,7 +21,12 @@ import (
 var versionName = regexp.MustCompile(api.VersionRe)
 var errPendingInvalid = errors.New("supervise: pending-invalid: invalid candidate")
 
+// StateSchema — формат versions/state.json. Поля только добавляются (старая сборка лишние игнорирует), поэтому
+// откат версии читает состояние, записанное новой; Schema нужен, чтобы увидеть, кто писал файл.
+const StateSchema = 1
+
 type slotState struct {
+	Schema         int    `json:"schema"`
 	Current        string `json:"current"`
 	LastGood       string `json:"lastGood"`
 	PrevGood       string `json:"prevGood"`
@@ -277,6 +282,9 @@ func (s *slots) discardSelfUpdate() error {
 }
 
 func (s *slots) save() error {
+	if s.Schema < StateSchema {
+		s.Schema = StateSchema
+	}
 	return writeJSON(filepath.Join(s.p.Versions, "state.json"), s.slotState)
 }
 

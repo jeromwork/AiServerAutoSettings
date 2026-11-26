@@ -137,6 +137,72 @@ func prune(p api.Paths, ptr Pointers, log api.Logger) {
 	}
 }
 
+// SchemaVersion — формат поколения конфига, который эта сборка читает и пишет. Новая версия, меняющая формат
+// gen-N, увеличивает число; более старая сборка такое поколение не читает (ErrNewerSchema), а сторож при откате
+// версии возвращает конфиг на последнее поколение, которое откатываемая версия читает (CompatRollback).
+const SchemaVersion = 1
+
+// ErrNewerSchema: поколение записано более новой версией программы.
+var ErrNewerSchema = errors.New("config: newer-schema")
+
+type genMeta struct {
+	Schema int `json:"schema"`
+}
+
+// GenSchema — схема поколения из meta.json; поколения до появления схемы (нет файла) — схема 1.
+func GenSchema(p api.Paths, gen string) int {
+	b, err := os.ReadFile(filepath.Join(GenDir(p, gen), "meta.json"))
+	if err != nil {
+		return 1
+	}
+	var m genMeta
+	if json.Unmarshal(b, &m) != nil || m.Schema < 1 {
+		return 1
+	}
+	return m.Schema
+}
+
+// CompatRollback: версия, читающая схему maxSchema, становится рабочей (откат версии). Если текущее поколение
+// записано более новой схемой — current переносится на lastgood, а при его непригодности на самое новое
+// проверенное (good) поколение с подходящей схемой; ожидающее переключение (switch.json) снимается.
+// Возвращает новое поколение или "" если менять ничего не нужно. Вызывать под LockOp.
+func CompatRollback(p api.Paths, maxSchema int, log api.Logger) (string, error) {
+	if log == nil {
+		log = nopLog{}
+	}
+	ptr, err := ReadPointers(p)
+	if err != nil || ptr.Current == "" || GenSchema(p, ptr.Current) <= maxSchema {
+		return "", err
+	}
+	usable := func(g string) bool {
+		if g == "" || GenSchema(p, g) > maxSchema {
+			return false
+		}
+		_, err := os.Stat(filepath.Join(GenDir(p, g), "active.json"))
+		return err == nil
+	}
+	target := ""
+	if usable(ptr.LastGood) {
+		target = ptr.LastGood
+	} else {
+		gens := listGens(p)
+		for i := len(gens) - 1; i >= 0; i-- {
+			if _, err := os.Stat(filepath.Join(GenDir(p, gens[i].name), "good")); err == nil && usable(gens[i].name) {
+				target = gens[i].name
+				break
+			}
+		}
+	}
+	if err := removeDurable(filepath.Join(p.Config, "switch.json")); err != nil {
+		return "", err
+	}
+	if err := writeLine(p, "current", target); err != nil {
+		return "", err
+	}
+	log.Warn("config.compat-rollback", "from", ptr.Current, "to", target, "maxSchema", maxSchema)
+	return target, nil
+}
+
 // Apply builds gen-N+1 completely, then writes switch.json and moves current (plan §5.2).
 // A crash before current moves leaves the new generation unused. ErrPending while a switch exists.
 func Apply(p api.Paths, data []byte, password string, log api.Logger) (string, error) {
@@ -231,6 +297,10 @@ func build(dir string, data []byte, c *api.Config, key []byte) error {
 	if err := writeKey(dir, key); err != nil {
 		return err
 	}
+	meta, _ := json.Marshal(genMeta{Schema: SchemaVersion})
+	if err := writeFile(filepath.Join(dir, "meta.json"), append(meta, '\n'), 0o600); err != nil {
+		return err
+	}
 	return syncDir(dir)
 }
 
@@ -250,6 +320,9 @@ func loadGen(p api.Paths, gen string, log api.Logger) (*api.Config, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "active.json"))
 	if err != nil {
 		return nil, fmt.Errorf("config: gen-missing: %s", gen)
+	}
+	if sc := GenSchema(p, gen); sc > SchemaVersion {
+		return nil, fmt.Errorf("%w: %s записано более новой версией (схема %d, эта версия читает %d): выполните «remoteagents config revert» или вставьте конфиг заново", ErrNewerSchema, gen, sc, SchemaVersion)
 	}
 	key, err := readGenKey(dir)
 	if err != nil {
@@ -325,12 +398,12 @@ func Revert(p api.Paths, log api.Logger) error {
 	}
 	target := ""
 	switch {
-	case ptr.LastGood != "" && ptr.LastGood != ptr.Current:
+	case ptr.LastGood != "" && ptr.LastGood != ptr.Current && GenSchema(p, ptr.LastGood) <= SchemaVersion:
 		target = ptr.LastGood
 	default:
 		cur := genNum(ptr.Current)
 		for _, g := range listGens(p) {
-			if g.n < cur || ptr.Current == "" {
+			if (g.n < cur || ptr.Current == "") && GenSchema(p, g.name) <= SchemaVersion {
 				if _, err := os.Stat(filepath.Join(GenDir(p, g.name), "good")); err == nil {
 					target = g.name
 				}
