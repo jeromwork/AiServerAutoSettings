@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -37,6 +38,7 @@ func runCLI(ctx context.Context, name string, args []string) int {
 	home := fs.String("home", "", "application data directory")
 	passFile := fs.String("password-file", "", "configuration password file")
 	fix := fs.Bool("fix", false, "leftovers: remove what was found")
+	current := fs.Bool("current", false, "config check: check the saved current generation instead of a file")
 	// Подкоманда конфига стоит первым аргументом: config check|apply|revert <файл>.
 	var sub string
 	if name == "config" && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -117,6 +119,9 @@ func runCLI(ctx context.Context, name string, args []string) int {
 		}
 		switch sub {
 		case "check":
+			if *current {
+				return checkCurrentConfig(p)
+			}
 			b, ok := read()
 			if !ok {
 				return 2
@@ -156,6 +161,18 @@ func runCLI(ctx context.Context, name string, args []string) int {
 		fmt.Fprintln(os.Stderr, "update: run through the web page or the running core (api.Actions.UpdateNow)")
 		return 1
 	}
+	return 1
+}
+
+// checkCurrentConfig — `config check --current` (его вызывает кандидат обновления, update.Stage): новая версия
+// обязана прочитать сохранённое текущее поколение. Нет конфига вообще — не ошибка (обновляться можно и без него).
+func checkCurrentConfig(p api.Paths) int {
+	err := config.CheckCurrent(p)
+	if err == nil || errors.Is(err, config.ErrNoConfig) {
+		fmt.Println("ok")
+		return 0
+	}
+	printConfigErr(err)
 	return 1
 }
 
