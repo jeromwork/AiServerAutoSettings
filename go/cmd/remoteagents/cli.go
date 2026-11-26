@@ -59,7 +59,7 @@ func runCLI(ctx context.Context, name string, args []string) int {
 		url := strings.TrimSpace(string(b))
 		fmt.Println(url)
 		if name == "open" {
-			if err := plat.OpenBrowser(url, ""); err != nil {
+			if err := openURL(url); err != nil {
 				fmt.Fprintf(os.Stderr, "open: %v\n", err)
 				return 1
 			}

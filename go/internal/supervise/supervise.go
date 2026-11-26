@@ -409,6 +409,9 @@ func checkSwitchExpire(p api.Paths, log api.Logger) (bool, error) {
 	return true, nil
 }
 
+// OnUI вызывается, когда ядро сообщило адрес страницы (сообщение "ui"); nil — не нужно.
+var OnUI func(url string)
+
 func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self string, mode api.Mode, args []string) int {
 	if log == nil {
 		j, err := journal.New(p, api.StreamSup, journal.Options{MaxBytes: 5 << 20, Keep: 4})
@@ -592,6 +595,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 			Version string `json:"version"`
 			Final   bool   `json:"final"`
 			Reason  string `json:"reason"`
+			URL     string `json:"url"`
 		}
 		messages := make(chan message, 64)
 		readCtx, readCancel := context.WithCancel(ctx)
@@ -633,6 +637,10 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 				return
 			}
 			switch msg.T {
+			case "ui":
+				if OnUI != nil && msg.URL != "" {
+					OnUI(msg.URL)
+				}
 			case api.MsgGood:
 				if msg.Version != s.Current {
 					log.Warn("supervise: good-version-mismatch")

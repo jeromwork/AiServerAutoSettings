@@ -108,6 +108,10 @@ function show(s) {
     document.getElementById("lines").textContent = JSON.stringify(s, null, 2);
   }
 
+  var noCfg = s.config === false;
+  document.getElementById("cfg-info").textContent = noCfg ? "Конфиг не задан — вставьте его ниже и нажмите «Применить»." : "";
+  if (noCfg) document.getElementById("cform").style.display = "";
+
   var ctl = s.control !== false;
   document.getElementById("ctl").textContent = ctl ? "разрешено" : "запрещено";
   document.getElementById("btn-control").textContent = ctl ? "Запретить" : "Разрешить";

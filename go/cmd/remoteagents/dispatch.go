@@ -16,8 +16,7 @@ import (
 
 func dispatch(ctx context.Context, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: remoteagents <command>")
-		return 1
+		return launch(ctx)
 	}
 	switch args[0] {
 	case "version":

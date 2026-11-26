@@ -269,6 +269,7 @@ func (c *core) startComponents(ctx context.Context) {
 	} else {
 		_ = os.WriteFile(filepath.Join(c.p.State, UIURLFile), []byte(c.ui.URL()+"\n"), 0600)
 		log.Info("core: webui", "port", c.ui.Status()["port"])
+		c.emit(map[string]any{"t": "ui", "url": c.ui.URL()})
 	}
 
 	// 10. Обновления: первая проверка и далее по расписанию; под одним мьютексом с остальными записями.
