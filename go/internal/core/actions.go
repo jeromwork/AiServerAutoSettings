@@ -46,14 +46,20 @@ func (c *core) Status() map[string]any {
 		"config":  c.cfg != nil,
 		"gen":     c.gen,
 	}
-	if c.ch != nil {
-		m["channel"] = c.ch.State()
+	if ch := c.getCh(); ch != nil {
+		st := ch.State()
+		st.Reason = sanitize(st.Reason)
+		m["channel"] = st
 	}
-	if !isNil(c.sb) {
-		m["singbox"] = c.sb.Status()
+	if sb := c.getSb(); !isNil(sb) {
+		st := sb.Status()
+		if e, ok := st["binaryError"].(string); ok {
+			st["binaryError"] = sanitize(e)
+		}
+		m["singbox"] = st
 	}
-	if !isNil(c.fw) {
-		m["forwards"] = c.fw.List()
+	if fw := c.getFw(); !isNil(fw) {
+		m["forwards"] = fw.List()
 	}
 	if c.ui != nil {
 		m["webui"] = c.ui.Status()
@@ -123,22 +129,32 @@ func (c *core) InstallDev(ctx context.Context, body io.Reader, sha256, version s
 }
 
 func (c *core) ConfigCheck(data []byte, password string) error {
-	_, _, err := config.Open(data, password)
-	return err
+	return c.validateConfig(data, password)
 }
 
 // ConfigApply: новый конфиг применяется перезапуском; сторож следит за switch.json (откат за ConfigSwitchSec).
 func (c *core) ConfigApply(ctx context.Context, data []byte, password string) error {
+	c.publishApply("applying", "Проверяю и записываю конфиг...")
+	fail := func(err error) error {
+		text := c.explainApplyErr(err)
+		c.log.Warn("core: config-apply-failed", "text", text)
+		c.publishApply("error", text)
+		return errors.New(text)
+	}
+	if err := c.validateConfig(data, password); err != nil {
+		return fail(err)
+	}
 	unlock, err := c.lockOp()
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	defer unlock()
 	gen, err := config.Apply(c.p, data, password, c.log)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	c.log.Info("core: config-applied", "gen", gen)
+	c.publishApply("restarting", "Конфиг записан, перезапускаю программу и проверяю связь с сервером...")
 	c.requestQuit(api.ExitRestart, nil)
 	return nil
 }
@@ -164,15 +180,16 @@ func (c *core) SetControl(on bool) error {
 
 // SwitchPath: с каналом — ForcePath (selector + закрепление + переподключение); без канала — прямой PUT в Clash.
 func (c *core) SwitchPath(name string) error {
-	if c.ch != nil {
-		return c.ch.ForcePath(name)
+	if ch := c.getCh(); ch != nil {
+		return ch.ForcePath(name)
 	}
-	if isNil(c.sb) {
+	sb := c.getSb()
+	if isNil(sb) {
 		return api.ErrNotSupported
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return c.sb.Clash(ctx, "PUT", "/proxies/chan", map[string]string{"name": name}, nil)
+	return sb.Clash(ctx, "PUT", "/proxies/chan", map[string]string{"name": name}, nil)
 }
 
 // VPN: до N1b (vpnguard) — ErrNotSupported; в --safe — ErrSafe.
@@ -197,7 +214,8 @@ func (c *core) LogZip(w io.Writer) error {
 }
 
 func (c *core) LogSend(ctx context.Context) error {
-	if c.ch == nil {
+	ch := c.getCh()
+	if ch == nil {
 		return errors.New("core: log-send: channel-unavailable")
 	}
 	pc := c.pcName()
@@ -205,7 +223,7 @@ func (c *core) LogSend(ctx context.Context) error {
 		return errors.New("core: log-send: bad-pc-name")
 	}
 	var out, errb bytes.Buffer
-	code, err := c.ch.Exec(ctx, "~/.local/bin/ra-lab --pc "+pc+" collect --once", nil, &out, &errb)
+	code, err := ch.Exec(ctx, "~/.local/bin/ra-lab --pc "+pc+" collect --once", nil, &out, &errb)
 	if err != nil {
 		return err
 	}

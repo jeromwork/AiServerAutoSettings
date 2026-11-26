@@ -87,6 +87,10 @@ type core struct {
 	lastErr string
 	opMu    sync.Mutex // UpdateNow, ConfigApply и прочие записи — одна за раз (+ LockOp между процессами)
 
+	compMu  sync.RWMutex // ch/sb/fw/ag пишет startNetwork (в своей горутине), читают страница и агент
+	ev      events
+	netDone chan struct{}
+
 	onStop   []func()
 	outMu    sync.Mutex
 	goodOnce sync.Once
@@ -137,6 +141,7 @@ func Run(ctx context.Context, f Flags) int {
 	defer unlockCore()
 
 	c := &core{f: f, p: p, log: log, jr: jr, plat: plat, start: time.Now(), quit: make(chan quitReq, 1)}
+	c.ev.kick = make(chan struct{}, 1)
 	log.Info("core: start", "version", f.Version, "pid", os.Getpid(), "safe", f.Mode.Safe, "noTun", f.Mode.NoTun,
 		"noChannel", f.Mode.NoChannel, "noSingbox", f.Mode.NoSingbox, "rollback", f.RollbackReason)
 
@@ -165,10 +170,11 @@ func Run(ctx context.Context, f Flags) int {
 	bg.Add(2)
 	go func() { defer bg.Done(); c.healthLoop(runCtx) }()
 	go func() { defer bg.Done(); c.aliveLoop(runCtx) }()
-	if c.ch == nil && !c.failed.Load() {
-		// Нет канала (нет конфига / --no-channel / сбой): ждать «up» нечего, версия жива, когда страница поднята.
+	if c.netDone == nil {
+		// Нет сети (нет конфига / сбой procs): ждать «up» нечего, версия жива, когда страница поднята.
 		c.sendGood()
 	}
+	go c.pathsLoop(runCtx)
 	if f.Pprof != "" {
 		c.startPprof(f.Pprof)
 	}
@@ -266,11 +272,7 @@ func (c *core) startComponents(ctx context.Context) {
 		c.sh = c.plat.NewShell(log, c.pr, runAs)
 	}
 
-	if c.cfg != nil && c.pr != nil {
-		c.startNetwork(ctx)
-	}
-
-	// 9. webui — всегда.
+	// 9. webui — всегда и первой: sing-box может стартовать минутами, страница должна отвечать сразу.
 	c.ui, err = webui.New(c, log, f.DevAssets, c.prevUI())
 	if err != nil {
 		log.Error("core: webui", "err", err.Error())
@@ -281,6 +283,21 @@ func (c *core) startComponents(ctx context.Context) {
 		c.savePrevUI()
 		log.Info("core: webui", "port", c.ui.Status()["port"])
 		c.emit(map[string]any{"t": "ui", "url": c.ui.URL()})
+		c.publishStatus()
+		c.publishStartInfo()
+	}
+
+	// 5–8. Сеть стартует в своей горутине: страница, health и alive не ждут загрузку/запуск sing-box.
+	if c.cfg != nil && c.pr != nil {
+		c.netDone = make(chan struct{})
+		go func() {
+			defer close(c.netDone)
+			c.startNetwork(ctx)
+			if isNil(c.getCh()) && !c.failed.Load() {
+				c.sendGood() // канала нет (--no-channel / сбой, не требующий отката)
+			}
+			c.publishStatus()
+		}()
 	}
 
 	// 10. Обновления: первая проверка и далее по расписанию; под одним мьютексом с остальными записями.
@@ -296,59 +313,70 @@ func (c *core) updateChannel() string {
 	return "v3-latest"
 }
 
-// startNetwork — шаги 5–8: sing-box, агент, канал, forward.
+// startNetwork — шаги 5–8: sing-box, агент, канал, forward. Поля компонентов ставятся под compMu.
 func (c *core) startNetwork(ctx context.Context) {
 	f, log := c.f, c.log
 	var err error
 
 	// 5. sing-box (не при --no-singbox и не при --no-channel).
 	if !f.Mode.NoSingbox && !f.Mode.NoChannel {
-		c.sb, err = singbox.New(c.cfg, c.p, log, c.clean, c.pr, singbox.Options{
+		sb, e := singbox.New(c.cfg, c.p, log, c.clean, c.pr, singbox.Options{
 			Mode: f.Mode, Instance: c.clean.Instance(),
 			LANSocks: func() string {
-				if fw := c.fw; fw != nil {
+				if fw := c.getFw(); fw != nil {
 					return fw.InternalSocks()
 				}
 				return ""
 			},
 		})
-		if err != nil {
-			log.Error("core: singbox", "err", err.Error())
-			c.sb = nil
-			c.failStart(err)
-		} else if err = c.sb.Start(ctx); err != nil {
-			log.Error("core: singbox-start", "err", err.Error())
-			c.failStart(err)
+		if e != nil {
+			log.Error("core: singbox", "err", e.Error())
+			c.failStart(e)
+		} else {
+			c.compMu.Lock()
+			c.sb = sb
+			c.compMu.Unlock()
+			c.publishSingbox() // starting
+			if e = sb.Start(ctx); e != nil {
+				log.Error("core: singbox-start", "err", e.Error())
+				c.failStart(e)
+			}
+			c.publishSingbox()
 		}
 	}
 
 	// 6. Агент создаётся первым, но ещё не слушает (§5.1).
 	if c.sh != nil {
-		c.ag, err = agent.New(api.AgentDeps{
+		ag, e := agent.New(api.AgentDeps{
 			Log: log.With("agent"), Shell: c.sh,
-			Fwd: func() api.Forwarder { return c.fw },
+			Fwd: c.getFw,
 			Act: c, Paths: c.p, Control: c.control.Load, Status: c.Status,
 			MaxBody: 8 << 20, MaxDev: 100 << 20,
 		})
-		if err != nil {
-			log.Error("core: agent", "err", err.Error())
-			c.ag = nil
+		if e != nil {
+			log.Error("core: agent", "err", e.Error())
+		} else {
+			c.compMu.Lock()
+			c.ag = ag
+			c.compMu.Unlock()
 		}
 	}
 
 	// 7. Канал.
 	if !f.Mode.NoChannel && c.ag != nil {
-		c.ch, err = channel.New(c.cfg, c.sb, c.ag, log, c.clean, channel.Options{
+		ch, e := channel.New(c.cfg, c.getSb(), c.ag, log, c.clean, channel.Options{
 			PC: c.pcName(), Version: f.Version, Rollback: f.RollbackReason, Mode: f.Mode,
 		})
-		if err != nil {
-			log.Error("core: channel", "err", err.Error())
-			c.ch = nil
-			c.failStart(err)
+		if e != nil {
+			log.Error("core: channel", "err", e.Error())
+			c.failStart(e)
 		} else {
-			updates, unsub := c.ch.Subscribe()
+			c.compMu.Lock()
+			c.ch = ch
+			c.compMu.Unlock()
+			updates, unsub := ch.Subscribe()
 			go c.watchChannel(ctx, updates, unsub)
-			if err = c.ch.Start(ctx); err != nil {
+			if err = ch.Start(ctx); err != nil {
 				log.Error("core: channel-start", "err", err.Error())
 				c.failStart(err)
 			}
@@ -356,16 +384,38 @@ func (c *core) startNetwork(ctx context.Context) {
 	}
 
 	// 8. forward (поверх канала).
-	if c.ch != nil {
-		c.fw, err = forward.New(c.cfg, c.ch, c.p, log, c.clean, f.Mode)
-		if err != nil {
-			log.Error("core: forward", "err", err.Error())
-			c.fw = nil
-		} else if err = c.fw.Start(ctx); err != nil {
-			log.Error("core: forward-start", "err", err.Error())
+	if ch := c.getCh(); ch != nil {
+		fw, e := forward.New(c.cfg, ch, c.p, log, c.clean, f.Mode)
+		if e != nil {
+			log.Error("core: forward", "err", e.Error())
+		} else {
+			c.compMu.Lock()
+			c.fw = fw
+			c.compMu.Unlock()
+			if e = fw.Start(ctx); e != nil {
+				log.Error("core: forward-start", "err", e.Error())
+			}
 		}
 	}
 	// VPN/LAN-сторожа (vpnguard/languard) — N1b/N2; при Mode.AllowsTun() они будут подключены здесь.
+}
+
+func (c *core) getCh() api.Channel {
+	c.compMu.RLock()
+	defer c.compMu.RUnlock()
+	return c.ch
+}
+
+func (c *core) getSb() api.Singbox {
+	c.compMu.RLock()
+	defer c.compMu.RUnlock()
+	return c.sb
+}
+
+func (c *core) getFw() api.Forwarder {
+	c.compMu.RLock()
+	defer c.compMu.RUnlock()
+	return c.fw
 }
 
 // devPCSuffix — на время разработки, параллельно с v2: имя ПК v3 на сервере отличается от имени v2,
@@ -382,9 +432,14 @@ func (c *core) pcName() string {
 	if c.cfg == nil {
 		return ""
 	}
-	n := translitPC(c.cfg.Name)
+	return pcNameFor(c.cfg.Name)
+}
+
+// pcNameFor — имя на сервере из имени в конфиге; пусто, если из имени ничего не осталось.
+func pcNameFor(cfgName string) string {
+	n := strings.Trim(translitPC(cfgName), "-._")
 	if len(n) > 40 {
-		n = n[:40]
+		n = strings.Trim(n[:40], "-._")
 	}
 	if n == "" {
 		return ""
@@ -449,10 +504,30 @@ func (c *core) watchChannel(ctx context.Context, ch <-chan api.ChannelState, uns
 	}
 }
 
-// stopComponents — обратный порядок, затем cleanup.Run("exit").
+// bounded выполняет шаг остановки не дольше d: зависший компонент не должен держать выход ядра.
+func (c *core) bounded(name string, d time.Duration, fn func()) {
+	done := make(chan struct{})
+	go func() { defer close(done); fn() }()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+		c.log.Warn("core: stop-timeout", "component", name, "after", d.String())
+	}
+}
+
+// stopComponents — обратный порядок, затем cleanup.Run("exit"). Каждый шаг ограничен по времени.
 func (c *core) stopComponents() {
 	stopCtx := func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.Background(), stopStepTimeout)
+	}
+	if c.netDone != nil { // запуск сети уже отменён контекстом; ждём его конец, но не бесконечно
+		select {
+		case <-c.netDone:
+		case <-time.After(stopStepTimeout):
+			c.log.Warn("core: stop-timeout", "component", "network-start")
+		}
 	}
 	for _, fn := range c.onStop {
 		fn()
@@ -463,7 +538,7 @@ func (c *core) stopComponents() {
 		cancel()
 		_ = os.Remove(filepath.Join(c.p.State, UIURLFile))
 	}
-	for _, comp := range []api.Component{c.fw, c.ch} {
+	for _, comp := range []api.Component{c.getFw(), c.getCh()} {
 		if isNil(comp) {
 			continue
 		}
@@ -474,16 +549,18 @@ func (c *core) stopComponents() {
 		cancel()
 	}
 	if c.ag != nil {
-		if err := c.ag.Close(); err != nil {
-			c.log.Warn("core: stop", "component", "agent", "err", err.Error())
-		}
+		c.bounded("agent", stopStepTimeout, func() {
+			if err := c.ag.Close(); err != nil {
+				c.log.Warn("core: stop", "component", "agent", "err", err.Error())
+			}
+		})
 	}
 	if c.sh != nil {
-		_ = c.sh.KillAll()
+		c.bounded("shell", stopStepTimeout, func() { _ = c.sh.KillAll() })
 	}
-	if !isNil(c.sb) {
+	if sb := c.getSb(); !isNil(sb) {
 		ctx, cancel := stopCtx()
-		if err := c.sb.Stop(ctx); err != nil {
+		if err := sb.Stop(ctx); err != nil {
 			c.log.Warn("core: stop", "component", "singbox", "err", err.Error())
 		}
 		cancel()
@@ -493,9 +570,11 @@ func (c *core) stopComponents() {
 		_ = c.pr.KillAll(ctx)
 		cancel()
 	}
-	for _, issue := range c.clean.Run(context.Background(), "exit") {
-		c.log.Warn("core: cleanup-exit", "issue", issue)
-	}
+	c.bounded("cleanup", 30*time.Second, func() {
+		for _, issue := range c.clean.Run(context.Background(), "exit") {
+			c.log.Warn("core: cleanup-exit", "issue", issue)
+		}
+	})
 }
 
 func isNil[T comparable](v T) bool {

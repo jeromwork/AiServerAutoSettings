@@ -23,6 +23,9 @@ import (
 	"remoteagents/internal/api"
 )
 
+// configCallTimeout — потолок для проверки/применения/возврата конфига (KDF пароля + запись + блокировки).
+const configCallTimeout = 45 * time.Second
+
 //go:embed static/index.html
 var embeddedIndexHTML []byte
 
@@ -40,6 +43,8 @@ type UI struct {
 	started   bool
 	stopWatch func() bool
 	stopped   bool
+	hub       *hub
+	done      chan struct{}
 }
 
 func (u *UI) Name() string { return "webui" }
@@ -114,6 +119,8 @@ func New(act api.Actions, log api.Logger, devAssets string, prev ...Prev) (*UI, 
 		port:      tcpAddr.Port,
 		url:       fmt.Sprintf("http://127.0.0.1:%d/?t=%s", tcpAddr.Port, token),
 		listener:  l,
+		hub:       newHub(),
+		done:      make(chan struct{}),
 	}
 
 	mux := http.NewServeMux()
@@ -151,8 +158,8 @@ func (u *UI) Start(ctx context.Context) error {
 	u.started = true
 	u.stopWatch = context.AfterFunc(ctx, func() {
 		// Serve may not have registered the listener with the server yet.
-		_ = u.listener.Close()
-		_ = u.srv.Close()
+		// Мягко: ответ на «Применить» (он сам вызывает остановку ядра) должен успеть дойти до страницы.
+		u.shutdownSoon()
 	})
 
 	go func() {
@@ -161,6 +168,24 @@ func (u *UI) Start(ctx context.Context) error {
 		}
 	}()
 	return nil
+}
+
+func (u *UI) shutdownSoon() {
+	u.closeDone()
+	_ = u.listener.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := u.srv.Shutdown(ctx); err != nil {
+		_ = u.srv.Close()
+	}
+}
+
+func (u *UI) closeDone() {
+	select {
+	case <-u.done:
+	default:
+		close(u.done)
+	}
 }
 
 func (u *UI) Stop(ctx context.Context) error {
@@ -179,6 +204,7 @@ func (u *UI) Stop(ctx context.Context) error {
 	if u.stopWatch != nil {
 		u.stopWatch()
 	}
+	u.closeDone()
 	// Close the reserved socket even when Start was never called.
 	if !u.started {
 		_ = u.listener.Close()
@@ -210,6 +236,8 @@ func (u *UI) registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/config", u.handleConfigApply)
 	mux.HandleFunc("/api/config/revert", u.handleConfigRevert)
 	mux.HandleFunc("/revert", u.handleConfigRevert)
+	mux.HandleFunc("/api/events", u.handleEvents)
+	mux.HandleFunc("/api/restart", u.handleRestart)
 	mux.HandleFunc("/api/exit", u.handleExit)
 	mux.HandleFunc("/exit", u.handleExit)
 }
@@ -414,7 +442,7 @@ func (u *UI) handleConfigCheck(w http.ResponseWriter, req *http.Request) {
 	text := req.PostFormValue("text")
 	pw := req.PostFormValue("password")
 	u.log.Secret(pw)
-	if err := u.act.ConfigCheck([]byte(text), pw); err != nil {
+	if err := callTimeout(configCallTimeout, "проверка конфига", func() error { return u.act.ConfigCheck([]byte(text), pw) }); err != nil {
 		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "problems": []string{err.Error()}})
 		return
 	}
@@ -435,7 +463,8 @@ func (u *UI) handleConfigApply(w http.ResponseWriter, req *http.Request) {
 	text := req.PostFormValue("text")
 	pw := req.PostFormValue("password")
 	u.log.Secret(pw)
-	if err := u.act.ConfigApply(req.Context(), []byte(text), pw); err != nil {
+	ctx := context.WithoutCancel(req.Context())
+	if err := callTimeout(configCallTimeout, "применение конфига", func() error { return u.act.ConfigApply(ctx, []byte(text), pw) }); err != nil {
 		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "problems": []string{err.Error()}})
 		return
 	}
@@ -450,8 +479,25 @@ func (u *UI) handleConfigRevert(w http.ResponseWriter, req *http.Request) {
 	if !u.checkAuth(w, req) {
 		return
 	}
-	if err := u.act.ConfigRevert(req.Context()); err != nil {
+	ctx := context.WithoutCancel(req.Context())
+	if err := callTimeout(configCallTimeout, "возврат конфига", func() error { return u.act.ConfigRevert(ctx) }); err != nil {
 		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "problems": []string{err.Error()}})
+		return
+	}
+	replyJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleRestart — перезапуск ядра (после `remoteagents config apply/revert` из консоли).
+func (u *UI) handleRestart(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !u.checkAuth(w, req) {
+		return
+	}
+	if err := u.act.Restart(context.WithoutCancel(req.Context())); err != nil {
+		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 	replyJSON(w, http.StatusOK, map[string]any{"ok": true})

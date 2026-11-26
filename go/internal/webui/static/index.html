@@ -25,6 +25,16 @@ pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; word-break: brea
 <div class="box" id="conn" style="display:none"></div>
 
 <div class="box">
+  <b>Ход работы</b>
+  <div id="apply-st">Нет событий.</div>
+  <div id="net-st"></div>
+  <div><b>Пути</b></div>
+  <ul id="nodes"><li>Данных пока нет.</li></ul>
+  <div><b>Попытки подключения</b></div>
+  <pre id="attempts">Пока не было.</pre>
+</div>
+
+<div class="box">
   <button id="btn-update" type="button">Обновить</button>
   <button id="btn-exit" type="button" class="danger">Выход</button>
   <div id="umsg"></div>
@@ -85,14 +95,22 @@ var T = "__T__", S = null;
 var lost = false;
 
 function request(u, options) {
+  var ac = new AbortController();
+  var timer = setTimeout(function() { ac.abort(); }, 60000);
+  options = options || {};
+  options.signal = ac.signal;
   return fetch(u, options).then(function(r) {
+    clearTimeout(timer);
     if (!r.ok) throw new Error("HTTP " + r.status);
     if (lost) { lost = false; document.getElementById("umsg").textContent = ""; }
     return r.json();
   }).catch(function(e) {
+    clearTimeout(timer);
+    var msg = e.name === "AbortError" ? "нет ответа от программы 60 с" : e.message;
     document.getElementById("umsg").className = "err";
-    document.getElementById("umsg").textContent = "Связь с программой потеряна, переподключаюсь... (" + e.message + ")";
+    document.getElementById("umsg").textContent = "Связь с программой потеряна, переподключаюсь... (" + msg + ")";
     lost = true;
+    e.shown = msg;
     throw e;
   });
 }
@@ -283,6 +301,9 @@ document.getElementById("btn-cfg-check").onclick = function() {
   post("/api/config/check", { text: f.text.value, password: f.password.value }).then(function(r) {
     m.className = r.ok ? "ok" : "err";
     m.textContent = r.ok ? "Конфиг корректен" : pwProblem(r.problems || ["Ошибка проверки"]);
+  }).catch(function(e) {
+    m.className = "err";
+    m.textContent = "Нет ответа на проверку (" + (e.shown || e.message) + ")";
   });
 };
 
@@ -293,6 +314,9 @@ document.getElementById("btn-cfg-revert").onclick = function() {
     m.className = r.ok ? "ok" : "err";
     m.textContent = r.ok ? "Прежний конфиг возвращён" : (r.problems || ["Ошибка возврата"]).join("\n");
     poll();
+  }).catch(function(e) {
+    m.className = "err";
+    m.textContent = "Нет ответа (" + (e.shown || e.message) + ")";
   });
 };
 
@@ -312,12 +336,85 @@ document.getElementById("cform").onsubmit = function(e) {
     m.textContent = r.ok ? "Конфиг принят, перезапускаю..." : pwProblem(r.problems || ["Ошибка применения"]);
     if (r.ok) f.password.value = "";
     poll();
+  }).catch(function(e) {
+    m.className = "err";
+    m.textContent = "Нет ответа на «Применить» (" + (e.shown || e.message) + "). Программа могла перезапуститься: смотрите блок «Ход работы».";
   });
   return false;
 };
 
+var PATHN = {"chan": "через sing-box (туннель)", "ssh-direct": "напрямую по SSH"};
+var STN = {trying: "пробую", ok: "успех", error: "ошибка", waiting: "ожидание"};
+var STAGE = {applying: "Применяю", restarting: "Перезапуск", checking: "Проверка связи", ok: "Готово", error: "Ошибка"};
+
+function onApply(a) {
+  var el = document.getElementById("apply-st");
+  el.className = a.stage === "error" ? "err" : (a.stage === "ok" ? "ok" : "");
+  el.textContent = (a.at || "") + " " + (STAGE[a.stage] || a.stage) + ": " + (a.text || "");
+  if (a.stage === "error") {
+    var m = document.getElementById("cmsg");
+    m.className = "err";
+    m.textContent = a.text || "Ошибка";
+  }
+}
+
+function onChannel(c) {
+  var el = document.getElementById("net-st");
+  var h = "Канал: <b>" + esc(c.state) + "</b>";
+  if (c.path) h += " (" + esc(PATHN[c.path] || c.path) + ")";
+  if (c.reason) h += " <span class=err>" + esc(c.reason) + "</span>";
+  el.innerHTML = h;
+}
+
+function onSingbox(sb) {
+  var el = document.getElementById("sb-st");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "sb-st";
+    document.getElementById("net-st").parentNode.insertBefore(el, document.getElementById("net-st"));
+  }
+  var t = sb.running ? "работает" : (sb.starting ? "запускается..." : "не запущен");
+  var h = "sing-box: <b>" + t + "</b>";
+  if (sb.binaryError) h += " <span class=err>" + esc(sb.binaryError) + "</span>";
+  el.innerHTML = h;
+}
+
+function onPaths(p) {
+  var ul = document.getElementById("nodes");
+  var nodes = p.nodes || [];
+  if (!nodes.length) { ul.innerHTML = "<li>Узлы не заданы.</li>"; return; }
+  ul.innerHTML = nodes.map(function(n) {
+    var st = n.state === "ok" ? "<span class=ok>отвечает" + (n.ms ? " (" + n.ms + " мс)" : "") + "</span>"
+      : n.state === "error" ? "<span class=err>не отвечает</span>" : "ещё не проверялся";
+    return "<li>" + esc(n.name) + (p.now === n.name ? " <b>[выбран]</b>" : "") + ": " + st + "</li>";
+  }).join("");
+}
+
+function onAttempts(list) {
+  document.getElementById("attempts").textContent = (list || []).map(function(a) {
+    return a.at + " #" + a.n + " " + (PATHN[a.path] || a.path || "—") + ": " + (STN[a.state] || a.state) + (a.reason ? " — " + a.reason : "");
+  }).join("\n") || "Пока не было.";
+}
+
+function listen(kind, fn) {
+  es.addEventListener(kind, function(e) { try { fn(JSON.parse(e.data)); } catch (x) {} });
+}
+
+// События приходят сами (SSE); EventSource переподключается после перезапуска программы.
+var es = new EventSource("/api/events?t=" + encodeURIComponent(T));
+listen("status", show);
+listen("apply", onApply);
+listen("channel", onChannel);
+listen("singbox", onSingbox);
+listen("paths", onPaths);
+listen("attempts", onAttempts);
+es.onopen = function() { if (lost) { lost = false; document.getElementById("umsg").textContent = ""; } };
+es.onerror = function() {
+  document.getElementById("umsg").className = "err";
+  document.getElementById("umsg").textContent = "Связь с программой потеряна, переподключаюсь...";
+  lost = true;
+};
 poll();
-setInterval(poll, 2000);
 </script>
 </body>
 </html>

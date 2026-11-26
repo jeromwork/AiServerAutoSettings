@@ -5,9 +5,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"remoteagents/internal/api"
 	"remoteagents/internal/api/fake"
@@ -135,6 +138,7 @@ func runCLI(ctx context.Context, name string, args []string) int {
 				return 1
 			}
 			fmt.Println(gen)
+			notifyCoreRestart(p)
 			return 0
 		case "revert":
 			if err := config.Revert(p, log); err != nil {
@@ -142,6 +146,7 @@ func runCLI(ctx context.Context, name string, args []string) int {
 				return 1
 			}
 			fmt.Println("ok")
+			notifyCoreRestart(p)
 			return 0
 		}
 		fmt.Fprintln(os.Stderr, "usage: remoteagents config check|apply|revert ...")
@@ -152,6 +157,28 @@ func runCLI(ctx context.Context, name string, args []string) int {
 		return 1
 	}
 	return 1
+}
+
+// notifyCoreRestart просит живое ядро перезапуститься на новый конфиг (событие, не опрос): без этого сторож
+// ждёт конца срока switch.json и откатывает его. Нет ядра или оно не ответило за 3 с — только сообщение.
+func notifyCoreRestart(p api.Paths) {
+	b, err := os.ReadFile(filepath.Join(p.State, core.UIURLFile))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "core is not running: the config applies on next start")
+		return
+	}
+	u, err := url.Parse(strings.TrimSpace(string(b)))
+	if err != nil || u.Host == "" {
+		return
+	}
+	u.Path = "/api/restart"
+	cl := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	resp, err := cl.Post(u.String(), "application/x-www-form-urlencoded", nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "core did not answer: restart it to use the new config")
+		return
+	}
+	_ = resp.Body.Close()
 }
 
 func printConfigErr(err error) {

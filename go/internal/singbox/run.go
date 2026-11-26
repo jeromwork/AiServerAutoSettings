@@ -42,6 +42,16 @@ type box struct {
 	binSource      string
 	binErr         string
 	running        bool
+
+	// Снимок для чтения без s.mu: Start держит s.mu до 150 с (загрузка/запуск), а Status/Ready/Effective
+	// зовут страница и канал — они не должны ждать.
+	vmu      sync.Mutex
+	vReady   chan struct{}
+	vRunning bool
+	vEff     api.Effective
+	vSource  string
+	vErr     string
+	vStart   bool
 }
 
 func New(cfg *api.Config, p api.Paths, log api.Logger, tr api.Traces, pr api.Procs, o Options) (api.Singbox, error) {
@@ -80,12 +90,14 @@ func New(cfg *api.Config, p api.Paths, log api.Logger, tr api.Traces, pr api.Pro
 	if ports[0] == ports[1] {
 		return nil, fmt.Errorf("singbox: port: allocation collision")
 	}
-	return &box{cfg: cfg, p: p, log: log, tr: tr, pr: pr, o: o, ready: make(chan struct{}), rc: api.RenderContext{Cfg: cfg, Mode: o.Mode, Instance: o.Instance, ChanPort: ports[0], ClashPort: ports[1], ClashSecret: token}}, nil
+	ready := make(chan struct{})
+	return &box{cfg: cfg, p: p, log: log, tr: tr, pr: pr, o: o, ready: ready, vReady: ready, rc: api.RenderContext{Cfg: cfg, Mode: o.Mode, Instance: o.Instance, ChanPort: ports[0], ClashPort: ports[1], ClashSecret: token}}, nil
 }
 func (s *box) Name() string             { return "singbox" }
-func (s *box) Ready() <-chan struct{}   { s.mu.Lock(); defer s.mu.Unlock(); return s.ready }
+func (s *box) Ready() <-chan struct{}   { s.vmu.Lock(); defer s.vmu.Unlock(); return s.vReady }
 func (s *box) ChanAddr() string         { return fmt.Sprintf("127.0.0.1:%d", s.rc.ChanPort) }
-func (s *box) Effective() api.Effective { s.mu.Lock(); defer s.mu.Unlock(); return s.rc.Effective }
+func (s *box) Effective() api.Effective { s.vmu.Lock(); defer s.vmu.Unlock(); return s.vEff }
+func (s *box) view(f func())            { s.vmu.Lock(); f(); s.vmu.Unlock() }
 func (s *box) PathNames() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -112,9 +124,9 @@ func (s *box) PathNames() []string {
 	return names
 }
 func (s *box) Status() map[string]any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return map[string]any{"running": s.running, "effective": s.rc.Effective, "chan": s.ChanAddr(), "binary": s.binSource, "binaryError": s.binErr}
+	s.vmu.Lock()
+	defer s.vmu.Unlock()
+	return map[string]any{"running": s.vRunning, "starting": s.vStart, "effective": s.vEff, "chan": s.ChanAddr(), "binary": s.vSource, "binaryError": s.vErr}
 }
 
 func (s *box) Start(ctx context.Context) error {
@@ -127,15 +139,19 @@ func (s *box) Start(ctx context.Context) error {
 	if s.running {
 		return nil
 	}
+	s.view(func() { s.vStart = true })
+	defer s.view(func() { s.vStart = false })
 	ctx, cancel := s.operation(ctx)
 	defer cancel()
 	binary, source, err := installBinary(ctx, s.p, s.log, s.tr)
 	if err != nil {
 		s.binErr = err.Error()
+		s.view(func() { s.vErr = s.binErr })
 		s.log.Error("singbox.binary.failed", "err", s.binErr)
 		return err
 	}
 	s.binErr, s.binSource = "", source
+	s.view(func() { s.vErr, s.vSource = "", source })
 	s.binary = binary
 	return s.apply(ctx, s.rc.Effective)
 }
@@ -281,6 +297,7 @@ func (s *box) launch(ctx context.Context, e api.Effective) error {
 		if err = s.Clash(ctx, "GET", "/version", nil, nil); err == nil {
 			s.running = true
 			s.rc.Effective = e
+			s.view(func() { s.vRunning, s.vEff = true, e })
 			select {
 			case <-s.ready:
 			default:
@@ -318,6 +335,7 @@ func (s *box) watch(ctx context.Context, p api.Process, e api.Effective) {
 		s.ready = make(chan struct{})
 	default:
 	}
+	s.view(func() { s.vRunning, s.vReady = false, s.ready })
 	if e.VPN || e.LAN {
 		retry, cancel := s.operation(context.WithoutCancel(ctx))
 		defer cancel()
@@ -343,6 +361,7 @@ func (s *box) stop(ctx context.Context) error {
 		s.ready = make(chan struct{})
 	default:
 	}
+	s.view(func() { s.vRunning, s.vReady = false, s.ready })
 	return nil
 }
 func (s *box) Stop(ctx context.Context) error {

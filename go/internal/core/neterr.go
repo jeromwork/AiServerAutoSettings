@@ -62,10 +62,13 @@ func (c *core) failStart(err error) {
 	if c.pcName() == "" {
 		text = "В конфиге нет имени компьютера латиницей."
 	}
+	text = sanitize(text)
 	c.log.Error("core: net-fatal", "text", text, "err", err.Error())
 	c.errMu.Lock()
 	c.lastErr = text
 	c.errMu.Unlock()
+	c.publishApply("error", text)
+	c.publishStatus()
 	_ = os.WriteFile(filepath.Join(c.p.State, lastErrFile), []byte(text+"\n"), 0600)
 	ptr, perr := config.ReadPointers(c.p)
 	if perr != nil || ptr.Switch == nil || ptr.Switch.To != c.gen {
@@ -108,12 +111,12 @@ func (c *core) connectInfo() map[string]any {
 	m := map[string]any{"error": c.lastErr}
 	c.errMu.Unlock()
 	pending := false
-	if c.ch != nil && !c.failed.Load() && !c.upOnce.Load() && c.gen != "" {
+	if ch := c.getCh(); ch != nil && !c.failed.Load() && !c.upOnce.Load() && c.gen != "" {
 		if ptr, err := config.ReadPointers(c.p); err == nil && ptr.Switch != nil && ptr.Switch.To == c.gen {
 			pending = true
 			m["left"] = max(int(time.Until(ptr.Switch.Deadline).Seconds()), 0)
-			if s := c.ch.State(); s.Reason != "" {
-				m["reason"] = s.Reason
+			if s := ch.State(); s.Reason != "" {
+				m["reason"] = sanitize(s.Reason)
 			}
 		}
 	}
