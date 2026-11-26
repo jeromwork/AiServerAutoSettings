@@ -52,7 +52,7 @@
         "geoip": {} } } } },
     "control": { "type": "boolean", "default": true },
     "controlRunAs": { "type": "string", "description": "v3: пользователь для команд моста на Linux/Mac" },
-    "autostart": { "type": "boolean", "default": true },
+    "autostart": { "type": "boolean", "default": false, "description": "v3 dev: выключен по умолчанию (решение владельца 26.11)" },
     "lan": { "type": "array", "items": { "type": "object", "required": ["name", "host"], "properties": {
       "name": { "$ref": "#/$defs/text" }, "host": { "$ref": "#/$defs/text" },
       "port": { "$ref": "#/$defs/port", "default": 22 },
