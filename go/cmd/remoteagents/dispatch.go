@@ -39,7 +39,7 @@ func dispatch(ctx context.Context, args []string) int {
 		if err != nil {
 			return 2
 		}
-		return core.Run(ctx, f)
+		return core.Run(ctx, withBuildInfo(f))
 
 	case "supervise":
 		f, err := parseRunFlags(args[1:], true)
@@ -62,7 +62,10 @@ func dispatch(ctx context.Context, args []string) int {
 		}
 		return c.Run(ctx, args[2:])
 
-	case "open", "status", "config", "update", "leftovers", "install", "enable", "uninstall", "singbox":
+	case "open", "status", "config", "update", "leftovers":
+		return runCLI(ctx, args[0], args[1:])
+
+	case "install", "enable", "uninstall", "singbox":
 		fmt.Fprintf(os.Stderr, "%s: not-implemented\n", args[0])
 		return 1
 	default:
