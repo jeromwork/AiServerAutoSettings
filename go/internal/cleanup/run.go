@@ -207,6 +207,23 @@ func (c *Cleaner) Run(ctx context.Context, reason string) []string {
 		}
 	}
 
+	if reason == "startup" {
+		rep, err := ScanLeftovers(c.p.Home)
+		if err != nil {
+			issues = append(issues, fmt.Sprintf("cleanup: scan leftovers: %v", err))
+		}
+		if c.log != nil {
+			c.log.Info("cleanup.leftovers",
+				"found", rep.Found,
+				"removed", rep.Removed,
+				"unremoved", rep.Unremoved,
+			)
+		}
+		for _, u := range rep.Unremoved {
+			issues = append(issues, fmt.Sprintf("cleanup: leftover process %s", u))
+		}
+	}
+
 	// 4. Check actual physical state
 	checkIssues := c.Check(ctx)
 	issues = append(issues, checkIssues...)
