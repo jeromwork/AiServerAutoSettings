@@ -22,12 +22,14 @@ type Options struct {
 	Instance, LockJSON string
 	LANSocks           func() string
 	RawConfig          string
+	DefaultIface       func() string // физический внешний интерфейс сейчас ("" — не определён)
 }
 
 type box struct {
 	mu             sync.Mutex
 	control        sync.Mutex
 	opCancel       context.CancelFunc
+	recCancel      context.CancelFunc // прерывает ожидание автоперезапуска при Stop
 	live           api.Process
 	liveCancel     context.CancelFunc
 	stopping       int
@@ -55,8 +57,11 @@ type box struct {
 	vSource   string
 	vErr      string
 	vStart    bool
-	applyHook func(context.Context) error // тесты
-	vChan     int                         // порты входов: меняются при повторном выборе, читаются без s.mu
+	applyHook func(context.Context) error                // тесты
+	crashes   int                                        // подряд упавших запусков без длительной работы (для задержки перезапуска)
+	restart   func(context.Context, api.Effective) error // тесты: замена apply при автоперезапуске
+	sleep     func(context.Context, time.Duration) bool  // тесты: ожидание задержки (false — отменено)
+	vChan     int                                        // порты входов: меняются при повторном выборе, читаются без s.mu
 	vClash    int
 }
 
@@ -170,6 +175,9 @@ func (s *box) Apply(ctx context.Context, e api.Effective) error {
 	return s.apply(ctx, e)
 }
 func (s *box) render(e api.Effective) ([]byte, error) {
+	if s.o.DefaultIface != nil {
+		s.rc.DefaultIface = s.o.DefaultIface()
+	}
 	rc := s.rc
 	rc.Effective = e
 	if s.o.LANSocks != nil {
@@ -318,15 +326,32 @@ func (s *box) launch(ctx context.Context, e api.Effective) error {
 		}
 	}
 }
+
+// Границы задержки автоперезапуска sing-box: 0.5 с … 30 с, удваивается, сбрасывается после длительной работы.
+const (
+	restartMin  = 500 * time.Millisecond
+	restartMax  = 30 * time.Second
+	restartLive = 30 * time.Second // проработал дольше — прошлые падения не считаются
+)
+
+func restartDelay(n int) time.Duration {
+	d := restartMin
+	for ; n > 0 && d < restartMax; n-- {
+		d *= 2
+	}
+	return min(d, restartMax)
+}
+
 func (s *box) watch(ctx context.Context, p api.Process, e api.Effective) {
+	started := time.Now()
 	select {
 	case <-ctx.Done():
 		return
 	case <-p.Done():
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.proc != p || ctx.Err() != nil {
+		s.mu.Unlock()
 		return
 	}
 	s.running = false
@@ -336,14 +361,71 @@ func (s *box) watch(ctx context.Context, p api.Process, e api.Effective) {
 	default:
 	}
 	s.view(func() { s.vRunning, s.vReady = false, s.ready })
+	if time.Since(started) > restartLive {
+		s.crashes = 0
+	}
+	s.mu.Unlock()
+	s.log.Error("singbox.exited", "code", p.ExitCode(), "crashes", s.crashes)
 	if e.VPN || e.LAN {
-		retry, cancel := s.operation(context.WithoutCancel(ctx))
-		defer cancel()
-		if err := s.apply(retry, api.Effective{}); err != nil {
-			s.log.Error("singbox.fallback", "error", err)
+		e = api.Effective{} // без TUN: прежний откат
+	}
+	s.recover(ctx, e)
+}
+
+// recover перезапускает упавший sing-box с экспоненциальной задержкой, пока не получится или его не остановят/перезапустят иначе.
+func (s *box) recover(ctx context.Context, e api.Effective) {
+	rctx, rcancel := context.WithCancel(context.Background())
+	defer rcancel()
+	s.control.Lock()
+	s.recCancel = rcancel
+	if s.stopping > 0 {
+		rcancel()
+	}
+	s.control.Unlock()
+	for {
+		d := restartDelay(s.crashes)
+		s.crashes++
+		s.log.Info("singbox.restart", "in_ms", d.Milliseconds(), "crashes", s.crashes)
+		sleep := s.sleep
+		if sleep == nil {
+			sleep = func(c context.Context, d time.Duration) bool {
+				t := time.NewTimer(d)
+				defer t.Stop()
+				select {
+				case <-t.C:
+					return true
+				case <-c.Done():
+					return false
+				}
+			}
 		}
+		if !sleep(rctx, d) {
+			return
+		}
+		s.mu.Lock()
+		s.control.Lock()
+		stopped := s.stopping > 0
+		s.control.Unlock()
+		if stopped || s.running || s.binary == "" {
+			s.mu.Unlock()
+			return
+		}
+		op, cancel := s.operation(context.Background())
+		var err error
+		if s.restart != nil {
+			err = s.restart(op, e)
+		} else {
+			err = s.apply(op, e)
+		}
+		cancel()
+		s.mu.Unlock()
+		if err == nil {
+			return
+		}
+		s.log.Error("singbox.restart-failed", "error", err)
 	}
 }
+
 func (s *box) stop(ctx context.Context) error {
 	if s.cancel != nil {
 		s.cancel()
@@ -370,6 +452,9 @@ func (s *box) Stop(ctx context.Context) error {
 	defer func() { s.control.Lock(); s.stopping--; s.control.Unlock() }()
 	if s.opCancel != nil {
 		s.opCancel()
+	}
+	if s.recCancel != nil {
+		s.recCancel()
 	}
 	if s.liveCancel != nil {
 		s.liveCancel()
@@ -538,4 +623,32 @@ func (s *box) reallocPorts() error {
 	s.rc.ChanPort, s.rc.ClashPort = ports[0], ports[1]
 	s.view(func() { s.vChan, s.vClash = ports[0], ports[1] })
 	return nil
+}
+
+// NetChanged — сеть сменилась. Интерфейс выхода изменился — перерисовать конфиг и перезапустить (все соединения
+// пересоздаются); не изменился — только сбросить зависшие соединения. restarted — был ли перезапуск.
+func (s *box) NetChanged(ctx context.Context) (restarted bool, err error) {
+	ctx, deadline := context.WithTimeout(ctx, 30*time.Second)
+	defer deadline()
+	if err = s.lockState(ctx); err != nil {
+		return false, fmt.Errorf("singbox: net-changed: %w", err)
+	}
+	defer s.mu.Unlock()
+	if !s.running || s.binary == "" || s.o.DefaultIface == nil {
+		return false, nil
+	}
+	cur, next := s.rc.DefaultIface, s.o.DefaultIface()
+	if cur == next {
+		cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		return false, s.Clash(cctx, "DELETE", "/connections", nil, nil)
+	}
+	ctx, cancel := s.operation(ctx)
+	defer cancel()
+	if err = s.apply(ctx, s.rc.Effective); err != nil {
+		s.rc.DefaultIface = cur
+		return false, err
+	}
+	s.log.Info("singbox.default-iface", "from", cur, "to", next)
+	return true, nil
 }

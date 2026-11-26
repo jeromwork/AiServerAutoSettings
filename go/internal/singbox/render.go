@@ -94,6 +94,11 @@ func Render(rc api.RenderContext) ([]byte, error) {
 		rules = append(rules, m{"inbound": "in-chan", "outbound": "chan"})
 	}
 	route := m{"auto_detect_interface": true}
+	if rc.DefaultIface != "" {
+		// Выход строго через физический адаптер: чужой TUN (Happ/Tailscale) как маршрут по умолчанию и его DNS не влияют.
+		delete(route, "auto_detect_interface")
+		route["default_interface"] = rc.DefaultIface
+	}
 	var ruleSets []m
 	if rc.Mode.AllowsTun() {
 		type part struct {
