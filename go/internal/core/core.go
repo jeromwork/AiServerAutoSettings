@@ -328,7 +328,7 @@ func (c *core) startNetwork(ctx context.Context) {
 	// 5. sing-box (не при --no-singbox и не при --no-channel).
 	if !f.Mode.NoSingbox && !f.Mode.NoChannel {
 		sb, e := singbox.New(c.cfg, c.p, log, c.clean, c.pr, singbox.Options{
-			Mode: f.Mode, Instance: c.clean.Instance(),
+			Mode: f.Mode, Instance: c.clean.Instance(), DefaultIface: platform.PhysicalInterface,
 			LANSocks: func() string {
 				if fw := c.getFw(); fw != nil {
 					return fw.InternalSocks()
@@ -389,6 +389,7 @@ func (c *core) startNetwork(ctx context.Context) {
 				log.Error("core: channel-start", "err", err.Error())
 				c.failStart(err)
 			}
+			go c.watchNet(ctx) // события смены сети → перестроить выход sing-box и канал
 		}
 	}
 

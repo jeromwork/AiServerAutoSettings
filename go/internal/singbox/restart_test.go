@@ -50,7 +50,10 @@ func TestRecoverBacksOffThenSucceeds(t *testing.T) {
 func TestRecoverStopsWhenWaitCancelled(t *testing.T) {
 	s := &box{log: &fake.Logger{}, binary: "sb"}
 	s.sleep = func(context.Context, time.Duration) bool { return false }
-	s.restart = func(context.Context, api.Effective) error { t.Fatal("перезапуск после Stop"); return nil }
+	s.restart = func(context.Context, api.Effective) error {
+		t.Fatal("перезапуск после Stop")
+		return nil
+	}
 	s.recover(context.Background(), api.Effective{})
 }
 
