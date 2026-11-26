@@ -15,6 +15,8 @@ type Iface struct {
 	Up           bool
 	Addrs        []string
 	DefaultRoute bool
+	Desc         string // описание адаптера (Windows: Description)
+	Metric       int    // метрика маршрута по умолчанию (меньше — предпочтительнее)
 }
 
 type Platform interface {
