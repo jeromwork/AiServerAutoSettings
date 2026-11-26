@@ -4,6 +4,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -15,6 +16,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 
 	"remoteagents/internal/agent"
 	"remoteagents/internal/api"
@@ -77,6 +79,12 @@ type core struct {
 	upd api.Updater
 
 	control atomic.Bool
+
+	// Ошибка запуска сети (понятный текст для страницы) и признак «первый up уже был».
+	failed  atomic.Bool
+	upOnce  atomic.Bool
+	errMu   sync.Mutex
+	lastErr string
 	opMu    sync.Mutex // UpdateNow, ConfigApply и прочие записи — одна за раз (+ LockOp между процессами)
 
 	onStop   []func()
@@ -157,7 +165,7 @@ func Run(ctx context.Context, f Flags) int {
 	bg.Add(2)
 	go func() { defer bg.Done(); c.healthLoop(runCtx) }()
 	go func() { defer bg.Done(); c.aliveLoop(runCtx) }()
-	if c.ch == nil {
+	if c.ch == nil && !c.failed.Load() {
 		// Нет канала (нет конфига / --no-channel / сбой): ждать «up» нечего, версия жива, когда страница поднята.
 		c.sendGood()
 	}
@@ -216,6 +224,8 @@ func (c *core) sendGood() {
 func (c *core) startComponents(ctx context.Context) {
 	f, log := c.f, c.log
 
+	c.loadLastErr()
+
 	// 3. Конфиг. Нет конфига — только страница.
 	var err error
 	if f.Config != "" {
@@ -261,13 +271,14 @@ func (c *core) startComponents(ctx context.Context) {
 	}
 
 	// 9. webui — всегда.
-	c.ui, err = webui.New(c, log, f.DevAssets)
+	c.ui, err = webui.New(c, log, f.DevAssets, c.prevUI())
 	if err != nil {
 		log.Error("core: webui", "err", err.Error())
 	} else if err = c.ui.Start(ctx); err != nil {
 		log.Error("core: webui-start", "err", err.Error())
 	} else {
 		_ = os.WriteFile(filepath.Join(c.p.State, UIURLFile), []byte(c.ui.URL()+"\n"), 0600)
+		c.savePrevUI()
 		log.Info("core: webui", "port", c.ui.Status()["port"])
 		c.emit(map[string]any{"t": "ui", "url": c.ui.URL()})
 	}
@@ -304,8 +315,10 @@ func (c *core) startNetwork(ctx context.Context) {
 		if err != nil {
 			log.Error("core: singbox", "err", err.Error())
 			c.sb = nil
+			c.failStart(err)
 		} else if err = c.sb.Start(ctx); err != nil {
 			log.Error("core: singbox-start", "err", err.Error())
+			c.failStart(err)
 		}
 	}
 
@@ -331,11 +344,13 @@ func (c *core) startNetwork(ctx context.Context) {
 		if err != nil {
 			log.Error("core: channel", "err", err.Error())
 			c.ch = nil
+			c.failStart(err)
 		} else {
 			updates, unsub := c.ch.Subscribe()
 			go c.watchChannel(ctx, updates, unsub)
 			if err = c.ch.Start(ctx); err != nil {
 				log.Error("core: channel-start", "err", err.Error())
+				c.failStart(err)
 			}
 		}
 	}
@@ -358,14 +373,50 @@ func (c *core) startNetwork(ctx context.Context) {
 // Убрать при выпуске v3 вместо v2.
 const devPCSuffix = "-v3"
 
+// pcName — имя ПК для сервера: явный --pc, иначе cfg.Name в латиницу (транслит, пробел → "-",
+// лишнее выкинуть) + devPCSuffix. Пусто, если из имени ничего не осталось.
 func (c *core) pcName() string {
 	if c.f.PC != "" {
 		return c.f.PC
 	}
-	if c.cfg != nil {
-		return c.cfg.Name + devPCSuffix
+	if c.cfg == nil {
+		return ""
 	}
-	return ""
+	n := translitPC(c.cfg.Name)
+	if len(n) > 40 {
+		n = n[:40]
+	}
+	if n == "" {
+		return ""
+	}
+	return n + devPCSuffix
+}
+
+var translitMap = map[rune]string{
+	'а': "a", 'б': "b", 'в': "v", 'г': "g", 'д': "d", 'е': "e", 'ё': "e", 'ж': "zh", 'з': "z", 'и': "i", 'й': "y",
+	'к': "k", 'л': "l", 'м': "m", 'н': "n", 'о': "o", 'п': "p", 'р': "r", 'с': "s", 'т': "t", 'у': "u", 'ф': "f",
+	'х': "kh", 'ц': "ts", 'ч': "ch", 'ш': "sh", 'щ': "shch", 'ъ': "", 'ы': "y", 'ь': "", 'э': "e", 'ю': "yu", 'я': "ya",
+}
+
+func translitPC(name string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(name) {
+		lower := unicode.ToLower(r)
+		if t, ok := translitMap[lower]; ok {
+			if lower != r && t != "" {
+				t = strings.ToUpper(t[:1]) + t[1:]
+			}
+			b.WriteString(t)
+			continue
+		}
+		switch {
+		case r == ' ' || r == '\t':
+			b.WriteByte('-')
+		case r < 128 && (r == '.' || r == '_' || r == '-' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'):
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // watchChannel: первый `up` → good (один раз) и Commit конфига.
@@ -380,9 +431,14 @@ func (c *core) watchChannel(ctx context.Context, ch <-chan api.ChannelState, uns
 				return
 			}
 			c.log.Info("core: channel", "state", st.State, "path", st.Path, "reason", st.Reason, "session", st.Session)
+			if st.State == "down" && fatalChannelReason(st.Reason) {
+				c.failStart(errors.New(st.Reason))
+			}
 			if st.State != "up" {
 				continue
 			}
+			c.upOnce.Store(true)
+			c.clearLastErr()
 			if c.gen != "" {
 				if err := config.Commit(c.p, c.gen, c.start); err != nil {
 					c.log.Warn("core: config-commit", "gen", c.gen, "err", err.Error())

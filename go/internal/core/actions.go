@@ -38,6 +38,8 @@ func (c *core) Status() map[string]any {
 		"version": c.f.Version,
 		"build":   c.f.Build,
 		"pc":      c.pcName(),
+		"name":    c.cfgName(),
+		"connect": c.connectInfo(),
 		"uptime":  int(time.Since(c.start).Seconds()),
 		"mode":    map[string]bool{"safe": c.f.Mode.Safe, "noTun": c.f.Mode.NoTun, "noChannel": c.f.Mode.NoChannel, "noSingbox": c.f.Mode.NoSingbox},
 		"control": c.control.Load(),
@@ -236,4 +238,11 @@ func (c *core) Rollback(ctx context.Context, reason string) error {
 func (c *core) Exit(ctx context.Context) error {
 	c.requestQuit(api.ExitOK, map[string]any{"t": api.MsgExit, "final": true})
 	return nil
+}
+
+func (c *core) cfgName() string {
+	if c.cfg != nil {
+		return c.cfg.Name
+	}
+	return ""
 }

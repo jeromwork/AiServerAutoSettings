@@ -20,6 +20,9 @@ pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; word-break: brea
 </head>
 <body>
 <h1>RemoteAgents &middot; <span id="ver">3.0</span></h1>
+<div id="pcl"></div>
+
+<div class="box" id="conn" style="display:none"></div>
 
 <div class="box">
   <button id="btn-update" type="button">Обновить</button>
@@ -48,7 +51,9 @@ pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; word-break: brea
   <div id="cfg-info"></div>
   <form id="cform" style="display:none">
     <textarea name="text" placeholder="Вставьте сюда конфиг"></textarea><br>
-    Пароль: <input type="password" name="password" autocomplete="off">
+    Пароль: <input type="password" name="password" id="pw" autocomplete="off">
+    <label><input type="checkbox" id="pw-show"> показать</label>
+    <div id="pwhint"></div>
     <button type="button" id="btn-cfg-check">Проверить</button>
     <button type="submit" id="btn-cfg-apply">Применить</button>
   </form>
@@ -77,12 +82,17 @@ pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; word-break: brea
 <script>
 var T = "__T__", S = null;
 
+var lost = false;
+
 function request(u, options) {
   return fetch(u, options).then(function(r) {
     if (!r.ok) throw new Error("HTTP " + r.status);
+    if (lost) { lost = false; document.getElementById("umsg").textContent = ""; }
     return r.json();
   }).catch(function(e) {
-    document.getElementById("umsg").textContent = "Связь со страницей: " + e.message;
+    document.getElementById("umsg").className = "err";
+    document.getElementById("umsg").textContent = "Связь с программой потеряна, переподключаюсь... (" + e.message + ")";
+    lost = true;
     throw e;
   });
 }
@@ -108,6 +118,18 @@ function show(s) {
     document.getElementById("lines").textContent = JSON.stringify(s, null, 2);
   }
 
+  var cn = document.getElementById("conn"), c = s.connect || {}, h = "";
+  if (c.pending) {
+    h = "<b>Подключаюсь к серверу...</b> (осталось " + c.left + " с)";
+    if (c.reason) h += "<div class=err>Последняя ошибка канала: " + esc(c.reason) + "</div>";
+  }
+  if (c.error) h += "<div class=err><b>" + esc(c.error) + "</b></div>";
+  cn.innerHTML = h;
+  cn.style.display = h ? "" : "none";
+  if (s.name || s.pc) document.getElementById("ver").title = (s.name || "") + (s.pc ? " (" + s.pc + " на сервере)" : "");
+  var pcl = document.getElementById("pcl");
+  if (pcl) pcl.textContent = s.pc ? (s.name || "Компьютер") + " (" + s.pc + " на сервере)" : "";
+
   var noCfg = s.config === false;
   document.getElementById("cfg-info").textContent = noCfg ? "Конфиг не задан — вставьте его ниже и нажмите «Применить»." : "";
   if (noCfg) document.getElementById("cform").style.display = "";
@@ -115,6 +137,36 @@ function show(s) {
   var ctl = s.control !== false;
   document.getElementById("ctl").textContent = ctl ? "разрешено" : "запрещено";
   document.getElementById("btn-control").textContent = ctl ? "Запретить" : "Разрешить";
+}
+
+function esc(t) {
+  return String(t).replace(/[&<>"]/g, function(c) { return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]; });
+}
+
+// Защищён ли паролем вставленный конфиг: kdf/check в JSON или enc1:.
+function protectedState(text) {
+  text = text.trim();
+  if (!text) return null;
+  try {
+    var o = JSON.parse(text);
+    if (o && typeof o === "object") return !!(o.kdf || (typeof o.check === "string" && o.check.indexOf("enc1:") === 0));
+  } catch (e) {}
+  if (text.indexOf("enc1:") >= 0) return true;
+  return null;
+}
+
+function pwHint() {
+  var f = document.getElementById("cform"), h = document.getElementById("pwhint");
+  var p = protectedState(f.text.value);
+  h.className = "";
+  if (p === true) h.textContent = "Конфиг защищён паролем - введите пароль";
+  else if (p === false) h.textContent = "Пароль не нужен";
+  else h.textContent = "";
+  return p;
+}
+
+function pwProblem(list) {
+  return (list || []).map(function(x) { return /invalid password/.test(x) ? "Неверный пароль" : x; }).join("\n");
 }
 
 function poll() {
@@ -214,6 +266,12 @@ document.getElementById("btn-control").onclick = function() {
   });
 };
 
+document.getElementById("cform").text.addEventListener("input", pwHint);
+document.getElementById("cform").text.addEventListener("paste", function() { setTimeout(pwHint, 0); });
+document.getElementById("pw-show").onchange = function() {
+  document.getElementById("pw").type = this.checked ? "text" : "password";
+};
+
 document.getElementById("btn-cfg-other").onclick = function() {
   document.getElementById("cform").style.display = "";
 };
@@ -224,7 +282,7 @@ document.getElementById("btn-cfg-check").onclick = function() {
   m.textContent = "Проверяю...";
   post("/api/config/check", { text: f.text.value, password: f.password.value }).then(function(r) {
     m.className = r.ok ? "ok" : "err";
-    m.textContent = r.ok ? "Конфиг корректен" : (r.problems || ["Ошибка проверки"]).join("\n");
+    m.textContent = r.ok ? "Конфиг корректен" : pwProblem(r.problems || ["Ошибка проверки"]);
   });
 };
 
@@ -242,10 +300,16 @@ document.getElementById("cform").onsubmit = function(e) {
   e.preventDefault();
   var f = this;
   var m = document.getElementById("cmsg");
+  if (pwHint() === true && !f.password.value) {
+    m.className = "err";
+    m.textContent = "Конфиг защищён паролем - введите пароль и нажмите «Применить» снова.";
+    f.password.focus();
+    return false;
+  }
   m.textContent = "Применяю...";
   post("/api/config/apply", { text: f.text.value, password: f.password.value }).then(function(r) {
     m.className = r.ok ? "ok" : "err";
-    m.textContent = r.ok ? "Конфиг принят, перезапускаю..." : (r.problems || ["Ошибка применения"]).join("\n");
+    m.textContent = r.ok ? "Конфиг принят, перезапускаю..." : pwProblem(r.problems || ["Ошибка применения"]);
     if (r.ok) f.password.value = "";
     poll();
   });

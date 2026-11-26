@@ -57,7 +57,16 @@ func (u *UI) Status() map[string]any {
 	}
 }
 
-func New(act api.Actions, log api.Logger, devAssets string) (*UI, error) {
+// Prev — адрес и токен прошлого запуска: страница после перезапуска ядра остаётся на том же порту с тем же токеном.
+type Prev struct {
+	Port  int
+	Token string
+}
+
+func (u *UI) Token() string { return u.token }
+func (u *UI) Port() int     { return u.port }
+
+func New(act api.Actions, log api.Logger, devAssets string, prev ...Prev) (*UI, error) {
 	if act == nil {
 		return nil, errors.New("webui: invalid-args: act is required")
 	}
@@ -70,13 +79,27 @@ func New(act api.Actions, log api.Logger, devAssets string) (*UI, error) {
 		return nil, fmt.Errorf("webui: token-gen-failed: %w", err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokBytes)
-	log.Secret(token)
+	var pv Prev
+	if len(prev) > 0 {
+		pv = prev[0]
+	}
 
 	lc := net.ListenConfig{}
-	l, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	var l net.Listener
+	var err error
+	if pv.Port >= 1024 && pv.Port <= 65535 {
+		l, err = lc.Listen(context.Background(), "tcp", fmt.Sprintf("127.0.0.1:%d", pv.Port))
+		if err == nil && len(pv.Token) >= 16 {
+			token = pv.Token
+		}
+	}
+	if l == nil {
+		l, err = lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("webui: bind-failed: %w", err)
 	}
+	log.Secret(token)
 	tcpAddr, ok := l.Addr().(*net.TCPAddr)
 	if !ok {
 		_ = l.Close()
