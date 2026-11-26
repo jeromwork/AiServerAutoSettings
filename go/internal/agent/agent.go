@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,23 +30,25 @@ const (
 )
 
 type Agent struct {
-	d        api.AgentDeps
-	token    string
-	instance string
-	ctx      context.Context
-	cancel   context.CancelFunc
-	sem      chan struct{}
-	mu       sync.Mutex
-	closed   bool
-	servers  map[*http.Server]struct{}
-	wg       sync.WaitGroup
-	requests sync.WaitGroup
-	execMu   sync.Mutex
-	execs    map[string]execution
-	writeMu  sync.Mutex
-	parts    map[string]struct{}
-	started  time.Time
-	port     int
+	d              api.AgentDeps
+	token          string
+	instance       string
+	ctx            context.Context
+	cancel         context.CancelFunc
+	sem            chan struct{}
+	mu             sync.Mutex
+	closed         bool
+	servers        map[*http.Server]struct{}
+	listenerTraces map[*http.Server]string
+	procTraceID    string
+	wg             sync.WaitGroup
+	requests       sync.WaitGroup
+	execMu         sync.Mutex
+	execs          map[string]execution
+	writeMu        sync.Mutex
+	parts          map[string]struct{}
+	started        time.Time
+	port           int
 }
 
 type execution struct {
@@ -75,16 +78,17 @@ func New(d api.AgentDeps) (*Agent, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &Agent{
-		d:        d,
-		token:    token,
-		instance: hex.EncodeToString(secret[32:]),
-		ctx:      ctx,
-		cancel:   cancel,
-		sem:      make(chan struct{}, concMax),
-		servers:  make(map[*http.Server]struct{}),
-		execs:    make(map[string]execution),
-		parts:    make(map[string]struct{}),
-		started:  time.Now(),
+		d:              d,
+		token:          token,
+		instance:       hex.EncodeToString(secret[32:]),
+		ctx:            ctx,
+		cancel:         cancel,
+		sem:            make(chan struct{}, concMax),
+		servers:        make(map[*http.Server]struct{}),
+		listenerTraces: make(map[*http.Server]string),
+		execs:          make(map[string]execution),
+		parts:          make(map[string]struct{}),
+		started:        time.Now(),
 	}
 	// Remove journal staging files left by a crash, even if the main journal
 	// has not been created yet. Only this component's reserved names qualify.
@@ -99,11 +103,40 @@ func New(d api.AgentDeps) (*Agent, error) {
 			return nil, fmt.Errorf("agent: journal staging: %w", err)
 		}
 	}
-	// TODO: AgentDeps needs a Traces dependency for Intent/Applied/Done.
-	// This private recovery journal does not satisfy the Traces contract; it
-	// only removes uploads interrupted by a crash, including outside Home.
+	if d.Traces != nil {
+		exe, err := os.Executable()
+		if err != nil {
+			exe = os.Args[0]
+		}
+		procID := fmt.Sprintf("agent-%d", time.Now().UnixNano())
+		if err := d.Traces.Intent(api.Trace{
+			Kind:     "process",
+			ID:       procID,
+			Instance: d.Traces.Instance(),
+			Owner:    "agent",
+			Data: map[string]string{
+				"exe":  exe,
+				"home": d.Paths.Home,
+			},
+		}); err != nil {
+			cancel()
+			return nil, fmt.Errorf("agent: trace intent: %w", err)
+		}
+		if err := d.Traces.Applied("process", procID, map[string]string{
+			"pid":   strconv.Itoa(os.Getpid()),
+			"start": a.started.UTC().Format(time.RFC3339Nano),
+		}, nil); err != nil {
+			_ = d.Traces.Done("process", procID)
+			cancel()
+			return nil, fmt.Errorf("agent: trace applied: %w", err)
+		}
+		a.procTraceID = procID
+	}
 	data, err := os.ReadFile(a.partsJournal())
 	if err != nil && !os.IsNotExist(err) {
+		if a.procTraceID != "" && d.Traces != nil {
+			_ = d.Traces.Done("process", a.procTraceID)
+		}
 		cancel()
 		return nil, fmt.Errorf("agent: uploads: %w", err)
 	}
@@ -123,6 +156,9 @@ func New(d api.AgentDeps) (*Agent, error) {
 			}
 		}
 		if err != nil {
+			if a.procTraceID != "" && d.Traces != nil {
+				_ = d.Traces.Done("process", a.procTraceID)
+			}
 			cancel()
 			return nil, fmt.Errorf("agent: uploads: %w", err)
 		}
@@ -150,13 +186,39 @@ func (a *Agent) Serve(l net.Listener) {
 	}
 	srv.SetKeepAlivesEnabled(false)
 
+	addr := l.Addr().String()
+	traceID := fmt.Sprintf("agent-listener-%d", time.Now().UnixNano())
+	if a.d.Traces != nil {
+		if err := a.d.Traces.Intent(api.Trace{
+			Kind:     "listener",
+			ID:       traceID,
+			Owner:    "agent",
+			Instance: a.d.Traces.Instance(),
+			Data:     map[string]string{"addr": addr},
+		}); err != nil {
+			a.d.Log.Warn("serve", "trace-intent", err.Error())
+			_ = l.Close()
+			return
+		}
+		if err := a.d.Traces.Applied("listener", traceID, map[string]string{"addr": addr}, nil); err != nil {
+			a.d.Log.Warn("serve", "trace-applied", err.Error())
+			_ = a.d.Traces.Done("listener", traceID)
+			_ = l.Close()
+			return
+		}
+	}
+
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
+		if a.d.Traces != nil {
+			_ = a.d.Traces.Done("listener", traceID)
+		}
 		_ = l.Close()
 		return
 	}
 	a.servers[srv] = struct{}{}
+	a.listenerTraces[srv] = traceID
 	if addr, ok := l.Addr().(*net.TCPAddr); ok {
 		a.port = addr.Port
 	}
@@ -165,10 +227,16 @@ func (a *Agent) Serve(l net.Listener) {
 
 	go func() {
 		defer a.wg.Done()
+		defer func() {
+			if a.d.Traces != nil {
+				_ = a.d.Traces.Done("listener", traceID)
+			}
+		}()
 		err := srv.Serve(l)
 		_ = srv.Close()
 		a.mu.Lock()
 		delete(a.servers, srv)
+		delete(a.listenerTraces, srv)
 		a.mu.Unlock()
 		if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			a.d.Log.Warn("serve", "error", err.Error())
@@ -198,6 +266,21 @@ func (a *Agent) Close() error {
 	}
 	a.wg.Wait()
 	a.requests.Wait()
+
+	a.mu.Lock()
+	for _, id := range a.listenerTraces {
+		if a.d.Traces != nil {
+			_ = a.d.Traces.Done("listener", id)
+		}
+	}
+	clear(a.listenerTraces)
+	a.mu.Unlock()
+
+	if a.d.Traces != nil && a.procTraceID != "" {
+		if err := a.d.Traces.Done("process", a.procTraceID); err != nil {
+			errs = append(errs, err)
+		}
+	}
 
 	a.execMu.Lock()
 	for _, e := range a.execs {
