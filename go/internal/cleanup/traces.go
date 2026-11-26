@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"remoteagents/internal/fsx"
 
 	"remoteagents/internal/api"
 )
@@ -107,12 +108,7 @@ func (c *Cleaner) append(t api.Trace) error {
 		err = f.Sync()
 	}
 	if err == nil {
-		var dir *os.File
-		dir, err = os.Open(c.p.State)
-		if err == nil {
-			err = dir.Sync()
-			_ = dir.Close()
-		}
+		err = fsx.SyncDir(c.p.State)
 	}
 	if err != nil {
 		return fmt.Errorf("cleanup: sync: %w", err)

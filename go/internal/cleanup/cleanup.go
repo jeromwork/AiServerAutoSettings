@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"remoteagents/internal/fsx"
 	"strings"
 	"sync"
 
@@ -81,10 +82,7 @@ func New(p api.Paths, log api.Logger, plat api.Platform) (*Cleaner, error) {
 			return nil, fmt.Errorf("cleanup: instance: rename: %w", err)
 		}
 	}
-	if dir, err := os.Open(p.State); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
-	}
+	_ = fsx.SyncDir(p.State)
 
 	return &Cleaner{p: p, log: log, plat: plat, instance: id}, nil
 }

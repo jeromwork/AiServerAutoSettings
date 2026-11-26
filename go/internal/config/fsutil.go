@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"remoteagents/internal/fsx"
 )
 
 // writeFile: .tmp + fsync + rename + fsync of the directory.
@@ -58,3 +59,5 @@ func mkPrivateDir(dir string) error {
 	}
 	return protectDir(dir)
 }
+
+func syncDir(dir string) error { return fsx.SyncDir(dir) }

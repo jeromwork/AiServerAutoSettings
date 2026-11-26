@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"remoteagents/internal/fsx"
 
 	"golang.org/x/sys/unix"
 
@@ -50,10 +51,5 @@ func removeFile(path string) error {
 }
 
 func syncParent(path string) error {
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer func() { _ = d.Close() }()
-	return d.Sync()
+	return fsx.SyncDir(filepath.Dir(path))
 }

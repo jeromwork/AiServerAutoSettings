@@ -18,9 +18,6 @@ func replace(from, to string) error {
 	return windows.MoveFileEx(a, b, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
 }
 
-// Windows cannot fsync a directory; MOVEFILE_WRITE_THROUGH makes the rename durable.
-func syncDir(string) error { return nil }
-
 // protectDir sets a protected DACL: SYSTEM, Administrators and the current user; children inherit it.
 func protectDir(dir string) error {
 	tok := windows.GetCurrentProcessToken()

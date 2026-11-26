@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"remoteagents/internal/fsx"
 	"strconv"
 	"strings"
 	"sync"
@@ -844,10 +845,7 @@ func (f *Forwarder) saveExposedLocked() error {
 	tmpName = "" // Prevent removal after successful rename
 
 	// Fsync parent directory
-	if dir, err := os.Open(f.paths.State); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
-	}
+	_ = fsx.SyncDir(f.paths.State)
 
 	return nil
 }

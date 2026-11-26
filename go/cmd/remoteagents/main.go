@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"remoteagents/internal/api"
 	"remoteagents/internal/core"
@@ -16,7 +18,10 @@ var pubKeys = ""
 var releaseRepo = ""
 
 func main() {
-	os.Exit(dispatch(context.Background(), os.Args[1:]))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := dispatch(ctx, os.Args[1:])
+	stop()
+	os.Exit(code)
 }
 
 // suppress unused

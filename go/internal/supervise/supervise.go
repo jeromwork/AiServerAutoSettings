@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -412,7 +413,7 @@ func checkSwitchExpire(p api.Paths, log api.Logger) (bool, error) {
 // OnUI вызывается, когда ядро сообщило адрес страницы (сообщение "ui"); nil — не нужно.
 var OnUI func(url string)
 
-func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self string, mode api.Mode, args []string) int {
+func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self string, mode api.Mode, args []string) (code int) {
 	if log == nil {
 		j, err := journal.New(p, api.StreamSup, journal.Options{MaxBytes: 5 << 20, Keep: 4})
 		if err != nil {
@@ -443,6 +444,22 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		return 1
 	}
 	defer unlock()
+
+	// Любой выход сторожа (в том числе остановка по boot-failures и паника) —
+	// сразу уборка: на ПК не остаются процессы, порты, lock/url-файлы.
+	var sl *slots
+	defer func() {
+		reason := "exit"
+		if r := recover(); r != nil {
+			log.Error(fmt.Sprintf("supervise: panic: %v", r), "stack", string(debug.Stack()))
+			code = 1
+		}
+		if code != 0 || (sl != nil && sl.Stopped != "") {
+			reason = "crash"
+		}
+		runCleanup(ctx, p, log, reason)
+		_ = os.Remove(filepath.Join(p.State, "webui.url")) // адрес страницы мёртвого ядра
+	}()
 
 	reset := false
 	fast := false
@@ -483,6 +500,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 	// Serialize every startup write with Stage, rollback and uninstall, including
 	// executable rotation and the mode fixed for this supervisor's lifetime.
 	s, err := initialize(ctx, p, self, mode, reset)
+	sl = s
 	if err != nil {
 		if ctx.Err() != nil {
 			return api.SupExitDone
@@ -620,6 +638,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 			for scanner.Scan() {
 				var msg message
 				if json.Unmarshal(scanner.Bytes(), &msg) != nil {
+					log.Info("core stdout: " + scanner.Text())
 					continue
 				}
 				select {
@@ -668,9 +687,24 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 			defer close(stderrDone)
 			defer func() { _ = stderrReader.Close() }()
 			scanner := bufio.NewScanner(stderrReader)
+			scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
+			var tail []string
+			defer func() {
+				select {
+				case <-proc.Done():
+				case <-time.After(2 * time.Second):
+					return
+				}
+				if c := proc.ExitCode(); c != 0 && len(tail) > 0 {
+					log.Error(fmt.Sprintf("supervise: core crashed (код %d); хвост stderr:\n%s", c, strings.Join(tail, "\n")))
+				}
+			}()
 			for scanner.Scan() {
 				line := scanner.Text()
 				log.Info("core stderr: " + line)
+				if tail = append(tail, line); len(tail) > 40 {
+					tail = tail[1:]
+				}
 			}
 			if err := scanner.Err(); err != nil && !errors.Is(err, io.ErrClosedPipe) {
 				log.Error("supervise: stderr-read", "err", err)
