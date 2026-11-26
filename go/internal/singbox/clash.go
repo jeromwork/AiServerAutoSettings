@@ -24,7 +24,7 @@ func (s *box) Clash(ctx context.Context, method, path string, body, out any) err
 			return fmt.Errorf("singbox: clash-body: invalid JSON")
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("http://127.0.0.1:%d%s", s.rc.ClashPort, path), bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("http://127.0.0.1:%d%s", s.clashPort(), path), bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("singbox: clash-request: invalid request")
 	}
@@ -48,3 +48,5 @@ func (s *box) Clash(ctx context.Context, method, path string, body, out any) err
 	}
 	return nil
 }
+
+func (s *box) clashPort() int { s.vmu.Lock(); defer s.vmu.Unlock(); return s.vClash }

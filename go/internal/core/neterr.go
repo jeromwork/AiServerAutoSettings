@@ -69,6 +69,8 @@ func (c *core) failStart(err error) {
 	c.errMu.Unlock()
 	c.publishApply("error", text)
 	c.publishStatus()
+	// Версия сама жива: сетевая ошибка конфига/порта лечится откатом конфига, а не слотом версии (сторож).
+	c.sendGood()
 	_ = os.WriteFile(filepath.Join(c.p.State, lastErrFile), []byte(text+"\n"), 0600)
 	ptr, perr := config.ReadPointers(c.p)
 	if perr != nil || ptr.Switch == nil || ptr.Switch.To != c.gen {

@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -45,13 +47,16 @@ type box struct {
 
 	// Снимок для чтения без s.mu: Start держит s.mu до 150 с (загрузка/запуск), а Status/Ready/Effective
 	// зовут страница и канал — они не должны ждать.
-	vmu      sync.Mutex
-	vReady   chan struct{}
-	vRunning bool
-	vEff     api.Effective
-	vSource  string
-	vErr     string
-	vStart   bool
+	vmu       sync.Mutex
+	vReady    chan struct{}
+	vRunning  bool
+	vEff      api.Effective
+	vSource   string
+	vErr      string
+	vStart    bool
+	applyHook func(context.Context) error // тесты
+	vChan     int                         // порты входов: меняются при повторном выборе, читаются без s.mu
+	vClash    int
 }
 
 func New(cfg *api.Config, p api.Paths, log api.Logger, tr api.Traces, pr api.Procs, o Options) (api.Singbox, error) {
@@ -76,26 +81,20 @@ func New(cfg *api.Config, p api.Paths, log api.Logger, tr api.Traces, pr api.Pro
 	}
 	token := hex.EncodeToString(secret)
 	log.Secret(token)
-	ports := make([]int, 2)
-	for i := range ports {
-		l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
-		if err != nil {
-			return nil, fmt.Errorf("singbox: port: %w", err)
-		}
-		ports[i] = l.Addr().(*net.TCPAddr).Port
-		if err = l.Close(); err != nil {
-			return nil, fmt.Errorf("singbox: port: %w", err)
-		}
-	}
-	if ports[0] == ports[1] {
-		return nil, fmt.Errorf("singbox: port: allocation collision")
+	ports, err := allocPorts(2)
+	if err != nil {
+		return nil, err
 	}
 	ready := make(chan struct{})
-	return &box{cfg: cfg, p: p, log: log, tr: tr, pr: pr, o: o, ready: ready, vReady: ready, rc: api.RenderContext{Cfg: cfg, Mode: o.Mode, Instance: o.Instance, ChanPort: ports[0], ClashPort: ports[1], ClashSecret: token}}, nil
+	return &box{cfg: cfg, p: p, log: log, tr: tr, pr: pr, o: o, ready: ready, vReady: ready, vChan: ports[0], vClash: ports[1], rc: api.RenderContext{Cfg: cfg, Mode: o.Mode, Instance: o.Instance, ChanPort: ports[0], ClashPort: ports[1], ClashSecret: token}}, nil
 }
-func (s *box) Name() string             { return "singbox" }
-func (s *box) Ready() <-chan struct{}   { s.vmu.Lock(); defer s.vmu.Unlock(); return s.vReady }
-func (s *box) ChanAddr() string         { return fmt.Sprintf("127.0.0.1:%d", s.rc.ChanPort) }
+func (s *box) Name() string           { return "singbox" }
+func (s *box) Ready() <-chan struct{} { s.vmu.Lock(); defer s.vmu.Unlock(); return s.vReady }
+func (s *box) ChanAddr() string {
+	s.vmu.Lock()
+	defer s.vmu.Unlock()
+	return fmt.Sprintf("127.0.0.1:%d", s.vChan)
+}
 func (s *box) Effective() api.Effective { s.vmu.Lock(); defer s.vmu.Unlock(); return s.vEff }
 func (s *box) view(f func())            { s.vmu.Lock(); f(); s.vmu.Unlock() }
 func (s *box) PathNames() []string {
@@ -126,7 +125,7 @@ func (s *box) PathNames() []string {
 func (s *box) Status() map[string]any {
 	s.vmu.Lock()
 	defer s.vmu.Unlock()
-	return map[string]any{"running": s.vRunning, "starting": s.vStart, "effective": s.vEff, "chan": s.ChanAddr(), "binary": s.vSource, "binaryError": s.vErr}
+	return map[string]any{"running": s.vRunning, "starting": s.vStart, "effective": s.vEff, "chan": fmt.Sprintf("127.0.0.1:%d", s.vChan), "binary": s.vSource, "binaryError": s.vErr}
 }
 
 func (s *box) Start(ctx context.Context) error {
@@ -153,7 +152,7 @@ func (s *box) Start(ctx context.Context) error {
 	s.binErr, s.binSource = "", source
 	s.view(func() { s.vErr, s.vSource = "", source })
 	s.binary = binary
-	return s.apply(ctx, s.rc.Effective)
+	return s.startWithPorts(ctx)
 }
 func (s *box) Apply(ctx context.Context, e api.Effective) error {
 	ctx, deadline := context.WithTimeout(ctx, 30*time.Second)
@@ -309,7 +308,7 @@ func (s *box) launch(ctx context.Context, e api.Effective) error {
 		select {
 		case <-proc.Done():
 			cancel()
-			return fmt.Errorf("singbox: start: exit %d", proc.ExitCode())
+			return fmt.Errorf("singbox: start: exit %d: %w", proc.ExitCode(), errEarlyExit)
 		case <-ctx.Done():
 			cancel()
 			_ = proc.Stop(ctx)
@@ -454,4 +453,85 @@ func (s *box) secrets(value any) {
 			s.secrets(item)
 		}
 	}
+}
+
+// errEarlyExit — sing-box вышел до готовности (порт занят/запрещён, ошибка конфига и т.п.).
+var errEarlyExit = errors.New("exited before ready")
+
+const portRetries = 5
+
+// bindCheck — реальная проверка порта 127.0.0.1: TCP и UDP (вход direct слушает оба; Windows
+// запрещает UDP в зарезервированных диапазонах Hyper-V/Happ, а TCP-проверка этого не видит). Подменяется в тестах.
+var bindCheck = func(port int) error {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	l, err := net.Listen("tcp4", addr)
+	if err != nil {
+		return err
+	}
+	_ = l.Close()
+	u, err := net.ListenPacket("udp4", addr)
+	if err != nil {
+		return err
+	}
+	return u.Close()
+}
+
+// allocPorts выбирает n различных портов, проходящих bindCheck.
+func allocPorts(n int) ([]int, error) {
+	ports := make([]int, 0, n)
+	for tries := 0; len(ports) < n && tries < 50; tries++ {
+		l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			return nil, fmt.Errorf("singbox: port: %w", err)
+		}
+		port := l.Addr().(*net.TCPAddr).Port
+		_ = l.Close()
+		dup := false
+		for _, p := range ports {
+			dup = dup || p == port
+		}
+		if dup || bindCheck(port) != nil {
+			continue
+		}
+		ports = append(ports, port)
+	}
+	if len(ports) < n {
+		return nil, fmt.Errorf("singbox: port: no bindable port found")
+	}
+	return ports, nil
+}
+
+// startWithPorts — apply с повтором на других портах, если sing-box вышел из-за порта.
+// Порты перед запуском проверяются реальным bind; после раннего выхода — ещё раз, и при отказе берутся новые.
+func (s *box) startWithPorts(ctx context.Context) error {
+	var err error
+	for attempt := 0; ; attempt++ {
+		if bindCheck(s.rc.ChanPort) != nil || bindCheck(s.rc.ClashPort) != nil {
+			if err = s.reallocPorts(); err != nil {
+				return err
+			}
+		}
+		if s.applyHook != nil {
+			err = s.applyHook(ctx)
+		} else {
+			err = s.apply(ctx, s.rc.Effective)
+		}
+		if err == nil || !errors.Is(err, errEarlyExit) || attempt >= portRetries || ctx.Err() != nil {
+			return err
+		}
+		if bindCheck(s.rc.ChanPort) == nil && bindCheck(s.rc.ClashPort) == nil {
+			return err // порты в порядке — причина не в них
+		}
+		s.log.Warn("singbox.port-retry", "attempt", attempt+1)
+	}
+}
+
+func (s *box) reallocPorts() error {
+	ports, err := allocPorts(2)
+	if err != nil {
+		return err
+	}
+	s.rc.ChanPort, s.rc.ClashPort = ports[0], ports[1]
+	s.view(func() { s.vChan, s.vClash = ports[0], ports[1] })
+	return nil
 }
