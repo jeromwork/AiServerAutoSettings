@@ -1,5 +1,6 @@
 {
   "version": "1.14.4",
+  "mirrorBase": "https://github.com/jeromwork/AiServerAutoSettings/releases/download/v3-latest",
   "assets": [
     {
       "os": "windows",

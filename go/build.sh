@@ -5,16 +5,19 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
 fail() { printf 'build: %s\n' "$*" >&2; exit 1; }
 targets=(windows/amd64 linux/amd64 linux/arm64 darwin/amd64 darwin/arm64)
+# By default the exe carries no sing-box (it is found or downloaded at start).
+embed_singbox=0
+if [[ ${1:-} == --embed-singbox ]]; then embed_singbox=1; shift; fi
 case "${1:-}" in
-  '') [[ $# == 0 ]] || fail 'usage: build.sh [--target os/arch]' ;;
+  '') [[ $# == 0 ]] || fail 'usage: build.sh [--embed-singbox] [--target os/arch]' ;;
   --target)
-    [[ $# == 2 ]] || fail 'usage: build.sh [--target os/arch]'
+    [[ $# == 2 ]] || fail 'usage: build.sh [--embed-singbox] [--target os/arch]'
     case "$2" in
       windows/amd64|linux/amd64|linux/arm64|darwin/amd64|darwin/arm64) targets=("$2") ;;
       *) fail "unsupported target: $2" ;;
     esac ;;
-  --help|-h) printf 'usage: build.sh [--target os/arch]\n'; exit 0 ;;
-  *) fail 'usage: build.sh [--target os/arch]' ;;
+  --help|-h) printf 'usage: build.sh [--embed-singbox] [--target os/arch]\n'; exit 0 ;;
+  *) fail 'usage: build.sh [--embed-singbox] [--target os/arch]' ;;
 esac
 source tools/versions.env
 [[ $(go env GOVERSION) == "$GO_VERSION" ]] || fail "Go $GO_VERSION is required"
@@ -75,11 +78,15 @@ build() {
       resource="cmd/remoteagents/rsrc_windows_$arch.syso"
       cp -- "$work/rsrc_windows_$arch.syso" "$resource"
     fi
-    # Each exe carries only its own pinned, sha256-verified sing-box.
-    python3 -I tools/embed-singbox.py third_party/singbox.lock.json "$os" "$arch" \
-      "$embed" "$PWD/.tmp/singbox-cache"
+    tags=''
+    if [[ $embed_singbox == 1 ]]; then
+      # Each exe carries only its own pinned, sha256-verified sing-box.
+      python3 -I tools/embed-singbox.py third_party/singbox.lock.json "$os" "$arch" \
+        "$embed" "$PWD/.tmp/singbox-cache"
+      tags=singbox_embed
+    fi
     printf 'Building %s (%s)\n' "$target" "$version"
-    GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -tags singbox_embed \
+    GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build ${tags:+-tags "$tags"} \
       -mod=readonly -trimpath -ldflags "$ldflags" -o "$work/$name" ./cmd/remoteagents
     if [[ -n $resource ]]; then
       rm -f -- "$resource"
@@ -91,5 +98,5 @@ build() {
   printf 'OK: %s asset(s) in dist/\n' "$#"
 }
 export -f build fail
-export ldflags version
+export ldflags version embed_singbox
 timeout --kill-after=5 420 bash -euo pipefail -c 'build "$@"' bash "${targets[@]}"

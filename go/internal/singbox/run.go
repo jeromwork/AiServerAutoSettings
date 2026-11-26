@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -40,6 +39,8 @@ type box struct {
 	ready          chan struct{}
 	rc             api.RenderContext
 	binary, config string
+	binSource      string
+	binErr         string
 	running        bool
 }
 
@@ -113,11 +114,11 @@ func (s *box) PathNames() []string {
 func (s *box) Status() map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return map[string]any{"running": s.running, "effective": s.rc.Effective, "chan": s.ChanAddr()}
+	return map[string]any{"running": s.running, "effective": s.rc.Effective, "chan": s.ChanAddr(), "binary": s.binSource, "binaryError": s.binErr}
 }
 
 func (s *box) Start(ctx context.Context) error {
-	ctx, deadline := context.WithTimeout(ctx, 30*time.Second)
+	ctx, deadline := context.WithTimeout(ctx, 150*time.Second)
 	defer deadline()
 	if err := s.lockState(ctx); err != nil {
 		return fmt.Errorf("singbox: start: %w", err)
@@ -128,14 +129,13 @@ func (s *box) Start(ctx context.Context) error {
 	}
 	ctx, cancel := s.operation(ctx)
 	defer cancel()
-	lock := s.o.LockJSON
-	if lock == "" {
-		lock = filepath.Join("third_party", "singbox.lock.json")
-	}
-	binary, err := installBinary(ctx, s.p, s.tr, lock)
+	binary, source, err := installBinary(ctx, s.p, s.log, s.tr)
 	if err != nil {
+		s.binErr = err.Error()
+		s.log.Error("singbox.binary.failed", "err", s.binErr)
 		return err
 	}
+	s.binErr, s.binSource = "", source
 	s.binary = binary
 	return s.apply(ctx, s.rc.Effective)
 }

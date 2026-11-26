@@ -11,10 +11,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"errors"
 	"net/http"
+	"os/exec"
+	"path"
 	"os"
 	"path/filepath"
 	"remoteagents/internal/api"
+	thirdparty "remoteagents/third_party"
 	"runtime"
 	"strings"
 	"time"
@@ -22,7 +26,7 @@ import (
 
 const assetLimit = 128 << 20
 
-type asset struct{ OS, Arch, URL, SHA256, BinPath string }
+type asset struct{ OS, Arch, URL, SHA256, BinPath, BinSHA256 string }
 
 func binaryName() string {
 	if runtime.GOOS == "windows" {
@@ -31,13 +35,133 @@ func binaryName() string {
 	return "ra-core"
 }
 
-// installBinary prefers the sing-box compiled into this executable (build.sh,
-// tag singbox_embed); the network download is only a fallback for dev builds.
-func installBinary(ctx context.Context, p api.Paths, tr api.Traces, lockPath string) (string, error) {
+// installBinary returns the path of sing-box in the home bin directory and the
+// source it came from. Order: embedded (build.sh --embed-singbox), a file already
+// in home\bin with the pinned binSha256, a local copy with the same sha256
+// (Laboratory v2), download from the pinned URL (GitHub SagerNet), then the mirror
+// attached to our release. Every failure is logged; the final error is one
+// human-readable line for the status page.
+func installBinary(ctx context.Context, p api.Paths, log api.Logger, tr api.Traces) (string, string, error) {
 	if len(embeddedBin) > 0 {
-		return installEmbedded(p, tr, embeddedBin)
+		path, err := installEmbedded(p, tr, embeddedBin)
+		return path, "embedded", err
 	}
-	return downloadBinary(ctx, p, tr, lockPath)
+	var lock struct {
+		Version    string
+		MirrorBase string `json:"mirrorBase"`
+		Assets     []asset
+	}
+	if err := json.Unmarshal(thirdparty.SingboxLock, &lock); err != nil {
+		return "", "", fmt.Errorf("sing-box: встроенный список версий повреждён")
+	}
+	var sel asset
+	for _, a := range lock.Assets {
+		if a.OS == runtime.GOOS && a.Arch == runtime.GOARCH {
+			sel = a
+			break
+		}
+	}
+	if sel.SHA256 == "" || sel.BinPath == "" || len(sel.BinSHA256) != 64 {
+		return "", "", fmt.Errorf("sing-box: для %s/%s нет сборки в списке версий", runtime.GOOS, runtime.GOARCH)
+	}
+	if err := os.MkdirAll(p.Bin, 0700); err != nil {
+		return "", "", fmt.Errorf("sing-box: не создать папку %s: %v", p.Bin, err)
+	}
+	dst := filepath.Join(p.Bin, binaryName())
+	if fileSHA(dst) == sel.BinSHA256 {
+		_ = os.Chmod(dst, 0700)
+		return dst, "home", nil
+	}
+	for _, c := range localCandidates() {
+		if fileSHA(c) != sel.BinSHA256 {
+			continue
+		}
+		if err := copyVerified(p, tr, c, dst, sel.BinSHA256); err != nil {
+			log.Warn("singbox.binary.local-failed", "path", c, "err", err.Error())
+			continue
+		}
+		log.Info("singbox.binary.local", "from", c)
+		return dst, "local", nil
+	}
+	urls := []string{sel.URL}
+	if lock.MirrorBase != "" {
+		urls = append(urls, strings.TrimRight(lock.MirrorBase, "/")+"/"+path.Base(sel.URL))
+	}
+	var last error
+	for i, u := range urls {
+		err := downloadFrom(ctx, p, tr, sel, u, dst)
+		if err == nil {
+			src := "download"
+			if i > 0 {
+				src = "mirror"
+			}
+			log.Info("singbox.binary."+src, "url", u)
+			return dst, src, nil
+		}
+		log.Warn("singbox.binary.download-failed", "url", u, "err", err.Error())
+		last = err
+	}
+	return "", "", fmt.Errorf("sing-box не получен: нет копии на этом ПК, загрузка не удалась (%v)", last)
+}
+
+// fileSHA is the lower-case sha256 of a file, or "" if it cannot be read.
+func fileSHA(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err = io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// localCandidates lists places where another RemoteAgents copy keeps the same
+// sing-box (Laboratory v2 unpacks it to %LOCALAPPDATA%\RemoteAgents-lab\runtime\bin-*).
+func localCandidates() []string {
+	var out []string
+	if runtime.GOOS == "windows" {
+		if base := os.Getenv("LOCALAPPDATA"); base != "" {
+			for _, pat := range []string{
+				filepath.Join(base, "RemoteAgents-lab", "runtime", "bin-*", "sing-box.exe"),
+				filepath.Join(base, "RemoteAgents*", "bin", "ra-core.exe"),
+				filepath.Join(base, "RemoteAgents*", "transport-bin", "sing-box.exe"),
+			} {
+				m, _ := filepath.Glob(pat)
+				out = append(out, m...)
+			}
+		}
+	}
+	if lp, err := exec.LookPath("sing-box"); err == nil {
+		out = append(out, lp)
+	}
+	return out
+}
+
+// copyVerified copies src to dst through a recorded temp file and re-checks the hash.
+func copyVerified(p api.Paths, tr api.Traces, src, dst, want string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != want {
+		return fmt.Errorf("sha256 changed while copying")
+	}
+	tmpPath, release, err := tempFile(p, tr, "binary-*")
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err = os.WriteFile(tmpPath, data, 0700); err != nil {
+		return err
+	}
+	if err = os.Chmod(tmpPath, 0700); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, dst)
 }
 
 // installEmbedded unpacks data to p.Bin/ra-core; an identical file is left alone.
@@ -74,51 +198,16 @@ func installEmbedded(p api.Paths, tr api.Traces, data []byte) (string, error) {
 	return dst, nil
 }
 
-// lockFile resolves the lock without relying on cwd: explicit path, cwd-relative
-// legacy path, then the source tree of this package (dev builds without -trimpath).
-func lockFile(path string) string {
-	cands := []string{path}
-	if _, f, _, ok := runtime.Caller(0); ok {
-		cands = append(cands, filepath.Join(filepath.Dir(f), "..", "..", "third_party", "singbox.lock.json"))
-	}
-	for _, c := range cands {
-		if c == "" {
-			continue
-		}
-		if _, err := os.Stat(c); err == nil {
-			return c
-		}
-	}
-	return path
+// downloadFrom fetches one archive, authenticates it by the pinned archive
+// sha256, extracts the binary, checks binSha256 and renames it to dst.
+func downloadFrom(ctx context.Context, p api.Paths, tr api.Traces, selected asset, url, dst string) error {
+	_, err := downloadFromInner(ctx, p, tr, selected, url, dst)
+	return err
 }
 
-// downloadBinary installs only the platform asset authenticated by the pinned archive digest.
-func downloadBinary(ctx context.Context, p api.Paths, tr api.Traces, lockPath string) (string, error) {
+func downloadFromInner(ctx context.Context, p api.Paths, tr api.Traces, selected asset, url, dst string) (string, error) {
 	binDir := p.Bin
-	data, err := os.ReadFile(lockFile(lockPath))
-	if err != nil {
-		return "", fmt.Errorf("singbox: lock: cannot read lock (no embedded sing-box in this build)")
-	}
-	var lock struct {
-		Version string
-		Assets  []asset
-		Tags    any
-	}
-	if json.Unmarshal(data, &lock) != nil {
-		return "", fmt.Errorf("singbox: lock: invalid JSON")
-	}
-	var selected asset
-	for _, a := range lock.Assets {
-		if a.OS == runtime.GOOS && a.Arch == runtime.GOARCH {
-			selected = a
-			break
-		}
-	}
-	digest, err := hex.DecodeString(selected.SHA256)
-	if err != nil || len(digest) != sha256.Size || selected.BinPath == "" {
-		return "", fmt.Errorf("singbox: lock: missing platform asset or digest")
-	}
-	if err = os.MkdirAll(binDir, 0700); err != nil {
+	if err := os.MkdirAll(binDir, 0700); err != nil {
 		return "", fmt.Errorf("singbox: binary: create directory: %w", err)
 	}
 	archivePath, archiveRelease, err := tempFile(p, tr, "archive-*")
@@ -131,11 +220,11 @@ func downloadBinary(ctx context.Context, p api.Paths, tr api.Traces, lockPath st
 		return "", fmt.Errorf("singbox: binary: temporary archive: %w", err)
 	}
 	defer func() { _ = archive.Close(); _ = os.Remove(archive.Name()) }()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, selected.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", fmt.Errorf("singbox: download: invalid URL")
 	}
-	client := &http.Client{Timeout: 25 * time.Second}
+	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("singbox: download: request failed")
@@ -219,7 +308,12 @@ func downloadBinary(ctx context.Context, p api.Paths, tr api.Traces, lockPath st
 	if err != nil {
 		return "", fmt.Errorf("singbox: binary: write: %w", err)
 	}
-	dst := filepath.Join(binDir, binaryName())
+	if err = tmp.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		return "", err
+	}
+	if fileSHA(tmp.Name()) != selected.BinSHA256 {
+		return "", fmt.Errorf("singbox: checksum: binary digest mismatch")
+	}
 	if err = os.Rename(tmp.Name(), dst); err != nil {
 		return "", fmt.Errorf("singbox: binary: replace: %w", err)
 	}

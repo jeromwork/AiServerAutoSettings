@@ -161,6 +161,22 @@ fi
 echo "==> Загрузка ассетов в релиз $TAG..."
 gh_repo release upload "$TAG" "${ASSETS[@]}" --clobber
 
+# Mirror for sing-box (used when GitHub SagerNet is unreachable): archives from the lock,
+# sha256-checked, attached to this release under their original names.
+echo "==> Зеркало sing-box в релиз $TAG..."
+MIRROR_DIR=$(mktemp -d); CLEANUP_DIRS+=("$MIRROR_DIR")
+python3 -I - "$HERE/third_party/singbox.lock.json" "$MIRROR_DIR" <<'PY'
+import hashlib, json, os, sys, urllib.request
+lock, out = sys.argv[1:3]
+for a in json.load(open(lock))["assets"]:
+    with urllib.request.urlopen(a["url"], timeout=120) as r:
+        data = r.read(256 << 20)
+    if hashlib.sha256(data).hexdigest() != a["sha256"]:
+        sys.exit("mirror: sha256 mismatch for " + a["url"])
+    open(os.path.join(out, a["url"].rsplit("/", 1)[1]), "wb").write(data)
+PY
+gh_repo release upload "$TAG" "$MIRROR_DIR"/* --clobber
+
 NOTES="Версия: $VERSION, коммит $SHORT_SHA, checksums SHA-256 $SHA_CHECKSUMS."
 gh_repo release edit "$TAG" --prerelease --notes "$NOTES"
 

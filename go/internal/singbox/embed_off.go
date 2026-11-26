@@ -2,5 +2,5 @@
 
 package singbox
 
-// Dev builds carry no sing-box; installBinary falls back to the pinned download.
+// Default builds carry no sing-box; installBinary finds or downloads the pinned one.
 var embeddedBin []byte
