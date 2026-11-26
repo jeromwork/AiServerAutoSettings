@@ -353,12 +353,17 @@ func (c *core) startNetwork(ctx context.Context) {
 	// VPN/LAN-сторожа (vpnguard/languard) — N1b/N2; при Mode.AllowsTun() они будут подключены здесь.
 }
 
+// devPCSuffix — на время разработки, параллельно с v2: имя ПК v3 на сервере отличается от имени v2,
+// иначе channel при подключении убьёт сессию работающей Лаборатории v2 (pkill ra-lab session --pc <имя>).
+// Убрать при выпуске v3 вместо v2.
+const devPCSuffix = "-v3"
+
 func (c *core) pcName() string {
 	if c.f.PC != "" {
 		return c.f.PC
 	}
 	if c.cfg != nil {
-		return c.cfg.Name
+		return c.cfg.Name + devPCSuffix
 	}
 	return ""
 }
