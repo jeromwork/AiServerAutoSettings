@@ -37,6 +37,7 @@ type Actions interface {
 // AgentDeps. Fwd — ленивый: агент создаётся раньше forward (порядок — блок C, C4); nil → /expose 503 "forward-not-ready".
 type AgentDeps struct {
 	Log     Logger
+	Traces  Traces
 	Shell   Shell
 	Fwd     func() Forwarder
 	Act     Actions
