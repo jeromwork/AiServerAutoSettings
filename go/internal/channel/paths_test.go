@@ -2,7 +2,9 @@ package channel
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
@@ -19,7 +21,7 @@ import (
 )
 
 // sshStub принимает любой ключ клиента и сразу закрывает сессии: достаточно, чтобы пройти проверку отпечатка.
-func sshStub(t *testing.T, hostKey ssh.Signer) string {
+func sshStub(t *testing.T, hostKeys ...ssh.Signer) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -27,7 +29,9 @@ func sshStub(t *testing.T, hostKey ssh.Signer) string {
 	}
 	t.Cleanup(func() { l.Close() })
 	cfg := &ssh.ServerConfig{PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) { return nil, nil }}
-	cfg.AddHostKey(hostKey)
+	for _, k := range hostKeys {
+		cfg.AddHostKey(k)
+	}
 	go func() {
 		for {
 			c, err := l.Accept()
@@ -51,6 +55,15 @@ func sshStub(t *testing.T, hostKey ssh.Signer) string {
 		}
 	}()
 	return l.Addr().String()
+}
+
+func newECDSASigner(t *testing.T) ssh.Signer {
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	s, err := ssh.NewSignerFromKey(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
 
 func newSigner(t *testing.T) ssh.Signer {
@@ -116,7 +129,7 @@ func TestHostKeyMismatchOnOnePathTriesNext(t *testing.T) {
 			if strings.Contains(st.Reason, "host key mismatch") {
 				t.Fatalf("mismatch на одном пути объявлен фатальным: %+v", st)
 			}
-			if st.State == "down" && st.Path == "hijacked" && st.Reason == reasonIntercepted {
+			if st.State == "down" && st.Path == "hijacked" && strings.HasPrefix(st.Reason, reasonIntercepted) && strings.Contains(st.Reason, ssh.FingerprintSHA256(evil.PublicKey())) {
 				sawIntercepted = true
 			}
 			if st.State == "connecting" && st.Path == "good" {
@@ -167,4 +180,38 @@ func marshalPEM(t *testing.T, k ed25519.PrivateKey) []byte {
 		t.Fatal(err)
 	}
 	return pem.EncodeToMemory(blk)
+}
+
+// Причина «все пути — отпечаток не совпал» при верном hostKey: сервер держит ключи нескольких типов, а клиент Go
+// первым просил ecdsa и получал не тот ключ, что закреплён в конфиге (ed25519).
+func TestPinnedEd25519WorksWhenServerAlsoHasECDSA(t *testing.T) {
+	ed := newSigner(t)
+	sb := &selectorSB{names: []string{"a"}, now: "a", addr: map[string]string{"a": sshStub(t, newECDSASigner(t), ed)}}
+	_, cpriv, _ := ed25519.GenerateKey(rand.Reader)
+	cfg := &api.Config{Servers: []api.Server{{Host: "203.0.113.1", Port: 22, User: "u", Key: marshalPEM(t, cpriv),
+		HostKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(ed.PublicKey())))}}}
+	ch, err := New(cfg, sb, fake.NewAgentHost("tok"), &fake.Logger{}, fake.NewTraces("0123456789abcdef0123456789abcdef"), Options{PC: "pc-v3", DialTimeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates, unsub := ch.Subscribe()
+	defer unsub()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_ = ch.Start(ctx)
+	defer ch.Stop(context.Background())
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case st := <-updates:
+			if strings.Contains(st.Reason, "отпечаток") || strings.Contains(st.Reason, "host key mismatch") {
+				t.Fatalf("верный ключ отвергнут: %+v", st)
+			}
+			if st.State == "down" { // дошли до сессии (стаб её отклоняет) — отпечаток принят
+				return
+			}
+		case <-deadline:
+			t.Fatal("таймаут")
+		}
+	}
 }

@@ -121,17 +121,29 @@ func registerJSON(b []byte, log api.Logger) {
 	}
 }
 
-func walk(v any, log api.Logger) {
+// PlainKeys — поля, значения которых не секрет: имена путей/узлов, теги и типы. Их маскировать нельзя:
+// иначе имена путей в журнале и на странице превращаются в `***`.
+var PlainKeys = map[string]bool{
+	"tag": true, "type": true, "name": true, "outbound": true, "outbounds": true, "inbound": true, "detour": true,
+	"default": true, "network": true, "flow": true, "level": true, "listen": true, "security": true,
+	"packet_encoding": true, "method": true, "kind": true, "kinds": true, "label": true, "final": true,
+}
+
+func walk(v any, log api.Logger) { walkKey(v, "", log) }
+
+func walkKey(v any, key string, log api.Logger) {
 	switch t := v.(type) {
 	case string:
-		log.Secret(t)
+		if !PlainKeys[key] {
+			log.Secret(t)
+		}
 	case []any:
 		for _, x := range t {
-			walk(x, log)
+			walkKey(x, key, log)
 		}
 	case map[string]any:
-		for _, x := range t {
-			walk(x, log)
+		for k, x := range t {
+			walkKey(x, k, log)
 		}
 	}
 }

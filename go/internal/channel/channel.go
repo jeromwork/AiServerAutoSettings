@@ -247,6 +247,9 @@ func (c *chn) loop(ctx context.Context) {
 		mism := !wasUp && isHostKeyMismatch(err)
 		if mism {
 			reason = reasonIntercepted
+			if d := mismatchDetail(err); d != "" {
+				reason += ": " + d
+			}
 		}
 		if !wasUp && path != "" {
 			sw.failed[path], sw.mismatch[path] = reason, mism
@@ -260,7 +263,7 @@ func (c *chn) loop(ctx context.Context) {
 			}
 		} else if !wasUp && mism && all {
 			// Отпечаток не совпал на ВСЕХ путях: подмена/устаревший конфиг, ожиданием не пройдёт.
-			reason = "host key mismatch: на всех путях отпечаток сервера не совпал с конфигом"
+			reason = "host key mismatch: на всех путях отпечаток сервера не совпал с конфигом (" + strings.TrimPrefix(mismatchDetail(err), "") + ")"
 		}
 		if !wasUp {
 			sw.reset() // круг по путям закончен — новый круг после паузы
@@ -382,7 +385,10 @@ func (c *chn) dial(ctx context.Context, addr string) (*ssh.Client, *activityConn
 		User:            c.sv.User,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(c.signr)},
 		HostKeyCallback: c.checkHostKey,
-		Timeout:         c.o.DialTimeout,
+		// Сервер держит ключи нескольких типов (ed25519, ecdsa, rsa); без этого клиент Go сначала просит ecdsa/rsa и
+		// получает «чужой» ключ, хотя в конфиге закреплён другой тип. Просим тот тип, что закреплён: строгость не слабеет.
+		HostKeyAlgorithms: hostKeyAlgos(c.hkey),
+		Timeout:           c.o.DialTimeout,
 	}
 	_ = raw.SetDeadline(time.Now().Add(c.o.DialTimeout))
 	cc, chans, reqs, err := ssh.NewClientConn(ac, c.sv.Host, conf)
@@ -396,9 +402,34 @@ func (c *chn) dial(ctx context.Context, addr string) (*ssh.Client, *activityConn
 
 func (c *chn) checkHostKey(_ string, _ net.Addr, key ssh.PublicKey) error {
 	if !bytes.Equal(key.Marshal(), c.hkey.Marshal()) {
-		return errors.New("host key mismatch")
+		return &hostKeyError{want: ssh.FingerprintSHA256(c.hkey), got: ssh.FingerprintSHA256(key), gotType: key.Type()}
 	}
 	return nil
+}
+
+// hostKeyError — отпечатки публичные (не секрет): их видно в журнале и на странице.
+type hostKeyError struct{ want, got, gotType string }
+
+func (e *hostKeyError) Error() string {
+	return fmt.Sprintf("host key mismatch: ожидался %s, получен %s (%s)", e.want, e.got, e.gotType)
+}
+
+func hostKeyAlgos(k ssh.PublicKey) []string {
+	switch k.Type() {
+	case ssh.KeyAlgoRSA:
+		return []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}
+	default:
+		return []string{k.Type()}
+	}
+}
+
+// mismatchDetail — «ожидался …, получен …» из ошибки подключения ("" — если это не mismatch).
+func mismatchDetail(err error) string {
+	var he *hostKeyError
+	if errors.As(err, &he) {
+		return fmt.Sprintf("ожидался %s, получен %s (%s)", he.want, he.got, he.gotType)
+	}
+	return ""
 }
 
 type activityConn struct {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 
 	"remoteagents/internal/api/fake"
@@ -93,5 +94,27 @@ func TestStartDoesNotRetryWhenPortsFine(t *testing.T) {
 	s.applyHook = func(context.Context) error { calls++; return fmt.Errorf("x: %w", errEarlyExit) }
 	if err := s.startWithPorts(context.Background()); err == nil || calls != 1 {
 		t.Fatalf("calls=%d err=%v", calls, err)
+	}
+}
+
+type secLog struct {
+	fake.Logger
+	got []string
+}
+
+func (l *secLog) Secret(v string) { l.got = append(l.got, v) }
+
+// Причина `***` вместо имён путей: в маскировщик попадали ВСЕ строки конфига sing-box, включая теги и типы.
+func TestPathNamesAreNotRegisteredAsSecrets(t *testing.T) {
+	l := &secLog{}
+	s := &box{log: l}
+	s.secrets(map[string]any{"outbounds": []any{map[string]any{
+		"tag": "vless-relay-sparfum", "type": "vless", "server": "198.51.100.7", "uuid": "11111111-2222-3333-4444-555555555555"}}})
+	joined := strings.Join(l.got, "|")
+	if strings.Contains(joined, "vless-relay-sparfum") || strings.Contains(joined, "vless") {
+		t.Fatalf("имя/тип пути зарегистрированы как секрет: %v", l.got)
+	}
+	if !strings.Contains(joined, "198.51.100.7") || !strings.Contains(joined, "11111111-2222") {
+		t.Fatalf("настоящие секреты не зарегистрированы: %v", l.got)
 	}
 }

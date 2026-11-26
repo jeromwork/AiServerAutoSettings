@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"remoteagents/internal/api"
+	"remoteagents/internal/config"
 )
 
 type Options struct {
@@ -438,19 +439,22 @@ func (s *box) operation(parent context.Context) (context.Context, context.Cancel
 }
 
 // Register decoded values, including credentials printed separately by sing-box.
-func (s *box) secrets(value any) {
+func (s *box) secrets(value any) { s.secretsKey(value, "") }
+
+// Имена путей, теги и типы — не секрет (config.PlainKeys), иначе в журнале и на странице они станут `***`.
+func (s *box) secretsKey(value any, key string) {
 	switch v := value.(type) {
 	case string:
-		if v != "" {
+		if v != "" && !config.PlainKeys[key] {
 			s.log.Secret(v)
 		}
 	case []any:
 		for _, item := range v {
-			s.secrets(item)
+			s.secretsKey(item, key)
 		}
 	case map[string]any:
-		for _, item := range v {
-			s.secrets(item)
+		for k, item := range v {
+			s.secretsKey(item, k)
 		}
 	}
 }
