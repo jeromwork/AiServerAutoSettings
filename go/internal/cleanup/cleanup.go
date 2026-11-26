@@ -101,3 +101,6 @@ func readInstanceFile(path string) (string, error) {
 	}
 	return id, nil
 }
+
+// Home — корень home экземпляра (для следов процессов).
+func (c *Cleaner) Home() string { return c.p.Home }
