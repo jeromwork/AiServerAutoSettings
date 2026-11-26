@@ -109,9 +109,17 @@ if [[ "$DRY_RUN" == false ]]; then
     trap '\''exit 130'\'' INT
     trap '\''exit 143'\'' TERM
     trap '\''exit 129'\'' HUP
-    k="${RELEASE_KEY:-${KEY:-}}"
+    if [[ -n "${RELEASE_KEY_B64:-}" ]]; then
+      # projenv stores single-line values only: the key is kept as base64.
+      printf "%s" "$RELEASE_KEY_B64" | base64 -d > "$key_dir/key"
+      k=file
+    else
+      k="${RELEASE_KEY:-${KEY:-}}"
+    fi
     [[ -n "$k" ]] || exit 1
-    if [[ -f "$k" ]]; then
+    if [[ $k == file ]]; then
+      :
+    elif [[ -f "$k" ]]; then
       cp -- "$k" "$key_dir/key"
     else
       printf "%s\n" "$k" > "$key_dir/key"
