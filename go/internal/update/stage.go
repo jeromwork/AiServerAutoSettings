@@ -3,6 +3,7 @@ package update
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,10 +51,10 @@ func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 		return fail("version", "invalid version: "+version)
 	}
 	finalSlotDir := filepath.Join(u.p.Versions, version)
-	if _, err := os.Lstat(finalSlotDir); !errors.Is(err, os.ErrNotExist) {
-		_ = os.Remove(candidate)
-		return fail("slot", "slot already exists: "+version)
-	}
+	// Слот версии может уже быть (откат с неё и новая попытка): это не ошибка, если там тот же файл —
+	// пересылать нечего, достаточно pending.json (ниже, после проверок кандидата).
+	_, lerr := os.Lstat(finalSlotDir)
+	slotExists := !errors.Is(lerr, os.ErrNotExist)
 
 	// 3. Execution permissions.
 	if err := os.Chmod(candidate, 0700); err != nil { // #nosec G302 -- authenticated candidate requires owner execute permission.
@@ -107,6 +108,18 @@ func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 		return fail("config", "candidate rejected current config: "+err.Error())
 	}
 
+	if slotExists {
+		same, err := sameFile(candidate, filepath.Join(finalSlotDir, slotBinName(u.os)))
+		if err != nil || !same {
+			_ = os.Remove(candidate)
+			return fail("slot", "slot already exists with a different binary: "+version)
+		}
+		if err := writePending(u.p.Versions, version); err != nil {
+			return err
+		}
+		return nil
+	}
+
 	// 6. Atomically: Tmp -> versions/<v>.tmp -> rename -> pending.json via .tmp + rename.
 	if err := os.MkdirAll(u.p.Versions, 0700); err != nil {
 		_ = os.Remove(candidate)
@@ -149,22 +162,67 @@ func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 
 	finalized = true
 
-	pendingPath := filepath.Join(u.p.Versions, "pending.json")
-	pendingTmp := filepath.Join(u.p.Versions, "pending.json.tmp")
+	if err := writePending(u.p.Versions, version); err != nil {
+		return err
+	}
+
+	success = true
+	return nil
+}
+
+func slotBinName(goos string) string {
+	if goos == "windows" {
+		return "remoteagents.exe"
+	}
+	return "remoteagents"
+}
+
+func writePending(versions, version string) error {
+	pendingPath := filepath.Join(versions, "pending.json")
+	pendingTmp := filepath.Join(versions, "pending.json.tmp")
 	pendingDoc, err := json.Marshal(map[string]string{"dir": version})
 	if err != nil {
 		return fail("json", "cannot encode pending.json: "+err.Error())
 	}
 	pendingDoc = append(pendingDoc, '\n')
+	if err := os.MkdirAll(versions, 0700); err != nil {
+		return fail("versions", err.Error())
+	}
 	if err := os.WriteFile(pendingTmp, pendingDoc, 0600); err != nil {
 		return fail("pending", "cannot write pending.json.tmp: "+err.Error())
 	}
 	if err := os.Rename(pendingTmp, pendingPath); err != nil {
+		_ = os.Remove(pendingTmp)
 		return fail("pending", "cannot rename pending.json: "+err.Error())
 	}
-
-	success = true
 	return nil
+}
+
+func sameFile(a, b string) (bool, error) {
+	ha, err := fileSum(a)
+	if err != nil {
+		return false, err
+	}
+	hb, err := fileSum(b)
+	if err != nil {
+		return false, err
+	}
+	return ha == hb, nil
+}
+
+func fileSum(path string) ([32]byte, error) {
+	var sum [32]byte
+	f, err := os.Open(path)
+	if err != nil {
+		return sum, err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, io.LimitReader(f, maxBinary+1)); err != nil {
+		return sum, err
+	}
+	copy(sum[:], h.Sum(nil))
+	return sum, nil
 }
 
 func moveOrCopyFile(src, dst string) error {

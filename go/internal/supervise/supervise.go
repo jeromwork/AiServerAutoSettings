@@ -438,13 +438,17 @@ func checkSwitchExpire(p api.Paths, log api.Logger) (bool, error) {
 // alignConfig: после отката версии конфиг должен быть таким, какой откатываемая версия читает. Версия-цель сама
 // сообщает свою схему (`version --json`); если current записан более новой схемой — возврат на совместимое поколение.
 func (s *slots) alignConfig(ctx context.Context, log api.Logger) {
-	schema := binarySchema(ctx, s.path(s.Current))
 	unlock, err := lockOperation(ctx, s.p)
 	if err != nil {
 		log.Warn("supervise: config-align-lock", "err", err)
 		return
 	}
 	defer unlock()
+	s.alignConfigLocked(ctx, log)
+}
+
+func (s *slots) alignConfigLocked(ctx context.Context, log api.Logger) {
+	schema := binarySchema(ctx, s.path(s.Current))
 	gen, err := config.CompatRollback(s.p, schema, log)
 	if err != nil {
 		log.Warn("supervise: config-align", "err", err)

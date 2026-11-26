@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"remoteagents/internal/config"
 	"remoteagents/internal/core"
 	"remoteagents/internal/platform"
+	"remoteagents/internal/supervise"
 )
 
 // withBuildInfo добавляет в флаги ядра то, что задано при сборке (-ldflags).
@@ -157,11 +159,52 @@ func runCLI(ctx context.Context, name string, args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: remoteagents config check|apply|revert ...")
 		return 2
 
+	case "rollback":
+		return cliRollback(ctx, p, log)
+
 	case "update":
 		fmt.Fprintln(os.Stderr, "update: run through the web page or the running core (api.Actions.UpdateNow)")
 		return 1
 	}
 	return 1
+}
+
+// cliRollback — `remoteagents rollback`: вернуться на предыдущую рабочую версию (и конфиг, который она читает).
+// Ядро запущено — просим его через страницу (сторож сам переключает слот); не запущено — правим состояние сами.
+func cliRollback(ctx context.Context, p api.Paths, log api.Logger) int {
+	if b, err := os.ReadFile(filepath.Join(p.State, core.UIURLFile)); err == nil {
+		if u, err := url.Parse(strings.TrimSpace(string(b))); err == nil && u.Host != "" {
+			u.Path = "/api/rollback"
+			cl := &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{Proxy: nil}}
+			if resp, err := cl.Post(u.String(), "application/x-www-form-urlencoded", nil); err == nil {
+				defer func() { _ = resp.Body.Close() }()
+				var r struct {
+					OK    bool   `json:"ok"`
+					Error string `json:"error"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&r) == nil {
+					if r.OK {
+						fmt.Println("rollback requested: the program restarts on the previous version")
+						return 0
+					}
+					fmt.Fprintln(os.Stderr, "rollback:", r.Error)
+					return 1
+				}
+			}
+		}
+	}
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "rollback:", err)
+		return 1
+	}
+	to, err := supervise.RollbackOffline(ctx, p, self, version, log)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "rollback:", err)
+		return 1
+	}
+	fmt.Println("rolled back to", to, "(takes effect on next start)")
+	return 0
 }
 
 // checkCurrentConfig — `config check --current` (его вызывает кандидат обновления, update.Stage): новая версия

@@ -63,7 +63,7 @@ func dispatch(ctx context.Context, args []string) int {
 		}
 		return c.Run(ctx, args[2:])
 
-	case "open", "status", "config", "update", "leftovers":
+	case "open", "status", "config", "update", "leftovers", "rollback":
 		return runCLI(ctx, args[0], args[1:])
 
 	case "install", "enable", "uninstall", "singbox":

@@ -2,9 +2,12 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -87,6 +90,7 @@ type events struct {
 	attempts []attempt
 	n        int
 	kick     chan struct{}
+	update   map[string]any // ход обновления/отката версии (событие "update")
 	apply    map[string]any // последнее состояние применения (для снимка при подключении страницы)
 	paths    map[string]any
 }
@@ -108,6 +112,65 @@ func (c *core) publishApply(stage, text string) {
 	c.publish("apply", m)
 }
 
+// publishUpdate — стадия обновления/отката версии: checking | downloading | verifying | restarting | ready |
+// uptodate | rolledback | error.
+func (c *core) publishUpdate(stage, text string) {
+	m := map[string]any{"stage": stage, "text": text, "at": time.Now().Format("15:04:05")}
+	c.ev.mu.Lock()
+	c.ev.update = m
+	c.ev.mu.Unlock()
+	c.publish("update", m)
+}
+
+const updatingFile = "updating.json" // в State: версия, на которую только что обновились (до подтверждения good)
+
+type updatingMark struct {
+	Version string `json:"version"`
+	From    string `json:"from"`
+}
+
+func (c *core) markUpdating(version string) {
+	b, _ := json.Marshal(updatingMark{Version: version, From: c.f.Version})
+	_ = os.WriteFile(filepath.Join(c.p.State, updatingFile), append(b, '\n'), 0600)
+}
+
+// loadUpdating (при старте ядра): если после обновления запустилась не та версия — сторож откатил её; сказать об этом.
+func (c *core) loadUpdating() {
+	b, err := os.ReadFile(filepath.Join(c.p.State, updatingFile))
+	if err != nil {
+		return
+	}
+	var m updatingMark
+	if json.Unmarshal(b, &m) != nil || m.Version == "" {
+		_ = os.Remove(filepath.Join(c.p.State, updatingFile))
+		return
+	}
+	if m.Version == c.f.Version {
+		c.publishUpdate("restarting", "Запущена версия "+m.Version+", жду подтверждения работы (связь с сервером)...")
+		return
+	}
+	_ = os.Remove(filepath.Join(c.p.State, updatingFile))
+	why := sanitize(c.f.RollbackReason)
+	if why == "" {
+		why = "причина не передана"
+	}
+	c.publishUpdate("rolledback", "Версия "+m.Version+" не заработала ("+why+"), возвращена версия "+c.f.Version+".")
+}
+
+// confirmUpdate (после good): обновление подтверждено.
+func (c *core) confirmUpdate() {
+	b, err := os.ReadFile(filepath.Join(c.p.State, updatingFile))
+	if err != nil {
+		return
+	}
+	var m updatingMark
+	_ = json.Unmarshal(b, &m)
+	_ = os.Remove(filepath.Join(c.p.State, updatingFile))
+	if m.Version == c.f.Version {
+		c.publishUpdate("ready", "Версия "+c.f.Version+" работает (обновлено с "+m.From+").")
+	}
+}
+
 // snapshot — ТЕКУЩЕЕ состояние каждого вида из живых данных (а не последнее опубликованное): его получает
 // страница при подключении к /api/events.
 func (c *core) snapshot() map[string]any {
@@ -118,6 +181,9 @@ func (c *core) snapshot() map[string]any {
 	}
 	if c.ev.paths != nil {
 		out["paths"] = c.ev.paths
+	}
+	if c.ev.update != nil {
+		out["update"] = c.ev.update
 	}
 	if len(c.ev.attempts) > 0 {
 		out["attempts"] = append([]attempt(nil), c.ev.attempts...)

@@ -225,12 +225,14 @@ func (c *core) sendGood() {
 		c.emit(map[string]any{"t": api.MsgGood, "version": c.f.Version})
 		c.log.Info("core: good", "version", c.f.Version)
 	})
+	c.confirmUpdate()
 }
 
 func (c *core) startComponents(ctx context.Context) {
 	f, log := c.f, c.log
 
 	c.loadLastErr()
+	c.loadUpdating()
 
 	// 3. Конфиг. Нет конфига — только страница.
 	var err error
@@ -633,7 +635,7 @@ func (c *core) autoUpdate(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	if err := c.UpdateNow(ctx); err != nil && err != api.ErrBusy {
+	if err := c.updateNow(ctx, false); err != nil && err != api.ErrBusy {
 		c.log.Warn("core: auto-update", "err", err.Error())
 	}
 	time.AfterFunc(updateEvery, func() { c.autoUpdate(ctx) })

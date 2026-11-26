@@ -14,6 +14,7 @@ import (
 
 	"remoteagents/internal/api"
 	"remoteagents/internal/config"
+	"remoteagents/internal/supervise"
 )
 
 var _ api.Actions = (*core)(nil)
@@ -35,16 +36,17 @@ func (c *core) lockOp() (func(), error) {
 
 func (c *core) Status() map[string]any {
 	m := map[string]any{
-		"version": c.f.Version,
-		"build":   c.f.Build,
-		"pc":      c.pcName(),
-		"name":    c.cfgName(),
-		"connect": c.connectInfo(),
-		"uptime":  int(time.Since(c.start).Seconds()),
-		"mode":    map[string]bool{"safe": c.f.Mode.Safe, "noTun": c.f.Mode.NoTun, "noChannel": c.f.Mode.NoChannel, "noSingbox": c.f.Mode.NoSingbox},
-		"control": c.control.Load(),
-		"config":  c.cfg != nil,
-		"gen":     c.gen,
+		"version":     c.f.Version,
+		"build":       c.f.Build,
+		"pc":          c.pcName(),
+		"name":        c.cfgName(),
+		"connect":     c.connectInfo(),
+		"uptime":      int(time.Since(c.start).Seconds()),
+		"mode":        map[string]bool{"safe": c.f.Mode.Safe, "noTun": c.f.Mode.NoTun, "noChannel": c.f.Mode.NoChannel, "noSingbox": c.f.Mode.NoSingbox},
+		"control":     c.control.Load(),
+		"config":      c.cfg != nil,
+		"gen":         c.gen,
+		"prevVersion": supervise.ReadInfo(c.p).Previous,
 	}
 	if ch := c.getCh(); ch != nil {
 		st := ch.State()
@@ -82,27 +84,56 @@ func (c *core) UpdateCheck(ctx context.Context) (*api.Release, error) {
 }
 
 // UpdateNow: проверка → загрузка → слот (pending.json) → перезапуск; сторож запускает новый слот.
-func (c *core) UpdateNow(ctx context.Context) error {
+// Ход работы идёт событиями "update" на страницу: проверяю / скачиваю / проверяю кандидата / запускаю / ошибка.
+func (c *core) UpdateNow(ctx context.Context) error { return c.updateNow(ctx, true) }
+
+func (c *core) updateNow(ctx context.Context, manual bool) (err error) {
 	if c.upd == nil {
+		c.publishUpdate("error", "Обновление недоступно в этой сборке (нет ключей выпуска).")
 		return api.ErrNotSupported
 	}
 	unlock, err := c.lockOp()
 	if err != nil {
+		if manual {
+			c.publishUpdate("error", c.explainApplyErr(err))
+		}
 		return err
 	}
 	defer unlock()
+	defer func() {
+		if err != nil && !errors.Is(err, api.ErrBusy) {
+			c.publishUpdate("error", "Обновление не выполнено: "+sanitize(err.Error()))
+		}
+	}()
+	if manual {
+		c.publishUpdate("checking", "Проверяю наличие новой версии и подпись выпуска...")
+	}
 	r, err := c.UpdateCheck(ctx)
-	if err != nil || r == nil {
+	if err != nil {
 		return err
 	}
+	if r == nil {
+		if manual {
+			c.publishUpdate("uptodate", "Установлена последняя версия "+c.f.Version+".")
+		}
+		return nil
+	}
+	if !manual && supervise.ReadInfo(c.p).Bad == r.Version {
+		c.log.Info("core: auto-update-skip-bad", "version", r.Version)
+		return nil
+	}
+	c.publishUpdate("downloading", "Скачиваю версию "+r.Version+" и проверяю контрольную сумму...")
 	cand, err := c.upd.Fetch(ctx, *r)
 	if err != nil {
 		return err
 	}
+	c.publishUpdate("verifying", "Проверяю кандидата: запуск и чтение текущего конфига...")
 	if err := c.upd.Stage(ctx, cand, r.Version); err != nil {
 		return err
 	}
 	c.log.Info("core: update-staged", "version", r.Version)
+	c.markUpdating(r.Version)
+	c.publishUpdate("restarting", "Запускаю версию "+r.Version+"; если она не подтвердит работу за 120 с — вернусь на "+c.f.Version+".")
 	c.requestQuit(api.ExitRestart, nil)
 	return nil
 }
@@ -244,11 +275,17 @@ func (c *core) Restart(ctx context.Context) error {
 
 // Rollback: сообщение сторожу + выход 3; сторож выбирает слот по таблице §5.3.
 func (c *core) Rollback(ctx context.Context, reason string) error {
+	prev := supervise.ReadInfo(c.p).Previous
+	if prev == "" || prev == c.f.Version {
+		c.publishUpdate("error", "Предыдущей версии для возврата нет.")
+		return supervise.ErrNoPrevious
+	}
 	unlock, err := c.lockOp()
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	c.publishUpdate("restarting", "Возвращаю прежнюю версию "+prev+"...")
 	c.requestQuit(api.ExitRestart, map[string]any{"t": api.MsgRollback, "reason": reason})
 	return nil
 }
