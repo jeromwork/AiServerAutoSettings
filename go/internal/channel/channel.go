@@ -34,6 +34,23 @@ const (
 	pinFor     = 600 * time.Second
 )
 
+// Возврат на предпочтительный путь: первая попытка через returnBase, при неудачах задержка удваивается до returnMax.
+var (
+	returnBase = 60 * time.Second
+	returnMax  = 15 * time.Minute
+)
+
+const reasonNetChanged = "сеть сменилась, перестраиваю"
+
+// retryDelay — пауза после круга неудач: 0.5 с … 30 с, удваивается, сбрасывается успехом (fails=0).
+func retryDelay(fails int) time.Duration {
+	d := 500 * time.Millisecond
+	for ; fails > 1 && d < 30*time.Second; fails-- {
+		d *= 2
+	}
+	return min(d, 30*time.Second)
+}
+
 var pcName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 type Options struct {
@@ -65,6 +82,12 @@ type chn struct {
 	kick    chan struct{} // ForcePath: drop the current ssh
 	rcur    int
 	cleaned bool
+
+	sessCancel context.CancelFunc // отмена текущей попытки/сессии (смена сети)
+	netPending bool               // смена сети: следующий круг — с начала списка путей
+	retPref    chan struct{}      // сработал таймер возврата на предпочтительный путь
+	retFails   int                // подряд неудачных возвратов (растит задержку)
+	retTimer   *time.Timer
 }
 
 // New validates the configuration (strict hostKey is mandatory) and builds the channel.
@@ -97,7 +120,7 @@ func New(cfg *api.Config, sb api.Singbox, agent api.AgentHost, log api.Logger, t
 		return nil, err
 	}
 	c := &chn{cfg: cfg, sb: sb, agent: agent, log: log.With("channel"), tr: tr, o: o, sv: sv, signr: signer, hkey: hk,
-		subs: map[int]chan api.ChannelState{}, kick: make(chan struct{}, 1)}
+		subs: map[int]chan api.ChannelState{}, kick: make(chan struct{}, 1), retPref: make(chan struct{}, 1)}
 	c.st = api.ChannelState{State: "waiting", Since: time.Now()}
 	c.log.Secret(agent.Token())
 	return c, nil
@@ -227,11 +250,27 @@ func (c *chn) loop(ctx context.Context) {
 	first := true
 	sw := &sweep{failed: map[string]string{}, mismatch: map[string]bool{}}
 	for ctx.Err() == nil {
-		c.set("connecting", "", "", false)
-		path, err := c.session(ctx, first)
+		c.set("connecting", "", c.takeNetReason(), false)
+		sctx, scancel := context.WithCancel(ctx)
+		c.mu.Lock()
+		c.sessCancel = scancel
+		c.mu.Unlock()
+		path, err := c.session(sctx, first)
+		scancel()
 		first = false
 		if ctx.Err() != nil {
 			return
+		}
+		if c.consumeNetPending() { // сеть сменилась: старые отказы не в счёт, идём с начала списка без паузы
+			fails = 0
+			sw.reset()
+			select {
+			case <-c.kick:
+			default:
+			}
+			c.selectFirst()
+			c.set("connecting", "", reasonNetChanged, false)
+			continue
 		}
 		reason := "closed"
 		if err != nil {
@@ -241,6 +280,10 @@ func (c *chn) loop(ctx context.Context) {
 		if wasUp {
 			fails = 0
 			sw.reset()
+			if c.consumeReturn() {
+				c.selectFirst()
+				continue
+			}
 		} else {
 			fails++
 		}
@@ -269,14 +312,123 @@ func (c *chn) loop(ctx context.Context) {
 			sw.reset() // круг по путям закончен — новый круг после паузы
 		}
 		c.set("down", path, reason, false)
-		pause := []time.Duration{1, 1, 2, 3, 5}[min(fails, 4)] * time.Second
+		pause := retryDelay(fails) // связь была (fails=0) — минимальная пауза 0.5 с, чтобы не крутиться
+		t := time.NewTimer(pause)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
 		case <-c.kick:
-		case <-time.After(pause):
+		case <-t.C:
 		}
+		t.Stop()
 	}
+}
+
+// NetChanged: сеть сменилась (вызывается после перенастройки sing-box). Текущая попытка/сессия обрывается,
+// круг путей начинается с первого по рангу, без паузы. Закреплённый путь (ForcePath) не сбрасывается.
+func (c *chn) NetChanged() {
+	c.mu.Lock()
+	cancel := c.sessCancel
+	if !c.started || c.cancel == nil {
+		c.mu.Unlock()
+		return
+	}
+	c.netPending = true
+	st := c.st
+	c.mu.Unlock()
+	c.log.Info("net-changed", "session", st.Session, "state", st.State)
+	c.set("connecting", st.Path, reasonNetChanged, false)
+	if cancel != nil {
+		cancel()
+	}
+	select { // разбудить паузу между кругами
+	case c.kick <- struct{}{}:
+	default:
+	}
+}
+
+func (c *chn) takeNetReason() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.netPending {
+		return reasonNetChanged
+	}
+	return ""
+}
+
+func (c *chn) consumeNetPending() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p := c.netPending
+	c.netPending = false
+	return p
+}
+
+// consumeReturn — сессию закрыли ради возврата на предпочтительный путь.
+func (c *chn) consumeReturn() bool {
+	select {
+	case <-c.retPref:
+		return true
+	default:
+		return false
+	}
+}
+
+// selectFirst — выбрать первый по рангу путь селектора (если не закреплён другой).
+func (c *chn) selectFirst() {
+	if c.sb == nil || c.o.Mode.NoSingbox {
+		return
+	}
+	c.mu.Lock()
+	pinned := time.Now().Before(c.pinned)
+	c.mu.Unlock()
+	if names := c.sb.PathNames(); !pinned && len(names) > 0 {
+		_ = c.selectPath(names[0])
+	}
+}
+
+// armReturn: сессия поднялась на пути не первого ранга — один раз через задержку вернуться на предпочтительный.
+// Таймер одноразовый и ставится по событию «up», не опрос; на первом пути/закреплённом — не ставится.
+func (c *chn) armReturn(path string) {
+	select { // сигнал прошлой сессии не относится к этой
+	case <-c.retPref:
+	default:
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.retTimer != nil {
+		c.retTimer.Stop()
+		c.retTimer = nil
+	}
+	if c.sb == nil || c.o.Mode.NoSingbox || time.Now().Before(c.pinned) {
+		return
+	}
+	names := c.sb.PathNames()
+	if len(names) == 0 || path == names[0] {
+		c.retFails = 0
+		return
+	}
+	d := returnBase
+	for i := 0; i < c.retFails && d < returnMax; i++ {
+		d *= 2
+	}
+	c.retFails++
+	c.retTimer = time.AfterFunc(min(d, returnMax), func() {
+		select {
+		case c.retPref <- struct{}{}:
+		default:
+		}
+	})
+}
+
+func (c *chn) disarmReturnKeep() {
+	c.mu.Lock()
+	if c.retTimer != nil {
+		c.retTimer.Stop()
+		c.retTimer = nil
+	}
+	c.mu.Unlock()
 }
 
 const reasonIntercepted = "отпечаток не совпал — путь перехвачен"
@@ -360,10 +512,7 @@ func (c *chn) pickPath(ctx context.Context, first bool) (string, string) {
 		return "chan", c.sb.ChanAddr()
 	default:
 	}
-	if !first {
-		return "ssh-direct", direct
-	}
-	select {
+	select { // sing-box перезапускается (смена сети/падение): ждём его событие Ready, не опрашиваем
 	case <-c.sb.Ready():
 		return "chan", c.sb.ChanAddr()
 	case <-time.After(sbWait):
@@ -591,6 +740,8 @@ func (c *chn) session(ctx context.Context, first bool) (string, error) {
 	}
 	c.set("up", path, "", true)
 	c.log.Info("up", "rport", rport, "via", path)
+	c.armReturn(path)
+	defer c.disarmReturnKeep()
 	waitSess := make(chan error, 1)
 	go func() { waitSess <- sess.Wait() }()
 	select { // block on events: connection lost, session end, forced switch, stop
@@ -605,6 +756,9 @@ func (c *chn) session(ctx context.Context, first bool) (string, error) {
 		return path, fmt.Errorf("%w: server session ended", errWasUp)
 	case <-c.kick:
 		return path, fmt.Errorf("%w: path switch", errWasUp)
+	case <-c.retPref:
+		c.retPref <- struct{}{} // consumeReturn в цикле увидит признак
+		return path, fmt.Errorf("%w: возврат на предпочтительный путь", errWasUp)
 	case <-ctx.Done():
 		return path, ctx.Err()
 	}

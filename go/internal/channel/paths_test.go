@@ -215,3 +215,112 @@ func TestPinnedEd25519WorksWhenServerAlsoHasECDSA(t *testing.T) {
 		}
 	}
 }
+
+func TestRetryDelayBounds(t *testing.T) {
+	want := []time.Duration{500 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second}
+	for i, w := range want {
+		if got := retryDelay(i); got != w {
+			t.Errorf("fails=%d: %v, want %v", i, got, w)
+		}
+	}
+	if retryDelay(100) != 30*time.Second {
+		t.Fatal("нет верхней границы")
+	}
+}
+
+func newTestChan(t *testing.T, sb api.Singbox, hostKey ssh.Signer) api.Channel {
+	t.Helper()
+	_, cpriv, _ := ed25519.GenerateKey(rand.Reader)
+	cfg := &api.Config{Servers: []api.Server{{Host: "203.0.113.1", Port: 22, User: "u", Key: marshalPEM(t, cpriv),
+		HostKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(hostKey.PublicKey())))}}}
+	ch, err := New(cfg, sb, fake.NewAgentHost("tok"), &fake.Logger{}, fake.NewTraces("0123456789abcdef0123456789abcdef"), Options{PC: "pc-v3", DialTimeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ch
+}
+
+// Смена сети: попытка обрывается, публикуется причина, круг путей начинается с первого по рангу (а не с того, где остановились).
+func TestNetChangedRestartsFromFirstPath(t *testing.T) {
+	good := newSigner(t)
+	sb := &selectorSB{names: []string{"a", "b"}, now: "a", addr: map[string]string{"a": sshStub(t, good), "b": sshStub(t, good)}}
+	ch := newTestChan(t, sb, good)
+	updates, unsub := ch.Subscribe()
+	defer unsub()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_ = ch.Start(ctx)
+	defer ch.Stop(context.Background())
+	sb.mu.Lock()
+	sb.now = "b" // как будто последним работал второй путь
+	sb.mu.Unlock()
+	nc, ok := ch.(interface{ NetChanged() })
+	if !ok {
+		t.Fatal("канал не реализует NetChanged")
+	}
+	nc.NetChanged()
+	deadline := time.After(5 * time.Second)
+	sawReason := false
+	for !sawReason {
+		select {
+		case st := <-updates:
+			sawReason = st.Reason == reasonNetChanged
+		case <-deadline:
+			t.Fatal("причина «сеть сменилась» не опубликована")
+		}
+	}
+	for i := 0; i < 100; i++ {
+		sb.mu.Lock()
+		now := sb.now
+		sb.mu.Unlock()
+		if now == "a" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("после смены сети не выбран первый путь")
+}
+
+// Возврат на предпочтительный путь: таймер ставится только на пути не первого ранга и не на закреплённом.
+func TestArmReturnOnlyOnNonPreferredPath(t *testing.T) {
+	old := returnBase
+	returnBase = 20 * time.Millisecond
+	defer func() { returnBase = old }()
+	sb := &selectorSB{names: []string{"a", "b"}, now: "a", addr: map[string]string{}}
+	c := &chn{sb: sb, retPref: make(chan struct{}, 1)}
+	c.armReturn("a")
+	select {
+	case <-c.retPref:
+		t.Fatal("возврат запрошен на предпочтительном пути")
+	case <-time.After(80 * time.Millisecond):
+	}
+	c.armReturn("b")
+	select {
+	case <-c.retPref:
+	case <-time.After(2 * time.Second):
+		t.Fatal("возврат не запрошен на запасном пути")
+	}
+	c.pinned = time.Now().Add(time.Minute)
+	c.armReturn("b")
+	select {
+	case <-c.retPref:
+		t.Fatal("возврат при закреплённом пути")
+	case <-time.After(80 * time.Millisecond):
+	}
+}
+
+// Задержка возврата растёт при неудачных возвратах (без дёрганья), сбрасывается на предпочтительном пути.
+func TestArmReturnBacksOff(t *testing.T) {
+	sb := &selectorSB{names: []string{"a", "b"}, now: "a", addr: map[string]string{}}
+	c := &chn{sb: sb, retPref: make(chan struct{}, 1)}
+	c.armReturn("b")
+	c.armReturn("b")
+	if c.retFails != 2 {
+		t.Fatalf("retFails=%d", c.retFails)
+	}
+	c.armReturn("a")
+	if c.retFails != 0 {
+		t.Fatal("счётчик не сброшен")
+	}
+	c.disarmReturnKeep()
+}
