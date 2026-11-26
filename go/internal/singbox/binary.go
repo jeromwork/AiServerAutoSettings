@@ -24,12 +24,80 @@ const assetLimit = 128 << 20
 
 type asset struct{ OS, Arch, URL, SHA256, BinPath string }
 
-// Install only the platform asset authenticated by the pinned archive digest.
+func binaryName() string {
+	if runtime.GOOS == "windows" {
+		return "ra-core.exe"
+	}
+	return "ra-core"
+}
+
+// installBinary prefers the sing-box compiled into this executable (build.sh,
+// tag singbox_embed); the network download is only a fallback for dev builds.
 func installBinary(ctx context.Context, p api.Paths, tr api.Traces, lockPath string) (string, error) {
-	binDir := p.Bin
-	data, err := os.ReadFile(lockPath)
+	if len(embeddedBin) > 0 {
+		return installEmbedded(p, tr, embeddedBin)
+	}
+	return downloadBinary(ctx, p, tr, lockPath)
+}
+
+// installEmbedded unpacks data to p.Bin/ra-core; an identical file is left alone.
+func installEmbedded(p api.Paths, tr api.Traces, data []byte) (string, error) {
+	if err := os.MkdirAll(p.Bin, 0700); err != nil {
+		return "", fmt.Errorf("singbox: binary: create directory: %w", err)
+	}
+	dst := filepath.Join(p.Bin, binaryName())
+	want := sha256.Sum256(data)
+	if cur, err := os.Open(dst); err == nil {
+		h := sha256.New()
+		_, cerr := io.Copy(h, cur)
+		_ = cur.Close()
+		if cerr == nil && hex.EncodeToString(h.Sum(nil)) == hex.EncodeToString(want[:]) {
+			_ = os.Chmod(dst, 0700)
+			return dst, nil
+		}
+	}
+	tmpPath, release, err := tempFile(p, tr, "binary-*")
 	if err != nil {
-		return "", fmt.Errorf("singbox: lock: cannot read lock")
+		return "", err
+	}
+	defer release()
+	if err = os.WriteFile(tmpPath, data, 0700); err != nil {
+		return "", fmt.Errorf("singbox: binary: write: %w", err)
+	}
+	if err = os.Chmod(tmpPath, 0700); err != nil {
+		return "", fmt.Errorf("singbox: binary: write: %w", err)
+	}
+	if err = os.Rename(tmpPath, dst); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("singbox: binary: replace: %w", err)
+	}
+	return dst, nil
+}
+
+// lockFile resolves the lock without relying on cwd: explicit path, cwd-relative
+// legacy path, then the source tree of this package (dev builds without -trimpath).
+func lockFile(path string) string {
+	cands := []string{path}
+	if _, f, _, ok := runtime.Caller(0); ok {
+		cands = append(cands, filepath.Join(filepath.Dir(f), "..", "..", "third_party", "singbox.lock.json"))
+	}
+	for _, c := range cands {
+		if c == "" {
+			continue
+		}
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return path
+}
+
+// downloadBinary installs only the platform asset authenticated by the pinned archive digest.
+func downloadBinary(ctx context.Context, p api.Paths, tr api.Traces, lockPath string) (string, error) {
+	binDir := p.Bin
+	data, err := os.ReadFile(lockFile(lockPath))
+	if err != nil {
+		return "", fmt.Errorf("singbox: lock: cannot read lock (no embedded sing-box in this build)")
 	}
 	var lock struct {
 		Version string
@@ -151,11 +219,7 @@ func installBinary(ctx context.Context, p api.Paths, tr api.Traces, lockPath str
 	if err != nil {
 		return "", fmt.Errorf("singbox: binary: write: %w", err)
 	}
-	name := "ra-core"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	dst := filepath.Join(binDir, name)
+	dst := filepath.Join(binDir, binaryName())
 	if err = os.Rename(tmp.Name(), dst); err != nil {
 		return "", fmt.Errorf("singbox: binary: replace: %w", err)
 	}

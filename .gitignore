@@ -49,3 +49,6 @@ contabo-support-request.txt
 !/release/
 !/release/*.exe
 !/release/Start.cmd
+
+# sing-box embedded by build.sh (never commit binaries)
+go/internal/singbox/embedded/

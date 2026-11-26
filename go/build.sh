@@ -53,7 +53,9 @@ build() {
   mkdir -p .tmp dist
   work=$(mktemp -d "$PWD/.tmp/build.XXXXXX")
   resource=''
+  embed=internal/singbox/embedded/sing-box.bin
   cleanup() {
+    rm -f -- "$embed" "$embed.tmp"
     [[ -z $resource ]] || rm -f -- "$resource"
     rm -rf -- "$work"
   }
@@ -73,13 +75,17 @@ build() {
       resource="cmd/remoteagents/rsrc_windows_$arch.syso"
       cp -- "$work/rsrc_windows_$arch.syso" "$resource"
     fi
+    # Each exe carries only its own pinned, sha256-verified sing-box.
+    python3 -I tools/embed-singbox.py third_party/singbox.lock.json "$os" "$arch" \
+      "$embed" "$PWD/.tmp/singbox-cache"
     printf 'Building %s (%s)\n' "$target" "$version"
-    GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build \
+    GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -tags singbox_embed \
       -mod=readonly -trimpath -ldflags "$ldflags" -o "$work/$name" ./cmd/remoteagents
     if [[ -n $resource ]]; then
       rm -f -- "$resource"
       resource=''
     fi
+    rm -f -- "$embed"
     mv -- "$work/$name" "dist/$name"
   done
   printf 'OK: %s asset(s) in dist/\n' "$#"
