@@ -6,5 +6,5 @@ import (
 )
 
 func init() {
-	api.RegisterDev(api.DevCmd{Name: "platform", Help: "autostart <os>: verify an autostart specification", Run: platform.RunAutostartDev})
+	api.RegisterDev(api.DevCmd{Name: "autostart", Help: "<os>: verify an autostart specification", Run: platform.RunAutostartDev})
 }
