@@ -5,7 +5,7 @@
   private\\v2\\          - то, что раскладывается из конфига: id_key, known_hosts, ssh-profile.json, channel.json, secrets\\entries\\<имя>.json
   state\\vpn.json, state\\control.json - выбор из конфига, пишутся только при применении
 
-Режим для сервера: python3 -m ralab.v2config seal <вход.json> <выход.json> | check <файл.json>
+Режим для сервера: python3 -m ralab.v2config seal <вход.json> <выход.json> [--name <Имя>] | check <файл.json>
 Значения секретов нигде не печатаются и в журнал не пишутся.
 """
 import csv, glob, json, os, re, shutil, subprocess, sys, time
@@ -358,7 +358,76 @@ def _need_box():
         sys.exit('Нет модуля шифрования (secretbox).')
 
 
-def seal(src, dst):
+ISSUE_NAME_RE = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
+ISSUED = os.path.expanduser('~/.local/share/ra-lab/issued-names.json')
+_TR = dict(zip('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
+               ['a', 'b', 'v', 'g', 'd', 'e', 'e', 'zh', 'z', 'i', 'y', 'k', 'l', 'm', 'n', 'o', 'p', 'r', 's', 't', 'u', 'f', 'h', 'ts',
+                'ch', 'sh', 'sch', '', 'y', '', 'e', 'yu', 'ya']))
+
+
+def translit(name):
+    out = ''
+    for ch in str(name).strip():
+        low = ch.lower()
+        t = _TR.get(low)
+        if t is None:
+            out += ch if re.match(r'[A-Za-z0-9._-]', ch) else '-'
+        else:
+            out += t.capitalize() if ch != low and t else t
+    return re.sub(r'-{2,}', '-', out).strip('-')[:64]
+
+
+def _issued():
+    try:
+        with open(ISSUED, encoding='utf-8') as f:
+            d = json.load(f)
+        return [str(x) for x in d] if isinstance(d, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _remember(name):
+    names = _issued()
+    if name.lower() not in [n.lower() for n in names]:
+        names.append(name)
+        os.makedirs(os.path.dirname(ISSUED), exist_ok=True)
+        with open(ISSUED, 'w', encoding='utf-8') as f:
+            json.dump(names, f, ensure_ascii=False, indent=1)
+
+
+def _name_problem(name):
+    if not ISSUE_NAME_RE.match(name):
+        sug = translit(name)
+        hint = ' Предложение: %s' % sug if sug and ISSUE_NAME_RE.match(sug) else ''
+        return 'Имя компьютера «%s» не подходит: нужны латиница, цифры и . _ - (1-64 знака).%s' % (name, hint)
+    if name.lower() in [n.lower() for n in _issued()]:
+        return 'Имя компьютера «%s» уже выдавалось другому конфигу, выберите другое.' % name
+    return None
+
+
+def choose_name(cfg, given):
+    """Имя компьютера при выпуске: --name или вопрос (только в терминале). Старые конфиги проверкой check не затрагиваются."""
+    if given is not None:
+        pr = _name_problem(given)
+        if pr:
+            sys.exit(pr)
+        return given
+    if not sys.stdin.isatty():
+        sys.exit('Укажите имя компьютера: --name <Имя> (латиница, цифры, . _ -, например Office-Laptop).')
+    cur = str(cfg.get('name') or '')
+    while True:
+        ans = input('Имя компьютера (латиница/цифры/._-, например Office-Laptop)%s: ' % (' [%s]' % cur if cur else '')).strip() or cur
+        if ans and not ISSUE_NAME_RE.match(ans):
+            sug = translit(ans)
+            if sug and ISSUE_NAME_RE.match(sug) and input('Транслитерация: %s. Подходит? [y/N] ' % sug).strip().lower() in ('y', 'yes', 'д', 'да'):
+                ans = sug
+        pr = _name_problem(ans) if ans else 'Имя не может быть пустым.'
+        if not pr:
+            return ans
+        print(pr)
+
+
+def seal(src, dst, name=None):
     _need_box()
     import getpass
     with open(src, encoding='utf-8-sig') as f:
@@ -366,6 +435,7 @@ def seal(src, dst):
     cfg, pr = _validate(text)
     if pr:
         sys.exit('; '.join(pr))
+    cfg['name'] = choose_name(cfg, name)
     pw = os.environ.get('RA_PASSWORD') or getpass.getpass('Пароль конфига: ')
     if not pw:
         sys.exit('Пароль пустой.')
@@ -387,6 +457,7 @@ def seal(src, dst):
         f.write('\n')
     os.chmod(tmp, 0o600)
     os.replace(tmp, dst)
+    _remember(cfg['name'])
 
 
 def check(path):
@@ -402,15 +473,21 @@ def check(path):
 
 
 def main(argv):
-    if len(argv) == 4 and argv[1] == 'seal':
-        seal(argv[2], argv[3])
+    if len(argv) >= 4 and argv[1] == 'seal':
+        rest, name = argv[4:], None
+        if rest[:1] == ['--name'] and len(rest) == 2:
+            name = rest[1]
+        elif rest:
+            print('Использование: seal <вход.json> <выход.json> [--name <ИмяКомпьютера>]', file=sys.stderr)
+            return 2
+        seal(argv[2], argv[3], name)
         print('Готово: %s' % argv[3])
         return 0
     if len(argv) == 3 and argv[1] == 'check':
         pr = check(argv[2])
         print('Конфиг в порядке.' if not pr else '\n'.join(pr))
         return 1 if pr else 0
-    print('Использование: python3 -m ralab.v2config seal <вход.json> <выход.json> | check <файл.json>', file=sys.stderr)
+    print('Использование: python3 -m ralab.v2config seal <вход.json> <выход.json> [--name <Имя>] | check <файл.json>', file=sys.stderr)
     return 2
 
 
