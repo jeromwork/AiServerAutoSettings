@@ -224,6 +224,7 @@ func (u *UI) registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/status", u.handleState)
 	mux.HandleFunc("/api/update", u.handleUpdate)
 	mux.HandleFunc("/update", u.handleUpdate)
+	mux.HandleFunc("/api/rollback", u.handleRollback)
 	mux.HandleFunc("/api/log/tail", u.handleLogTail)
 	mux.HandleFunc("/api/log/zip", u.handleLogZip)
 	mux.HandleFunc("/api/log/send", u.handleLogSend)
@@ -323,7 +324,21 @@ func (u *UI) handleUpdate(w http.ResponseWriter, req *http.Request) {
 	if !u.checkAuth(w, req) {
 		return
 	}
-	if err := u.act.UpdateNow(req.Context()); err != nil {
+	// Загрузка и проверка кандидата идут дольше запроса: работа в фоне, ход и итог приходят событиями "update" (SSE).
+	go func() { _ = u.act.UpdateNow(context.WithoutCancel(req.Context())) }()
+	replyJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
+}
+
+// handleRollback — «Вернуть прежнюю версию»: сторож переключает слот и конфиг на предыдущую рабочую версию.
+func (u *UI) handleRollback(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !u.checkAuth(w, req) {
+		return
+	}
+	if err := u.act.Rollback(context.WithoutCancel(req.Context()), "manual rollback from the page"); err != nil {
 		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}

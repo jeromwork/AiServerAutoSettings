@@ -21,7 +21,12 @@ import (
 var versionName = regexp.MustCompile(api.VersionRe)
 var errPendingInvalid = errors.New("supervise: pending-invalid: invalid candidate")
 
+// StateSchema — формат versions/state.json. Поля только добавляются (старая сборка лишние игнорирует), поэтому
+// откат версии читает состояние, записанное новой; Schema нужен, чтобы увидеть, кто писал файл.
+const StateSchema = 1
+
 type slotState struct {
+	Schema         int    `json:"schema"`
 	Current        string `json:"current"`
 	LastGood       string `json:"lastGood"`
 	PrevGood       string `json:"prevGood"`
@@ -31,6 +36,9 @@ type slotState struct {
 	MemRestarts    int    `json:"memRestarts"`
 	RollbackReason string `json:"rollbackReason"`
 	Stopped        string `json:"stopped"`
+	// Bad — версия, с которой последний раз откатились (авто- или ручной откат): автообновление её не ставит
+	// повторно (иначе цикл «обновился — откатился»); ручное «Обновить» разрешено. Сбрасывается, когда она стала good.
+	Bad string `json:"bad,omitempty"`
 }
 
 type slots struct {
@@ -59,6 +67,9 @@ func (s *slots) exists(v string) bool {
 		return false
 	}
 	// Refuse symlink slots; pruning and execution must stay within Versions.
+	if v == s.embedded && s.self == "" {
+		return true
+	}
 	if v != s.embedded {
 		st, err := os.Lstat(filepath.Join(s.p.Versions, v))
 		if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
@@ -277,6 +288,9 @@ func (s *slots) discardSelfUpdate() error {
 }
 
 func (s *slots) save() error {
+	if s.Schema < StateSchema {
+		s.Schema = StateSchema
+	}
 	return writeJSON(filepath.Join(s.p.Versions, "state.json"), s.slotState)
 }
 
@@ -289,6 +303,10 @@ func (s *slots) markGood() {
 		s.MemRestarts = 0
 		s.RollbackReason = ""
 	}
+	if s.Bad == s.Current {
+		s.Bad = ""
+	}
+	s.RollbackReason = "" // версия подтверждена: причина прошлого отката больше не передаётся
 	s.FailsBoot = 0
 }
 
@@ -335,6 +353,9 @@ func (s *slots) transition(ctx context.Context, code int, silence, rollback bool
 			if err := s.removePending(); err != nil {
 				return err
 			}
+			if next != s.Current {
+				s.Bad = s.Current
+			}
 			s.Current = next
 			s.RollbackReason = reason
 			s.FailsGood = 0
@@ -380,11 +401,13 @@ func (s *slots) transition(ctx context.Context, code int, silence, rollback bool
 	if s.Current != s.LastGood {
 		switch {
 		case s.LastGood != "" && s.exists(s.LastGood):
+			s.Bad = s.Current
 			s.Current = s.LastGood
 			s.FailsGood = 0
 			s.FailsBoot = 0
 			s.MemRestarts = 0
 		case s.Current != s.embedded && s.exists(s.embedded):
+			s.Bad = s.Current
 			s.Current = s.embedded
 			s.FailsGood = 0
 			s.FailsBoot = 0
@@ -403,6 +426,72 @@ func (s *slots) transition(ctx context.Context, code int, silence, rollback bool
 	}
 	return s.save()
 }
+
+// previous — версия, на которую вернёт ручной откат: lastGood, а если уже на ней — prevGood.
+func (s *slots) previous() string {
+	next := s.LastGood
+	if s.Current == s.LastGood {
+		next = s.PrevGood
+	}
+	if next == "" || next == s.Current || !s.exists(next) {
+		return ""
+	}
+	return next
+}
+
+// Info — то, что нужно странице и ядру о версиях (читается из versions/state.json без блокировок).
+type Info struct{ Current, LastGood, PrevGood, Bad, Previous string }
+
+// ReadInfo читает состояние версий; Previous — куда вернёт откат ("" — некуда).
+func ReadInfo(p api.Paths) Info {
+	s := &slots{p: p}
+	if b, err := os.ReadFile(filepath.Join(p.Versions, "state.json")); err == nil {
+		_ = json.Unmarshal(b, &s.slotState)
+	}
+	s.embedded = s.EmbeddedSeen // её двоичный файл — установленный exe, не слот; считаем существующей
+	return Info{Current: s.Current, LastGood: s.LastGood, PrevGood: s.PrevGood, Bad: s.Bad, Previous: s.previous()}
+}
+
+// RollbackOffline — `remoteagents rollback`, когда ядро не запущено: тот же результат, что у отката по запросу ядра
+// (current = предыдущая версия, конфиг возвращается на поколение, которое она читает). Возвращает версию-цель.
+func RollbackOffline(ctx context.Context, p api.Paths, self, embeddedVersion string, log api.Logger) (string, error) {
+	run, err := lockFile(filepath.Join(p.State, api.LockRun))
+	if err != nil {
+		return "", fmt.Errorf("supervise: running: сторож запущен, но ядро не отвечает; откат через страницу или после остановки (%w)", err)
+	}
+	defer run()
+	unlock, err := lockOperation(ctx, p)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	s, err := loadSlots(ctx, p, self, embeddedVersion, false)
+	if err != nil {
+		return "", err
+	}
+	next := s.previous()
+	if next == "" {
+		return "", ErrNoPrevious
+	}
+	if err := s.discardSelfUpdate(); err != nil {
+		return "", err
+	}
+	if err := s.removePending(); err != nil {
+		return "", err
+	}
+	s.Bad = s.Current
+	s.Current = next
+	s.RollbackReason = "manual rollback"
+	s.FailsGood, s.FailsBoot, s.MemRestarts, s.Stopped = 0, 0, 0, ""
+	if err := s.save(); err != nil {
+		return "", err
+	}
+	s.alignConfigLocked(ctx, log)
+	return next, nil
+}
+
+// ErrNoPrevious: откатываться некуда (сравнивать через errors.Is).
+var ErrNoPrevious = errors.New("supervise: no-previous: предыдущей версии нет")
 
 func (s *slots) removePending() error {
 	return removeFile(filepath.Join(s.p.Versions, "pending.json"))

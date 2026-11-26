@@ -36,8 +36,10 @@ pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; word-break: brea
 
 <div class="box">
   <button id="btn-update" type="button">Обновить</button>
+  <button id="btn-rollback" type="button">Вернуть прежнюю версию</button>
   <button id="btn-exit" type="button" class="danger">Выход</button>
   <div id="umsg"></div>
+  <div id="upd-st"></div>
 </div>
 
 <div class="box">
@@ -129,6 +131,9 @@ function get(p) {
 function show(s) {
   S = s;
   if (s.version) document.getElementById("ver").textContent = s.version;
+  var rb = document.getElementById("btn-rollback");
+  rb.style.display = s.prevVersion ? "" : "none";
+  if (s.prevVersion) rb.title = "Вернуться на " + s.prevVersion;
   var lines = s.lines || [];
   if (lines.length) {
     document.getElementById("lines").textContent = lines.join("\n");
@@ -193,13 +198,29 @@ function poll() {
 
 document.getElementById("btn-update").onclick = function() {
   var m = document.getElementById("umsg");
-  m.textContent = "Обновляю...";
+  m.className = "";
+  m.textContent = "Запрашиваю обновление...";
   post("/api/update").then(function(r) {
     m.className = r.ok ? "ok" : "err";
-    m.textContent = r.ok ? "Команда обновления принята" : ("Ошибка: " + (r.error || "не удалось"));
-    poll();
+    m.textContent = r.ok ? "" : ("Ошибка: " + (r.error || "не удалось"));
   });
 };
+
+document.getElementById("btn-rollback").onclick = function() {
+  if (!confirm("Вернуться на прежнюю версию программы? Программа перезапустится.")) return;
+  var m = document.getElementById("umsg");
+  post("/api/rollback").then(function(r) {
+    m.className = r.ok ? "ok" : "err";
+    m.textContent = r.ok ? "" : ("Ошибка: " + (r.error || "не удалось"));
+  });
+};
+
+var USTAGE = {checking: "Проверяю", downloading: "Скачиваю", verifying: "Проверяю кандидата", restarting: "Запускаю", ready: "Готово", uptodate: "Обновлений нет", rolledback: "Откат", error: "Ошибка"};
+function onUpdate(a) {
+  var el = document.getElementById("upd-st");
+  el.className = (a.stage === "error" || a.stage === "rolledback") ? "err" : (a.stage === "ready" || a.stage === "uptodate" ? "ok" : "");
+  el.textContent = (a.at || "") + " " + (USTAGE[a.stage] || a.stage) + ": " + (a.text || "");
+}
 
 document.getElementById("btn-exit").onclick = function() {
   if (confirm("Завершить работу программы?")) {
@@ -404,6 +425,7 @@ function listen(kind, fn) {
 var es = new EventSource("/api/events?t=" + encodeURIComponent(T));
 listen("status", show);
 listen("apply", onApply);
+listen("update", onUpdate);
 listen("channel", onChannel);
 listen("singbox", onSingbox);
 listen("paths", onPaths);

@@ -32,7 +32,10 @@ esac
 repo=${repo%.git}
 [[ $repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail 'invalid release repository in origin'
 # C9: R0 supplies current and backup OpenSSH keys for the ra3 signer.
-[[ -s keys/allowed_signers ]] || fail 'keys/allowed_signers is missing or empty (R0 required)'
+# Тестовая сборка для проверки обновления (docs/update-test.md): SIGNERS_FILE — свой allowed_signers с ОДНИМ
+# тестовым ключом, EXTRA_LDFLAGS — например -X main.testFault=crash. Боевой выпуск эти переменные не задаёт.
+signers_file=${SIGNERS_FILE:-keys/allowed_signers}
+[[ -s $signers_file ]] || fail "$signers_file is missing or empty (R0 required)"
 keys=''
 key_count=0
 while read -r signer key_type key_data comment || [[ -n $signer ]]; do
@@ -44,10 +47,10 @@ while read -r signer key_type key_data comment || [[ -n $signer ]]; do
   # Drop comments; keep the allowed_signers format, including line boundaries.
   keys+="${keys:+$'\n'}$signer $key_type $key_data"
   key_count=$((key_count + 1))
-done < keys/allowed_signers
-[[ $key_count == 2 ]] || fail 'allowed_signers must contain current and backup keys'
+done < "$signers_file"
+[[ -n ${SIGNERS_FILE:-} || $key_count == 2 ]] || fail 'allowed_signers must contain current and backup keys'
 # Go's flag parser preserves spaces/newlines inside this quoted -X argument.
-ldflags="-X main.version=$version -X main.releaseRepo=$repo -X 'main.pubKeys=$keys'"
+ldflags="-X main.version=$version -X main.releaseRepo=$repo -X 'main.pubKeys=$keys' ${EXTRA_LDFLAGS:-}"
 
 exec 9>/tmp/heavy-tests.lock
 flock -x 9

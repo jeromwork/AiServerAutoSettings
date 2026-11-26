@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"remoteagents/internal/api"
+	"remoteagents/internal/config"
 	"remoteagents/internal/core"
 	"remoteagents/internal/supervise"
 )
@@ -21,11 +22,12 @@ func dispatch(ctx context.Context, args []string) int {
 	switch args[0] {
 	case "version":
 		if len(args) > 1 && args[1] == "--json" {
-			b, _ := json.Marshal(map[string]string{
+			b, _ := json.Marshal(map[string]any{
 				"version": version,
 				"build":   build,
 				"os":      runtime.GOOS,
 				"arch":    runtime.GOARCH,
+				"schema":  config.SchemaVersion,
 			})
 			fmt.Println(string(b))
 		} else {
@@ -37,6 +39,14 @@ func dispatch(ctx context.Context, args []string) int {
 		f, err := parseRunFlags(args[1:], false)
 		if err != nil {
 			return 2
+		}
+		switch testFault {
+		case "crash":
+			fmt.Fprintln(os.Stderr, "testFault: crash")
+			return 1
+		case "hang":
+			<-ctx.Done()
+			return api.ExitOK
 		}
 		return core.Run(ctx, withBuildInfo(f))
 
@@ -61,7 +71,7 @@ func dispatch(ctx context.Context, args []string) int {
 		}
 		return c.Run(ctx, args[2:])
 
-	case "open", "status", "config", "update", "leftovers":
+	case "open", "status", "config", "update", "leftovers", "rollback":
 		return runCLI(ctx, args[0], args[1:])
 
 	case "install", "enable", "uninstall", "singbox":
