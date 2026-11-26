@@ -16,6 +16,6 @@ func newBasket(cmd *exec.Cmd) (basket, error) {
 }
 
 func (basket) add(*exec.Cmd) error { return nil }
-func (basket) close()              {}
+func (basket) close(c *exec.Cmd)   { _ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL) } // leftovers of the group
 func (basket) soft(c *exec.Cmd)    { _ = syscall.Kill(-c.Process.Pid, syscall.SIGTERM) }
 func (basket) kill(c *exec.Cmd)    { _ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL) }

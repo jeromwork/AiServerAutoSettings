@@ -17,7 +17,7 @@ func newBasket(cmd *exec.Cmd) (basket, error) {
 }
 
 func (b basket) add(c *exec.Cmd) error { return b.job.Assign(c.Process) }
-func (b basket) close()                { _ = b.job.Close() }
+func (b basket) close(*exec.Cmd)       { _ = b.job.Close() } // KILL_ON_JOB_CLOSE
 func (b basket) soft(c *exec.Cmd) {
 	_ = windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(c.Process.Pid))
 }

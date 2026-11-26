@@ -8,25 +8,42 @@ import (
 	"time"
 
 	"remoteagents/internal/api"
+	"remoteagents/internal/cleanup"
+	"remoteagents/internal/platform"
 	"remoteagents/internal/procs"
 )
 
 func init() {
 	api.RegisterDev(api.DevCmd{
 		Name: "procs",
-		Help: "procs dev commands: orphan",
+		Help: "procs <orphan|sweep> <home>",
 		Run:  runDevProcs,
 	})
 }
 
 func runDevProcs(ctx context.Context, args []string) int {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: remoteagents dev procs orphan")
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: remoteagents dev procs <orphan|sweep> <home>")
 		return 1
 	}
 	switch args[0] {
+	case "sweep": // как при следующем старте: убрать остатки прошлых запусков по следам
+		tr, err := cleanup.New(api.NewPaths(args[1]), nil, platform.Current())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		for _, is := range tr.Run(ctx, "startup") {
+			fmt.Fprintln(os.Stderr, is)
+		}
+		return 0
 	case "orphan":
-		pr := procs.New(nil)
+		tr, err := cleanup.New(api.NewPaths(args[1]), nil, platform.Current())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		pr, _ := procs.New(nil, tr)
 		sleepPath, err := exec.LookPath("sleep")
 		if err != nil {
 			sleepPath = "/bin/sleep"
