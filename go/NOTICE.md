@@ -1290,3 +1290,18 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ```
+
+---
+
+## 3. Подпись (Signing)
+
+Релизы канала `v3-latest` подписываются OpenSSH-подписью (`ssh-keygen -Y sign`, namespace `ra3-release`,
+идентификатор `ra3`) над файлом `checksums.txt`; подпись — `checksums.txt.sig`.
+
+- Публичные ключи: `go/keys/allowed_signers` — ровно два ed25519: текущий (release-A) и резервный (release-B).
+  Они вшиваются в `remoteagents` при сборке (`-ldflags -X main.pubKeys`) и проверяют обновления.
+- Приватные ключи хранятся только в `projenv` (проект `ra3`): `RELEASE_KEY_B64`, `RELEASE_KEY_BACKUP_B64`
+  (base64 PEM, т. к. projenv хранит значения в одну строку). В репозиторий и логи не попадают.
+- Ротация: подписать релиз резервным ключом, затем выпустить сборку с новой парой (A<-B, новый B).
+- Проверка вручную:
+  `ssh-keygen -Y verify -n ra3-release -f go/keys/allowed_signers -I ra3 -s checksums.txt.sig < checksums.txt`
