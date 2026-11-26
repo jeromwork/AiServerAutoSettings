@@ -87,6 +87,8 @@ type events struct {
 	attempts []attempt
 	n        int
 	kick     chan struct{}
+	apply    map[string]any // последнее состояние применения (для снимка при подключении страницы)
+	paths    map[string]any
 }
 
 func (c *core) publish(kind string, data any) {
@@ -99,7 +101,41 @@ func (c *core) publish(kind string, data any) {
 func (c *core) publishStatus() { c.publish("status", c.Status()) }
 
 func (c *core) publishApply(stage, text string) {
-	c.publish("apply", map[string]any{"stage": stage, "text": text, "at": time.Now().Format("15:04:05")})
+	m := map[string]any{"stage": stage, "text": text, "at": time.Now().Format("15:04:05")}
+	c.ev.mu.Lock()
+	c.ev.apply = m
+	c.ev.mu.Unlock()
+	c.publish("apply", m)
+}
+
+// snapshot — ТЕКУЩЕЕ состояние каждого вида из живых данных (а не последнее опубликованное): его получает
+// страница при подключении к /api/events.
+func (c *core) snapshot() map[string]any {
+	out := map[string]any{"status": c.Status()}
+	c.ev.mu.Lock()
+	if c.ev.apply != nil {
+		out["apply"] = c.ev.apply
+	}
+	if c.ev.paths != nil {
+		out["paths"] = c.ev.paths
+	}
+	if len(c.ev.attempts) > 0 {
+		out["attempts"] = append([]attempt(nil), c.ev.attempts...)
+	}
+	c.ev.mu.Unlock()
+	if ch := c.getCh(); ch != nil {
+		st := ch.State()
+		out["channel"] = map[string]any{"state": st.State, "path": st.Path, "reason": sanitize(st.Reason), "session": st.Session}
+	}
+	if sb := c.getSb(); !isNil(sb) {
+		st := sb.Status()
+		if e, ok := st["binaryError"].(string); ok {
+			st["binaryError"] = sanitize(e)
+		}
+		delete(st, "chan")
+		out["singbox"] = st
+	}
+	return out
 }
 
 func (c *core) publishSingbox() {
@@ -203,7 +239,11 @@ func (c *core) publishPaths(ctx context.Context) {
 	if err := sb.Clash(ctx, "GET", "/proxies/chan", nil, &grp); err == nil {
 		now = sanitize(grp.Now)
 	}
-	c.publish("paths", map[string]any{"nodes": nodes, "now": now})
+	pm := map[string]any{"nodes": nodes, "now": now}
+	c.ev.mu.Lock()
+	c.ev.paths = pm
+	c.ev.mu.Unlock()
+	c.publish("paths", pm)
 }
 
 // publishStartInfo — что страница должна знать сразу после (пере)запуска ядра: идёт ли проверка нового конфига,
@@ -217,7 +257,7 @@ func (c *core) publishStartInfo() {
 		c.publishApply("checking", fmt.Sprintf("Проверяю связь с сервером по новому конфигу (до %d с, потом откат).", left))
 		return
 	}
-	if le != "" {
+	if le != "" && !c.upOnce.Load() {
 		c.publishApply("error", le)
 	}
 }

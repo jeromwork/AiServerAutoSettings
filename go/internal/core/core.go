@@ -245,6 +245,10 @@ func (c *core) startComponents(ctx context.Context) {
 	}
 	if c.cfg != nil {
 		c.control.Store(c.cfg.Control.Enabled)
+		// Идёт новая попытка с этим конфигом: ошибка прошлой неудачной попытки не относится к ней.
+		if ptr, e := config.ReadPointers(c.p); e == nil && ptr.Switch != nil && ptr.Switch.To == c.gen && c.gen != "" {
+			c.clearLastErr()
+		}
 	}
 
 	// Обновление нужно и странице без конфига (Repo/ключи из сборки).
@@ -274,6 +278,9 @@ func (c *core) startComponents(ctx context.Context) {
 
 	// 9. webui — всегда и первой: sing-box может стартовать минутами, страница должна отвечать сразу.
 	c.ui, err = webui.New(c, log, f.DevAssets, c.prevUI())
+	if err == nil {
+		c.ui.SetSnapshot(c.snapshot)
+	}
 	if err != nil {
 		log.Error("core: webui", "err", err.Error())
 	} else if err = c.ui.Start(ctx); err != nil {
@@ -337,11 +344,13 @@ func (c *core) startNetwork(ctx context.Context) {
 			c.sb = sb
 			c.compMu.Unlock()
 			c.publishSingbox() // starting
+			c.publishStatus()
 			if e = sb.Start(ctx); e != nil {
 				log.Error("core: singbox-start", "err", e.Error())
 				c.failStart(e)
 			}
 			c.publishSingbox()
+			c.publishStatus()
 		}
 	}
 
@@ -489,17 +498,20 @@ func (c *core) watchChannel(ctx context.Context, ch <-chan api.ChannelState, uns
 			if st.State == "down" && fatalChannelReason(st.Reason) {
 				c.failStart(errors.New(st.Reason))
 			}
-			if st.State != "up" {
-				continue
-			}
-			c.upOnce.Store(true)
-			c.clearLastErr()
-			if c.gen != "" {
-				if err := config.Commit(c.p, c.gen, c.start); err != nil {
-					c.log.Warn("core: config-commit", "gen", c.gen, "err", err.Error())
+			if st.State == "up" {
+				c.upOnce.Store(true)
+				c.clearLastErr()
+				if c.gen != "" {
+					if err := config.Commit(c.p, c.gen, c.start); err != nil {
+						c.log.Warn("core: config-commit", "gen", c.gen, "err", err.Error())
+					}
 				}
+				c.publishApply("ready", "Связь с сервером установлена, конфиг принят.")
 			}
-			c.sendGood()
+			c.onChannelState(st) // channel/attempts/paths + свежий status — после commit и очистки ошибки
+			if st.State == "up" {
+				c.sendGood()
+			}
 		}
 	}
 }

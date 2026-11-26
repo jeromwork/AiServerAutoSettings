@@ -44,6 +44,7 @@ type UI struct {
 	stopWatch func() bool
 	stopped   bool
 	hub       *hub
+	snap      func() map[string]any
 	done      chan struct{}
 }
 

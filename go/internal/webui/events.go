@@ -46,12 +46,14 @@ func (h *hub) publish(kind string, data any) {
 	}
 }
 
-func (h *hub) subscribe() (<-chan evt, func()) {
+func (h *hub) subscribe(replay bool) (<-chan evt, func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	ch := make(chan evt, 64)
-	for k, v := range h.last {
-		ch <- evt{k, v}
+	if replay {
+		for k, v := range h.last {
+			ch <- evt{k, v}
+		}
 	}
 	id := h.seq
 	h.seq++
@@ -84,9 +86,17 @@ func (u *UI) handleEvents(w http.ResponseWriter, req *http.Request) {
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(http.StatusOK)
-	ch, unsub := u.hub.subscribe()
+	ch, unsub := u.hub.subscribe(u.snap == nil)
 	defer unsub()
 	fmt.Fprint(w, "retry: 1000\n\n")
+	if u.snap != nil {
+		// Сначала подписка, потом снимок: событие между ними придёт повторно, но не потеряется.
+		for kind, v := range u.snap() {
+			if b, err := json.Marshal(v); err == nil {
+				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", kind, b)
+			}
+		}
+	}
 	fl.Flush()
 	for {
 		select {
@@ -114,3 +124,7 @@ func callTimeout(d time.Duration, what string, f func() error) error {
 		return fmt.Errorf("%s: не завершилось за %d с, попробуйте ещё раз или посмотрите журнал", what, int(d.Seconds()))
 	}
 }
+
+// SetSnapshot задаёт источник ТЕКУЩЕГО состояния (вид → значение): при подключении страница получает его,
+// а не последнее опубликованное событие (которое могло устареть). Вызывать до Start.
+func (u *UI) SetSnapshot(f func() map[string]any) { u.snap = f }

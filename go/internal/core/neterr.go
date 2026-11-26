@@ -122,6 +122,9 @@ func (c *core) connectInfo() map[string]any {
 			}
 		}
 	}
+	if pending {
+		m["error"] = "" // идёт новая попытка: старая ошибка не показывается как текущая
+	}
 	m["pending"] = pending
 	return m
 }

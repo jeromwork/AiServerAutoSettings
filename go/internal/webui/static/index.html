@@ -345,11 +345,11 @@ document.getElementById("cform").onsubmit = function(e) {
 
 var PATHN = {"chan": "через sing-box (туннель)", "ssh-direct": "напрямую по SSH"};
 var STN = {trying: "пробую", ok: "успех", error: "ошибка", waiting: "ожидание"};
-var STAGE = {applying: "Применяю", restarting: "Перезапуск", checking: "Проверка связи", ok: "Готово", error: "Ошибка"};
+var STAGE = {applying: "Применяю", restarting: "Перезапуск", checking: "Проверка связи", ready: "Готово", ok: "Готово", error: "Ошибка"};
 
 function onApply(a) {
   var el = document.getElementById("apply-st");
-  el.className = a.stage === "error" ? "err" : (a.stage === "ok" ? "ok" : "");
+  el.className = a.stage === "error" ? "err" : ((a.stage === "ok" || a.stage === "ready") ? "ok" : "");
   el.textContent = (a.at || "") + " " + (STAGE[a.stage] || a.stage) + ": " + (a.text || "");
   if (a.stage === "error") {
     var m = document.getElementById("cmsg");

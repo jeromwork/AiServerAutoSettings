@@ -115,3 +115,30 @@ func TestCallTimeout(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+// Страница, подключившаяся позже, получает ТЕКУЩЕЕ состояние из снимка, а не устаревшее последнее событие.
+func TestEventsSnapshotIsCurrentNotLastPublished(t *testing.T) {
+	u, _ := start(t, &applyAct{})
+	u.Publish("apply", map[string]string{"stage": "checking"}) // устарело
+	u.SetSnapshot(func() map[string]any { return map[string]any{"apply": map[string]string{"stage": "ready"}} })
+	resp, err := http.Get("http://127.0.0.1:" + itoa(u.Port()) + "/api/events?t=" + u.Token())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	rd := bufio.NewReader(resp.Body)
+	var got strings.Builder
+	for i := 0; i < 5; i++ {
+		l, err := rd.ReadString('\n')
+		if err != nil {
+			break
+		}
+		got.WriteString(l)
+		if strings.Contains(l, "data:") {
+			break
+		}
+	}
+	if !strings.Contains(got.String(), `"stage":"ready"`) || strings.Contains(got.String(), "checking") {
+		t.Fatalf("получено: %q", got.String())
+	}
+}
