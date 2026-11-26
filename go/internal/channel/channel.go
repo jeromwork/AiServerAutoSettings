@@ -179,7 +179,7 @@ func (c *chn) set(state, path, reason string, up bool) {
 		}
 	}
 	c.mu.Unlock()
-	c.log.Info("state", "state", state, "path", path, "reason", reason, "session", st.Session)
+	c.log.Info("state", "state", state, "via", path, "reason", reason, "session", st.Session)
 }
 
 func (c *chn) Start(ctx context.Context) error {
@@ -225,6 +225,7 @@ func (c *chn) loop(ctx context.Context) {
 	defer close(c.done)
 	fails := 0
 	first := true
+	sw := &sweep{failed: map[string]string{}, mismatch: map[string]bool{}}
 	for ctx.Err() == nil {
 		c.set("connecting", "", "", false)
 		path, err := c.session(ctx, first)
@@ -236,10 +237,33 @@ func (c *chn) loop(ctx context.Context) {
 		if err != nil {
 			reason = err.Error()
 		}
-		if path != "" && errors.Is(err, errWasUp) {
+		wasUp := path != "" && errors.Is(err, errWasUp)
+		if wasUp {
 			fails = 0
+			sw.reset()
 		} else {
 			fails++
+		}
+		mism := !wasUp && isHostKeyMismatch(err)
+		if mism {
+			reason = reasonIntercepted
+		}
+		if !wasUp && path != "" {
+			sw.failed[path], sw.mismatch[path] = reason, mism
+		}
+		// Следующий путь по рангу, если ошибка случилась до связи и пути ещё есть.
+		if next, all := c.nextPath(ctx, sw); !wasUp && path != "" && next != "" {
+			c.set("down", path, reason, false)
+			c.log.Info("path-next", "from", path, "to", next)
+			if c.selectPath(next) == nil {
+				continue // без паузы: идём дальше по рангу
+			}
+		} else if !wasUp && mism && all {
+			// Отпечаток не совпал на ВСЕХ путях: подмена/устаревший конфиг, ожиданием не пройдёт.
+			reason = "host key mismatch: на всех путях отпечаток сервера не совпал с конфигом"
+		}
+		if !wasUp {
+			sw.reset() // круг по путям закончен — новый круг после паузы
 		}
 		c.set("down", path, reason, false)
 		pause := []time.Duration{1, 1, 2, 3, 5}[min(fails, 4)] * time.Second
@@ -250,6 +274,75 @@ func (c *chn) loop(ctx context.Context) {
 		case <-time.After(pause):
 		}
 	}
+}
+
+const reasonIntercepted = "отпечаток не совпал — путь перехвачен"
+
+// sweep — пройденные в этом круге пути: имя → причина отказа; mismatch — отказ из-за отпечатка.
+type sweep struct {
+	failed   map[string]string
+	mismatch map[string]bool
+}
+
+func (s *sweep) reset() {
+	clear(s.failed)
+	clear(s.mismatch)
+}
+
+func isHostKeyMismatch(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "host key mismatch")
+}
+
+// nextPath — первый ещё не пробованный путь селектора по рангу; all — все пути круга пробованы и все с чужим отпечатком.
+func (c *chn) nextPath(ctx context.Context, sw *sweep) (next string, all bool) {
+	if c.sb == nil || c.o.Mode.NoSingbox {
+		return "", len(sw.failed) > 0 && len(sw.mismatch) == len(sw.failed) && allTrue(sw.mismatch)
+	}
+	c.mu.Lock()
+	pinned := time.Now().Before(c.pinned)
+	c.mu.Unlock()
+	names := c.sb.PathNames()
+	if pinned || len(names) == 0 {
+		return "", false
+	}
+	for _, n := range names {
+		if _, tried := sw.failed[n]; !tried {
+			return n, false
+		}
+	}
+	return "", allTrue(sw.mismatch)
+}
+
+func allTrue(m map[string]bool) bool {
+	for _, v := range m {
+		if !v {
+			return false
+		}
+	}
+	return len(m) > 0
+}
+
+// selectPath переключает селектор chan на путь name (без закрепления).
+func (c *chn) selectPath(name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return c.sb.Clash(ctx, "PUT", "/proxies/chan", map[string]string{"name": name}, nil)
+}
+
+// pathLabel — имя пути для событий: у sing-box это текущий выбор селектора chan, иначе ssh-direct.
+func (c *chn) pathLabel(base string) string {
+	if base != "chan" || c.sb == nil {
+		return base
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var g struct {
+		Now string `json:"now"`
+	}
+	if err := c.sb.Clash(ctx, "GET", "/proxies/chan", nil, &g); err != nil || g.Now == "" {
+		return base
+	}
+	return g.Now
 }
 
 var errWasUp = errors.New("connection lost")
@@ -385,6 +478,8 @@ func (c *chn) session(ctx context.Context, first bool) (string, error) {
 	if path == "" {
 		return "", ctx.Err()
 	}
+	path = c.pathLabel(path)
+	c.set("connecting", path, "", false)
 	cl, ac, err := c.dial(ctx, addr)
 	if err != nil {
 		return path, err
@@ -464,7 +559,7 @@ func (c *chn) session(ctx context.Context, first bool) (string, error) {
 		return path, ctx.Err()
 	}
 	c.set("up", path, "", true)
-	c.log.Info("up", "rport", rport, "path", path)
+	c.log.Info("up", "rport", rport, "via", path)
 	waitSess := make(chan error, 1)
 	go func() { waitSess <- sess.Wait() }()
 	select { // block on events: connection lost, session end, forced switch, stop
@@ -536,6 +631,10 @@ func (c *chn) handshake(r *bufio.Reader, w io.Writer, n string, rport int) error
 // cleanStale kills leftover "ra-lab session" processes of this PC (a crashed previous run).
 // Best effort; the new session never matches because it starts afterwards.
 func (c *chn) cleanStale(cl *ssh.Client) {
+	// Только для имён v3 (-v3): pkill по имени без суффикса мог бы убить живую сессию Лаборатории v2 того же ПК.
+	if !strings.HasSuffix(c.o.PC, "-v3") {
+		return
+	}
 	s, err := cl.NewSession()
 	if err != nil {
 		return
@@ -630,7 +729,7 @@ func (c *chn) ForcePath(name string) error {
 	c.mu.Lock()
 	c.pinned = time.Now().Add(pinFor)
 	c.mu.Unlock()
-	c.log.Info("force", "path", name, "pin_s", int(pinFor.Seconds()))
+	c.log.Info("force", "via", name, "pin_s", int(pinFor.Seconds()))
 	select {
 	case c.kick <- struct{}{}:
 	default:

@@ -485,7 +485,7 @@ func (c *core) watchChannel(ctx context.Context, ch <-chan api.ChannelState, uns
 			if !ok {
 				return
 			}
-			c.log.Info("core: channel", "state", st.State, "path", st.Path, "reason", st.Reason, "session", st.Session)
+			c.log.Info("core: channel", "state", st.State, "via", st.Path, "reason", st.Reason, "session", st.Session)
 			if st.State == "down" && fatalChannelReason(st.Reason) {
 				c.failStart(errors.New(st.Reason))
 			}
