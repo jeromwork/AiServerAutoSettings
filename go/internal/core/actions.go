@@ -204,6 +204,7 @@ func (c *core) ConfigApply(ctx context.Context, data []byte, password string) er
 	}
 	c.log.Info("core: config-applied", "gen", gen)
 	c.publishApply("restarting", "Конфиг записан, перезапускаю программу и проверяю связь с сервером...")
+	c.publishTrial()
 	c.requestQuit(api.ExitRestart, nil)
 	return nil
 }
@@ -232,6 +233,12 @@ func (c *core) ConfigSetVPN(ctx context.Context, mode string) error {
 		return fail(err)
 	}
 	defer unlock()
+	if mode == "off" {
+		if _, err := config.CancelTrial(c.p, c.log); err != nil { // выключение в пробном окне = откат к прежнему
+			return fail(err)
+		}
+		c.publishTrial()
+	}
 	gen, err := config.SetVPNMode(c.p, mode, c.log)
 	if err != nil {
 		return fail(err)
@@ -259,12 +266,26 @@ func (c *core) ConfigSetVPNLock(ctx context.Context, on bool) error {
 		return fail(err)
 	}
 	defer unlock()
+	if !on {
+		// Снять галочку можно всегда, даже в пробном окне: откат к прежнему поколению; если в нём галочка уже выключена — больше ничего не нужно.
+		if cancelled, err := config.CancelTrial(c.p, c.log); err != nil {
+			return fail(err)
+		} else if cancelled {
+			c.publishTrial()
+			if cfg, _, lerr := config.Load(c.p, c.log); lerr == nil && !cfg.VPN.LockExit {
+				c.publishApply("rolledback", "Изменение отменено: "+config.ReasonUser)
+				c.requestQuit(api.ExitRestart, nil)
+				return nil
+			}
+		}
+	}
 	gen, err := config.SetVPNLock(c.p, on, c.log)
 	if err != nil {
 		return fail(err)
 	}
 	c.log.Info("core: config-vpn-lock-applied", "gen", gen, "lock", on)
 	c.publishApply("restarting", "Конфиг записан, перезапускаю программу и проверяю связь с сервером...")
+	c.publishTrial()
 	c.requestQuit(api.ExitRestart, nil)
 	return nil
 }

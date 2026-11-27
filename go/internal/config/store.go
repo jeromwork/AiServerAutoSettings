@@ -249,6 +249,7 @@ func applyOpened(p api.Paths, data []byte, c *api.Config, key []byte, ptr Pointe
 		return "", fmt.Errorf("config: build: %w", err)
 	}
 	now := time.Now()
+	clearTrialState(p)
 	sw := Switch{Op: "apply", From: ptr.Current, To: name, Started: now, Deadline: now.Add(api.ConfigSwitchSec * time.Second)}
 	if err := writeSwitch(p, sw); err != nil {
 		return "", err
@@ -389,6 +390,7 @@ func Commit(p api.Paths, gen string, sessionStarted time.Time) error {
 	if err := writeLine(p, "lastgood", gen); err != nil {
 		return err
 	}
+	clearTrialState(p)
 	return removeDurable(filepath.Join(p.Config, "switch.json"))
 }
 
@@ -443,8 +445,91 @@ func rollbackSwitch(p api.Paths, ptr Pointers, log api.Logger, why string) error
 	if err := removeDurable(filepath.Join(p.Config, "switch.json")); err != nil {
 		return err
 	}
-	log.Warn("config."+why, "from", ptr.Switch.To, "to", ptr.Switch.From)
+	reason := RecordRollback(p, ptr.Switch.From, ptr.Switch.To, why)
+	log.Warn("config."+why, "from", ptr.Switch.To, "to", ptr.Switch.From, "reason", reason)
 	return nil
+}
+
+const (
+	trialReasonFile = "trial-reason.json" // последняя причина неудачи в пробном окне (переживает перезапуск ядра)
+	rollbackFile    = "rollback.json"     // итог последнего отката: страница показывает причину после переподключения
+	// ReasonUser — причина отката по команде владельца.
+	ReasonUser = "отменено пользователем"
+)
+
+type trialReason struct {
+	Gen    string `json:"gen"`
+	Reason string `json:"reason"`
+}
+
+// Rollback — запись об откате пробного окна.
+type Rollback struct {
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Reason string `json:"reason"`
+	At     string `json:"rolledBackAt"`
+}
+
+// NoteTrialFailure — core запоминает причину неудачи, пока идёт пробное окно gen (событие, не опрос).
+func NoteTrialFailure(p api.Paths, gen, reason string) {
+	if gen == "" || reason == "" {
+		return
+	}
+	ptr, err := ReadPointers(p)
+	if err != nil || ptr.Switch == nil || ptr.Switch.To != gen {
+		return
+	}
+	b, _ := json.Marshal(trialReason{Gen: gen, Reason: reason})
+	_ = writeFile(filepath.Join(p.Config, trialReasonFile), append(b, '\n'), 0o600)
+}
+
+// RecordRollback пишет rollback.json; why: "expire" | "revert" (пользователь) и возвращает текст причины.
+func RecordRollback(p api.Paths, from, to, why string) string {
+	reason := ""
+	if why == "expire" {
+		if b, err := os.ReadFile(filepath.Join(p.Config, trialReasonFile)); err == nil {
+			var tr trialReason
+			if json.Unmarshal(b, &tr) == nil && tr.Gen == to {
+				reason = tr.Reason
+			}
+		}
+		if reason == "" {
+			reason = fmt.Sprintf("канал не поднялся за %d с", api.ConfigSwitchSec)
+		}
+	} else {
+		reason = ReasonUser
+	}
+	_ = removeDurable(filepath.Join(p.Config, trialReasonFile))
+	b, _ := json.Marshal(Rollback{From: from, To: to, Reason: reason, At: time.Now().UTC().Format(time.RFC3339Nano)})
+	_ = writeFile(filepath.Join(p.Config, rollbackFile), append(b, '\n'), 0o600)
+	return reason
+}
+
+// ReadRollback — последний откат, если после него не было успешного commit/нового apply.
+func ReadRollback(p api.Paths) (Rollback, bool) {
+	var r Rollback
+	b, err := os.ReadFile(filepath.Join(p.Config, rollbackFile))
+	if err != nil || json.Unmarshal(b, &r) != nil || r.Reason == "" {
+		return r, false
+	}
+	return r, true
+}
+
+func clearTrialState(p api.Paths) {
+	_ = removeDurable(filepath.Join(p.Config, trialReasonFile))
+	_ = removeDurable(filepath.Join(p.Config, rollbackFile))
+}
+
+// CancelTrial — немедленный откат пробного окна к From (кнопки «Снять галочку»/«Выключить VPN»); false — окна нет.
+func CancelTrial(p api.Paths, log api.Logger) (bool, error) {
+	if log == nil {
+		log = nopLog{}
+	}
+	ptr, err := ReadPointers(p)
+	if err != nil || ptr.Switch == nil {
+		return false, err
+	}
+	return true, rollbackSwitch(p, ptr, log, "revert")
 }
 
 // Expire (supervisor, at kernel start and on the switch deadline): deadline passed → current = From.

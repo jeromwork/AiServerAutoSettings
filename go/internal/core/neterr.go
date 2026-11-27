@@ -67,6 +67,7 @@ func (c *core) failStart(err error) {
 	c.errMu.Lock()
 	c.lastErr = text
 	c.errMu.Unlock()
+	c.noteTrialFailure(text)
 	c.publishApply("error", text)
 	c.publishStatus()
 	// Версия сама жива: сетевая ошибка конфига/порта лечится откатом конфига, а не слотом версии (сторож).

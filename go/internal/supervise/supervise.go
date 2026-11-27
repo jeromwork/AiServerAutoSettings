@@ -439,7 +439,8 @@ func checkSwitchExpire(p api.Paths, log api.Logger) (bool, error) {
 	if err = removeFile(path); err != nil {
 		return false, err
 	}
-	log.Warn("supervise: config switch expired")
+	reason := config.RecordRollback(p, sw.From, sw.To, "expire")
+	log.Warn("config.expire", "from", sw.To, "to", sw.From, "reason", reason)
 	return true, nil
 }
 

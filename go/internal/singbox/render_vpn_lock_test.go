@@ -106,3 +106,52 @@ func TestRenderVPNAutoRedirectLinuxOnly(t *testing.T) {
 		}
 	}
 }
+
+func procRuleIdx(rules []map[string]any, name, outbound string) int {
+	for i, r := range rules {
+		l, _ := r["process_name"].([]any)
+		for _, x := range l {
+			if x == name && r["outbound"] == outbound {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// Имена, под которыми запускаются ядра (все ОС), обязаны быть в правиле process_name: иначе переименование бинаря снова зациклит канал через VPN.
+func TestRenderVPNOwnProcsListed(t *testing.T) {
+	v, _ := renderVPNOut(t, vpnRC(true, false, ""))
+	for _, n := range []string{coreNameWin, coreNameNix, vpnNameWin, vpnNameNix, binaryName(), vpnBinaryName()} {
+		if procRuleIdx(v.Route.Rules, n, "vpn-direct") < 0 {
+			t.Fatalf("%s нет в process_name direct", n)
+		}
+	}
+}
+
+// Галочка: ra-core.exe -> direct раньше любого правила в vpn-out/reject.
+func TestRenderVPNLockCoreDirectFirst(t *testing.T) {
+	for _, block := range []bool{false, true} {
+		v, raw := renderVPNOut(t, vpnRC(true, block, ""))
+		i := procRuleIdx(v.Route.Rules, "ra-core.exe", "vpn-direct")
+		if i != 0 {
+			t.Fatalf("block=%v: ra-core.exe direct на позиции %d: %s", block, i, raw)
+		}
+		for j, r := range v.Route.Rules {
+			if (r["outbound"] == "vpn-out" || r["action"] == "reject") && j < i {
+				t.Fatalf("правило %d раньше direct", j)
+			}
+		}
+	}
+}
+
+// Блок-режим: свой процесс программы -> vpn-out, затем финальный reject; ra-core остаётся direct.
+func TestRenderVPNLockBlockSelfThenReject(t *testing.T) {
+	v, raw := renderVPNOut(t, vpnRC(true, true, ""))
+	self := selfProcName()
+	si := procRuleIdx(v.Route.Rules, self, "vpn-out")
+	last := v.Route.Rules[len(v.Route.Rules)-1]
+	if si < 0 || last["action"] != "reject" || procRuleIdx(v.Route.Rules, "ra-core.exe", "vpn-direct") < 0 {
+		t.Fatalf("блок: %s", raw)
+	}
+}

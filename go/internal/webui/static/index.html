@@ -411,9 +411,29 @@ var PATHN = {"chan": "через sing-box (туннель)", "ssh-direct": "на
 var STN = {trying: "пробую", ok: "успех", error: "ошибка", waiting: "ожидание"};
 var STAGE = {applying: "Применяю", restarting: "Перезапуск", checking: "Проверка связи", ready: "Готово", ok: "Готово", error: "Ошибка"};
 
+var TRIAL = {active: false};
+
+// Пробное окно нового конфига: галочку и «Применить» блокируем; «Снять галочку» и «Выключить VPN» всегда доступны.
+function onTrial(t) {
+  TRIAL = t || {active: false};
+  document.getElementById("vpn-lock").disabled = !!TRIAL.active;
+  document.getElementById("btn-cfg-apply").disabled = !!TRIAL.active;
+  var bl = document.getElementById("vpn-block");
+  if (TRIAL.active) {
+    bl.style.display = "";
+    document.getElementById("vpn-block-t").textContent = "Пробное окно до " + (TRIAL.clock || "") + " \u2014 проверяю\u2026";
+    document.getElementById("vpn-unlock").style.display = "";
+  } else if (!(S && S.vpn && S.vpn.state === "blocked")) bl.style.display = "none";
+}
+
 function onApply(a) {
   var el = document.getElementById("apply-st");
-  el.className = a.stage === "error" ? "err" : ((a.stage === "ok" || a.stage === "ready") ? "ok" : "");
+  el.className = (a.stage === "error" || a.stage === "rolledback") ? "err" : ((a.stage === "ok" || a.stage === "ready") ? "ok" : "");
+  if (a.stage === "rolledback") {
+    el.textContent = (a.at || "") + " " + (a.text || "");
+    if (S && S.vpn) onVPN(S.vpn);
+    return;
+  }
   el.textContent = (a.at || "") + " " + (STAGE[a.stage] || a.stage) + ": " + (a.text || "");
   if (a.stage === "error") {
     var m = document.getElementById("cmsg");
@@ -441,6 +461,10 @@ function onVPN(v) {
     document.getElementById("vpn-block-t").textContent = v.reason || "Интернет перекрыт";
     document.getElementById("vpn-unlock").style.display = v.lock ? "" : "none";
     h = h.replace(/ <span class=err>.*?<\/span>/, "");
+  } else if (TRIAL.active) {
+    bl.style.display = "";
+    document.getElementById("vpn-block-t").textContent = "Пробное окно до " + (TRIAL.clock || "") + " \u2014 проверяю\u2026";
+    document.getElementById("vpn-unlock").style.display = "";
   } else bl.style.display = "none";
   document.getElementById("vpn-st").innerHTML = h;
   var e = v.exit, ex = document.getElementById("vpn-exit");
@@ -619,6 +643,7 @@ function listen(kind, fn) {
 // События приходят сами (SSE); EventSource переподключается после перезапуска программы.
 var es = new EventSource("/api/events?t=" + encodeURIComponent(T));
 listen("status", show);
+listen("trial", onTrial);
 listen("apply", onApply);
 listen("pause", onPause);
 listen("update", onUpdate);
@@ -631,7 +656,7 @@ listen("attempts", onAttempts);
 es.onopen = function() { if (lost) { lost = false; document.getElementById("umsg").textContent = ""; } };
 es.onerror = function() {
   document.getElementById("umsg").className = "err";
-  document.getElementById("umsg").textContent = "Связь с программой потеряна, переподключаюсь...";
+  document.getElementById("umsg").textContent = TRIAL.active ? "Перезапуск ядра\u2026" : "Связь с программой потеряна, переподключаюсь...";
   lost = true;
 };
 poll();

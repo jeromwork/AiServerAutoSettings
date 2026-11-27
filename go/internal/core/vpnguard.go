@@ -52,6 +52,16 @@ func (g *tunGuard) status() map[string]any {
 
 func (g *tunGuard) event(name string, kv ...any) {
 	g.c.log.Info(name, kv...)
+	switch name {
+	case "vpn.fail", "vpn.failopen", "vpn.off", "vpn.blocked":
+		for i := 0; i+1 < len(kv); i += 2 {
+			if k, _ := kv[i].(string); k == "why" {
+				if w, ok := kv[i+1].(string); ok {
+					g.c.noteTrialFailure(w)
+				}
+			}
+		}
+	}
 	st := g.statusLocked()
 	g.snap.Store(st)
 	g.c.publish("vpn", st)

@@ -70,7 +70,7 @@ func (c *core) explainApplyErr(err error) string {
 		if ptr, e := config.ReadPointers(c.p); e == nil && ptr.Switch != nil {
 			left = fmt.Sprintf(" (осталось около %d с)", max(int(time.Until(ptr.Switch.Deadline).Seconds()), 0))
 		}
-		return "Предыдущий конфиг ещё проверяется" + left + ": дождитесь результата или нажмите «Вернуть прежний»."
+		return "Идёт пробное окно" + left + ": дождитесь подтверждения или отката (снять галочку и выключить VPN можно в любой момент)."
 	case errors.Is(err, api.ErrBusy):
 		return "Программа занята другой операцией (обновление или применение). Повторите через несколько секунд."
 	}
@@ -103,6 +103,31 @@ func (c *core) publish(kind string, data any) {
 
 // publishStatus — сводка для страницы: то же, что /state, но с очищенными причинами.
 func (c *core) publishStatus() { c.publish("status", c.Status()) }
+
+// trialState — пробное окно нового конфига: идёт ли и до какого времени (из switch.json, живые данные).
+func (c *core) trialState() map[string]any {
+	if ptr, err := config.ReadPointers(c.p); err == nil && ptr.Switch != nil {
+		return map[string]any{"active": true, "deadline": ptr.Switch.Deadline.Format(time.RFC3339), "clock": ptr.Switch.Deadline.Format("15:04:05")}
+	}
+	return map[string]any{"active": false}
+}
+
+func (c *core) publishTrial() { c.publish("trial", c.trialState()) }
+
+// noteTrialFailure — запомнить причину неудачи для страницы и отката (переживает перезапуск ядра).
+func (c *core) noteTrialFailure(reason string) {
+	config.NoteTrialFailure(c.p, c.gen, sanitize(reason))
+}
+
+// publishReady — «конфиг принят»; если только что был откат, остаётся его причина, а не «принят».
+func (c *core) publishReady(text string) {
+	if rb, ok := config.ReadRollback(c.p); ok {
+		c.publishApply("rolledback", "Изменение отменено: "+sanitize(rb.Reason))
+	} else {
+		c.publishApply("ready", text)
+	}
+	c.publishTrial()
+}
 
 func (c *core) publishApply(stage, text string) {
 	m := map[string]any{"stage": stage, "text": text, "at": time.Now().Format("15:04:05")}
@@ -175,7 +200,7 @@ func (c *core) confirmUpdate() {
 // snapshot — ТЕКУЩЕЕ состояние каждого вида из живых данных (а не последнее опубликованное): его получает
 // страница при подключении к /api/events.
 func (c *core) snapshot() map[string]any {
-	out := map[string]any{"status": c.Status()}
+	out := map[string]any{"status": c.Status(), "trial": c.trialState()}
 	c.ev.mu.Lock()
 	if c.ev.apply != nil {
 		out["apply"] = c.ev.apply
@@ -319,6 +344,13 @@ func (c *core) publishStartInfo() {
 	c.errMu.Lock()
 	le := c.lastErr
 	c.errMu.Unlock()
+	c.publishTrial()
+	if ptr, err := config.ReadPointers(c.p); err == nil && ptr.Switch == nil {
+		if rb, ok := config.ReadRollback(c.p); ok {
+			c.publishApply("rolledback", "Изменение отменено: "+sanitize(rb.Reason))
+			return
+		}
+	}
 	if ptr, err := config.ReadPointers(c.p); err == nil && ptr.Switch != nil && ptr.Switch.To == c.gen && c.gen != "" {
 		left := max(int(time.Until(ptr.Switch.Deadline).Seconds()), 0)
 		c.publishApply("checking", fmt.Sprintf("Проверяю связь с сервером по новому конфигу (до %d с, потом откат).", left))
