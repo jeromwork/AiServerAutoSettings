@@ -360,6 +360,11 @@ func (c *core) startNetwork(ctx context.Context) {
 		sb, e := singbox.New(c.cfg, c.p, log, c.clean, c.pr, singbox.Options{
 			Mode: f.Mode, Instance: c.clean.Instance(),
 			OnTunCrash: func(e api.Effective) { c.tun.onTunCrash(ctx, e) },
+			OnEvent: func(kind string) {
+				if ch, ok := c.getCh().(interface{ SingboxEvent(string) }); ok {
+					ch.SingboxEvent(kind)
+				}
+			},
 			LANSocks: func() string {
 				if fw := c.getFw(); fw != nil {
 					return fw.InternalSocks()

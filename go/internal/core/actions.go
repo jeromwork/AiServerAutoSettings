@@ -63,6 +63,7 @@ func (c *core) Status() map[string]any {
 		}
 		m["singbox"] = st
 	}
+	m["counters"] = c.counters()
 	if c.tun != nil {
 		m["vpn"] = c.tun.status()
 	}
@@ -348,4 +349,19 @@ func (c *core) cfgName() string {
 		return c.cfg.Name
 	}
 	return ""
+}
+
+// counters — счётчики для /state: число ssh-сессий канала (норма 1, при переключении <= 2) и процессов sing-box (по 1).
+func (c *core) counters() map[string]int {
+	m := map[string]int{}
+	if ch, ok := c.getCh().(interface{ Sessions() int }); ok {
+		m["chanSessions"] = ch.Sessions()
+	}
+	if sb, ok := c.getSb().(interface{ Procs() int }); ok {
+		m["singboxProcs"] = sb.Procs()
+	}
+	if sb, ok := c.getVpnSb().(interface{ Procs() int }); ok {
+		m["vpnProcs"] = sb.Procs()
+	}
+	return m
 }

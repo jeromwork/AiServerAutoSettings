@@ -83,6 +83,8 @@ type chn struct {
 	rcur     int
 	handover chan struct{} // запрос «поднять новую сессию, затем закрыть старую»
 	ulEvent  chan struct{} // событие «сеть под каналом изменилась» для проверки
+	sbEvent  chan struct{} // ошибка соединения в журнале sing-box: одиночная проверка сессии
+	reg      registry      // живые ssh-соединения (счётчик, уборка)
 
 	sessCancel context.CancelFunc // отмена текущей попытки/сессии (смена сети)
 	underlayAt time.Time          // последняя смена сети под живой сессией (для этапа B)
@@ -123,7 +125,7 @@ func New(cfg *api.Config, sb api.Singbox, agent api.AgentHost, log api.Logger, t
 	}
 	c := &chn{cfg: cfg, sb: sb, agent: agent, log: log.With("channel"), tr: tr, o: o, sv: sv, signr: signer, hkey: hk,
 		subs: map[int]chan api.ChannelState{}, kick: make(chan struct{}, 1), retPref: make(chan struct{}, 1),
-		handover: make(chan struct{}, 1), ulEvent: make(chan struct{}, 1)}
+		handover: make(chan struct{}, 1), ulEvent: make(chan struct{}, 1), sbEvent: make(chan struct{}, 1)}
 	c.st = api.ChannelState{State: "waiting", Since: time.Now()}
 	c.log.Secret(agent.Token())
 	return c, nil
@@ -150,7 +152,7 @@ func (c *chn) Name() string { return "channel" }
 
 func (c *chn) Status() map[string]any {
 	s := c.State()
-	return map[string]any{"state": s.State, "path": s.Path, "reason": s.Reason, "since": s.Since, "session": s.Session}
+	return map[string]any{"state": s.State, "path": s.Path, "reason": s.Reason, "since": s.Since, "session": s.Session, "sessions": c.Sessions()}
 }
 
 func (c *chn) State() api.ChannelState {
@@ -226,6 +228,7 @@ func (c *chn) Start(ctx context.Context) error {
 	c.mu.Unlock()
 	go c.loop(rc)
 	go c.verifier(rc)
+	go c.sbWatcher(rc.Done(), func() bool { return c.sessionAlive(rc) })
 	return nil
 }
 
@@ -705,9 +708,19 @@ type conn struct {
 	dead     chan struct{}
 	waitSess chan error
 	closers  []func()
+	born     time.Time
+	owner    *chn
+	once     sync.Once
 }
 
 func (k *conn) close() {
+	k.once.Do(k.closeOnce)
+}
+
+func (k *conn) closeOnce() {
+	if k.owner != nil {
+		defer k.owner.unregister(k)
+	}
 	k.stop()
 	for i := len(k.closers) - 1; i >= 0; i-- {
 		k.closers[i]()
@@ -725,6 +738,7 @@ func (c *chn) connect(ctx context.Context, path, addr string) (*conn, error) {
 	}
 	sctx, stop := context.WithCancel(ctx)
 	k := &conn{cl: cl, stop: stop, connLost: make(chan struct{}), dead: make(chan struct{})}
+	c.register(k)
 	fail := func(err error) (*conn, error) { k.close(); return nil, err }
 	go c.keepalive(sctx, cl, ac, k.dead)
 	go func() { _ = cl.Wait(); close(k.connLost) }()
