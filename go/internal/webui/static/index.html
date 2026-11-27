@@ -84,6 +84,7 @@ pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; word-break: brea
   <label><input type="radio" name="vpnmode" value="only"> Только наш</label>
   <div id="vpn-st"></div>
   <div id="vpn-exit"></div> <button id="vpn-check" type="button">Проверить</button>
+  <div id="sysproxy" style="display:none"></div>
   <div id="vpn-msg"></div>
 </div>
 
@@ -172,6 +173,7 @@ function show(s) {
   if (pcl) pcl.textContent = s.pc ? (s.name || "Компьютер") + " (" + s.pc + " на сервере)" : "";
 
   if (s.vpn) onVPN(s.vpn);
+  onSysProxy(s.sysproxy);
   if (s.channelConfigured === false) document.getElementById("net-st").innerHTML = "Канал: <b>не настроен</b> (конфиг только для VPN)";
 
   var noCfg = s.config === false;
@@ -436,6 +438,25 @@ function onVPN(v) {
   else { ex.className = "err"; ex.textContent = "Выход: " + e.ip + via + " \u2014 не наш адрес"; }
 }
 
+// Системный прокси ПК (например Clash без TUN): браузеры идут через него мимо нашего VPN. Перекрыть нельзя — только предупреждение.
+function onSysProxy(p) {
+  var el = document.getElementById("sysproxy");
+  if (!p || !p.enabled) { el.style.display = "none"; el.textContent = ""; return; }
+  var t = "Системный прокси: " + (p.server ? p.server : "") + (p.pac ? (p.server ? ", " : "") + "PAC " + p.pac : "");
+  var bad = false;
+  if (p.server) {
+    if (p.error) { t += " \u2014 выход через него определить не удалось (" + p.error + ")"; bad = true; }
+    else if (p.ip) {
+      t += " \u2014 браузеры выходят через него, выход: " + p.ip;
+      if (p.known && !p.ok) { t += " \u2014 не наш адрес"; bad = true; }
+      else if (p.known) t += " \u2713";
+    }
+  } else t += " \u2014 адрес выхода по PAC не проверяется";
+  el.className = bad ? "err" : "";
+  el.textContent = t;
+  el.style.display = "";
+}
+
 document.getElementById("vpn-check").onclick = function() {
   var b = this, m = document.getElementById("vpn-msg");
   b.disabled = true;
@@ -558,6 +579,7 @@ listen("pause", onPause);
 listen("update", onUpdate);
 listen("channel", onChannel);
 listen("vpn", onVPN);
+listen("sysproxy", onSysProxy);
 listen("singbox", onSingbox);
 listen("paths", onPaths);
 listen("attempts", onAttempts);

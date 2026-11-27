@@ -81,7 +81,8 @@ func (p *fvPlat) Interfaces() ([]api.Iface, error) {
 	}
 	return ifs, nil
 }
-func (p *fvPlat) ForeignVPN() string { return p.fv }
+func (p *fvPlat) SystemProxy() api.SysProxy { return api.SysProxy{} }
+func (p *fvPlat) ForeignVPN() string        { return p.fv }
 func (p *fvPlat) ExitIface(string) string {
 	if p.exit != "" {
 		return p.exit

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 
@@ -68,11 +69,16 @@ func parseExitIP(body string) string {
 
 // fetchExitIP — внешний адрес без системного прокси; первый успешный из exitURLs. remote — адрес сервера проверки (для определения интерфейса выхода).
 func fetchExitIP(ctx context.Context) (ip, remote string, err error) {
+	return fetchExitIPVia(ctx, nil)
+}
+
+// fetchExitIPVia — то же через прокси proxy (nil — без прокси). remote — адрес, к которому подключился клиент (при прокси это сам прокси).
+func fetchExitIPVia(ctx context.Context, proxy *url.URL) (ip, remote string, err error) {
 	var last error = errors.New("нет адресов проверки")
 	for _, u := range exitURLs {
 		var rem string
 		d := &net.Dialer{Timeout: 5 * time.Second}
-		tr := &http.Transport{Proxy: nil, DisableKeepAlives: true,
+		tr := &http.Transport{Proxy: proxyFn(proxy), DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, n, a string) (net.Conn, error) {
 				cn, err := d.DialContext(ctx, n, a)
 				if err == nil {
@@ -98,6 +104,13 @@ func fetchExitIP(ctx context.Context) (ip, remote string, err error) {
 		last = e
 	}
 	return "", "", last
+}
+
+func proxyFn(u *url.URL) func(*http.Request) (*url.URL, error) {
+	if u == nil {
+		return nil
+	}
+	return http.ProxyURL(u)
 }
 
 // checkExit — одна проверка выхода (по событию). Если уже идёт — не запускает вторую. Результат кладётся в снимок статуса VPN.
@@ -135,5 +148,6 @@ func (c *core) CheckExit(ctx context.Context) (map[string]any, error) {
 		return nil, api.ErrNotSupported
 	}
 	c.tun.checkExit(ctx, "button")
+	c.checkSysProxy(ctx, "button")
 	return c.tun.status(), nil
 }

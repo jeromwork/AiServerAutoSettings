@@ -67,6 +67,9 @@ func (c *core) Status() map[string]any {
 	if c.tun != nil {
 		m["vpn"] = c.tun.status()
 	}
+	if sp := c.sysProxyStatus(); sp != nil {
+		m["sysproxy"] = sp
+	}
 	if fw := c.getFw(); !isNil(fw) {
 		m["forwards"] = fw.List()
 	}
