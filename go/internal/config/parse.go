@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"net/netip"
 	"regexp"
 	"sort"
 	"strings"
@@ -181,6 +182,19 @@ func (c *checker) validate(root obj) {
 			}
 			if b, has := vpn["bridges"]; has {
 				c.names(b, "vpn.bridges")
+			}
+			if e, has := vpn["exitIPs"]; has {
+				arr, ok := e.([]any)
+				if !ok {
+					c.schema("vpn.exitIPs", "must be an array")
+				}
+				for _, x := range arr {
+					s, _ := x.(string)
+					if _, err := netip.ParseAddr(s); err != nil {
+						c.schema("vpn.exitIPs", "items must be IP addresses")
+						break
+					}
+				}
 			}
 			if nd, has := vpn["nodes"]; has {
 				if nm, ok := c.object(nd, "vpn.nodes"); ok {
@@ -611,7 +625,7 @@ func normalize(root obj, data []byte) *api.Config {
 		}
 	}
 	vpn, _ := root["vpn"].(obj)
-	c.VPN = api.VPNCfg{Mode: "off", Bridges: strList(vpn["bridges"]), Direct: api.VPNDirect{Domains: ruDomains}}
+	c.VPN = api.VPNCfg{Mode: "off", Bridges: strList(vpn["bridges"]), ExitIPs: strList(vpn["exitIPs"]), Direct: api.VPNDirect{Domains: ruDomains}}
 	if len(c.Servers) == 0 {
 		c.VPN.Mode = "auto" // «только VPN»: без режима в конфиге VPN включён сам
 	}

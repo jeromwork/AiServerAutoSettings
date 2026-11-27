@@ -28,6 +28,8 @@ type tunGuard struct {
 	lastForeign string // последний чужой VPN, о котором писали в журнал
 	lanOff      bool   // ЛВС выключена после падения до смены сети
 	retry       *time.Timer
+	exitBusy    atomic.Bool  // проверка выхода уже идёт
+	exit        atomic.Value // exitResult, последний итог проверки выхода
 	inst        string       // тесты: экземпляр вместо c.clean.Instance()
 	snap        atomic.Value // map[string]any, последний снимок для Status
 }
@@ -50,8 +52,12 @@ func (g *tunGuard) event(name string, kv ...any) {
 
 // statusLocked — status без повторного захвата mu (вызывается под mu).
 func (g *tunGuard) statusLocked() map[string]any {
-	return map[string]any{"mode": g.mode, "state": g.vpnState, "reason": g.vpnWhy, "fails": g.fails,
+	st := map[string]any{"mode": g.mode, "state": g.vpnState, "reason": g.vpnWhy, "fails": g.fails,
 		"lan": map[string]any{"state": g.lanState, "reason": g.lanWhy}}
+	if r, ok := g.exit.Load().(exitResult); ok {
+		st["exit"] = r
+	}
+	return st
 }
 
 func (g *tunGuard) adapter(part string) string {
@@ -144,7 +150,9 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 		return
 	}
 	if wantVPN && got.VPN {
-		go g.probe(ctx)
+		go g.probe(ctx) // после успешной пробы — проверка выхода
+	} else if reason == "net-changed" || reason == "foreign-changed" || reason == "vpn-cmd" {
+		go g.checkExit(ctx, reason)
 	}
 }
 
@@ -247,6 +255,7 @@ func (g *tunGuard) probe(ctx context.Context) {
 	if ok {
 		g.fails = 0
 		g.event("vpn.probe-ok")
+		go g.checkExit(ctx, "up")
 		return
 	}
 	why := "проверка туннеля не прошла"
