@@ -89,6 +89,7 @@ type core struct {
 
 	compMu  sync.RWMutex // ch/sb/fw/ag пишет startNetwork (в своей горутине), читают страница и агент
 	ev      events
+	tun     *tunGuard
 	netDone chan struct{}
 
 	onStop   []func()
@@ -332,6 +333,10 @@ func (c *core) updateChannel() string {
 func (c *core) startNetwork(ctx context.Context) {
 	f, log := c.f, c.log
 	var err error
+	c.tun = &tunGuard{c: c, mode: "off", vpnState: "off", lanState: "off"}
+	if c.cfg != nil {
+		c.tun.mode = c.cfg.VPN.Mode
+	}
 
 	// 5. sing-box (не при --no-singbox и не при --no-channel).
 	if !f.Mode.NoSingbox && !f.Mode.NoChannel {
@@ -415,7 +420,7 @@ func (c *core) startNetwork(ctx context.Context) {
 			}
 		}
 	}
-	// VPN/LAN-сторожа (vpnguard/languard) — N1b/N2; при Mode.AllowsTun() они будут подключены здесь.
+	c.startTunGuard(ctx)
 }
 
 func (c *core) getCh() api.Channel {

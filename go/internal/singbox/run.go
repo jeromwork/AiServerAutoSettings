@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -22,7 +23,8 @@ type Options struct {
 	Instance, LockJSON string
 	LANSocks           func() string
 	RawConfig          string
-	DefaultIface       func() string // физический внешний интерфейс сейчас ("" — не определён)
+	OnTunCrash         func(api.Effective) // sing-box с TUN упал (откат без TUN уже запущен)
+	DefaultIface       func() string       // физический внешний интерфейс сейчас ("" — не определён)
 }
 
 type box struct {
@@ -180,6 +182,7 @@ func (s *box) render(e api.Effective) ([]byte, error) {
 	}
 	rc := s.rc
 	rc.Effective = e
+	rc.GeoIPPath = filepath.Join(s.p.State, "geoip-ru.srs")
 	if s.o.LANSocks != nil {
 		rc.LANSocks = s.o.LANSocks()
 	}
@@ -279,7 +282,36 @@ func (s *box) apply(ctx context.Context, e api.Effective) error {
 	}
 	return nil
 }
+
+// adapters — имена TUN-адаптеров, которые поднимет запуск с желаемым состоянием e.
+func (s *box) adapters(e api.Effective) (names []string) {
+	if !s.o.Mode.AllowsTun() {
+		return nil
+	}
+	if e.VPN {
+		names = append(names, AdapterName(s.o.Instance, "vpn"))
+	}
+	if e.LAN {
+		names = append(names, AdapterName(s.o.Instance, "lan"))
+	}
+	return names
+}
+
+// traceAdapters записывает намерение ДО запуска sing-box с TUN: упавшее/убитое ядро не оставит адаптер без следа,
+// уборка (cleanup startup/exit) снимет его по записи.
+func (s *box) traceAdapters(e api.Effective) error {
+	for _, n := range s.adapters(e) {
+		if err := s.tr.Intent(api.Trace{Kind: "adapter", ID: n, Owner: s.Name(), Data: map[string]string{"name": n}}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *box) launch(ctx context.Context, e api.Effective) error {
+	if err := s.traceAdapters(e); err != nil {
+		return fmt.Errorf("singbox: trace: %w", err)
+	}
 	life, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s.control.Lock()
 	if ctx.Err() != nil {
@@ -305,6 +337,9 @@ func (s *box) launch(ctx context.Context, e api.Effective) error {
 		if err = s.Clash(ctx, "GET", "/version", nil, nil); err == nil {
 			s.running = true
 			s.rc.Effective = e
+			for _, n := range s.adapters(e) {
+				_ = s.tr.Applied("adapter", n, map[string]string{"name": n}, nil)
+			}
 			s.view(func() { s.vRunning, s.vEff = true, e })
 			select {
 			case <-s.ready:
@@ -367,6 +402,9 @@ func (s *box) watch(ctx context.Context, p api.Process, e api.Effective) {
 	s.mu.Unlock()
 	s.log.Error("singbox.exited", "code", p.ExitCode(), "crashes", s.crashes)
 	if e.VPN || e.LAN {
+		if s.o.OnTunCrash != nil {
+			go s.o.OnTunCrash(e)
+		}
 		e = api.Effective{} // без TUN: прежний откат
 	}
 	s.recover(ctx, e)

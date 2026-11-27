@@ -30,6 +30,8 @@ type Part struct {
 	Rules        []map[string]any // вставляются ПОСЛЕ правил канала (порядок — блок C, C3)
 	RuleSets     []map[string]any
 	RouteExclude []string
+	Final        string // route.final ("" — не задавать); VPN: vpn-out
+	FindProcess  bool   // route.find_process (правила process_name)
 }
 
 type Singbox interface {

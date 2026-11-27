@@ -105,13 +105,19 @@ func Render(rc api.RenderContext) ([]byte, error) {
 			on bool
 			f  func(api.RenderContext) (api.Part, error)
 		}
-		for _, pt := range []part{{rc.Effective.VPN, renderVPN}, {rc.Effective.LAN, renderLAN}} {
+		for _, pt := range []part{{rc.Effective.LAN, renderLAN}, {rc.Effective.VPN, renderVPN}} {
 			if !pt.on {
 				continue
 			}
 			x, err := pt.f(rc)
 			if err != nil {
 				return nil, err
+			}
+			if x.Final != "" {
+				route["final"] = x.Final
+			}
+			if x.FindProcess {
+				route["find_process"] = true
 			}
 			ins, outs, rules, ruleSets = append(ins, x.Inbounds...), append(outs, x.Outbounds...), append(rules, x.Rules...), append(ruleSets, x.RuleSets...)
 		}

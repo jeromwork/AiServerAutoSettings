@@ -60,6 +60,9 @@ func (c *core) Status() map[string]any {
 		}
 		m["singbox"] = st
 	}
+	if c.tun != nil {
+		m["vpn"] = c.tun.status()
+	}
 	if fw := c.getFw(); !isNil(fw) {
 		m["forwards"] = fw.List()
 	}
@@ -223,12 +226,16 @@ func (c *core) SwitchPath(name string) error {
 	return sb.Clash(ctx, "PUT", "/proxies/chan", map[string]string{"name": name}, nil)
 }
 
-// VPN: до N1b (vpnguard) — ErrNotSupported; в --safe — ErrSafe.
+// VPN: сменить режим на время работы (в конфиг не пишется); в --safe — ErrSafe.
 func (c *core) VPN(mode string) error {
 	if c.f.Mode.Safe {
 		return api.ErrSafe
 	}
-	return api.ErrNotSupported
+	if c.tun == nil || c.cfg == nil || isNil(c.getSb()) {
+		return api.ErrNotSupported
+	}
+	c.tun.setMode(context.Background(), mode)
+	return nil
 }
 
 func (c *core) HappierURL() (string, error) {
