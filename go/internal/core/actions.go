@@ -15,6 +15,7 @@ import (
 	"remoteagents/internal/api"
 	"remoteagents/internal/config"
 	"remoteagents/internal/supervise"
+	"remoteagents/internal/update"
 )
 
 var _ api.Actions = (*core)(nil)
@@ -105,11 +106,19 @@ func (c *core) updateNow(ctx context.Context, manual bool) (err error) {
 	}
 	defer unlock()
 	defer func() {
+		if errors.Is(err, update.ErrConfigRejected) {
+			c.log.Warn("core: update-config-rejected", "err", err.Error())
+			c.publishUpdate("warn", "Новая версия не подходит к вашему конфигу, остаёмся на текущей.")
+			err = nil
+			return
+		}
 		if err != nil && !errors.Is(err, api.ErrBusy) {
 			c.publishUpdate("error", "Обновление не выполнено: "+sanitize(err.Error()))
 		}
 	}()
-	if manual {
+	if manual && c.isDevBuild() {
+		c.publishUpdate("checking", "Внимание: это dev-сборка ("+c.f.Version+"), обновляю по вашей команде. Проверяю наличие новой версии...")
+	} else if manual {
 		c.publishUpdate("checking", "Проверяю наличие новой версии и подпись выпуска...")
 	}
 	r, err := c.UpdateCheck(ctx)

@@ -677,10 +677,20 @@ func (c *core) autoUpdate(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	if c.isDevBuild() {
+		c.log.Info("core: auto-update-skip-dev", "version", c.f.Version)
+		return // dev/dirty/build 0: только вручную
+	}
 	if err := c.updateNow(ctx, false); err != nil && err != api.ErrBusy {
 		c.log.Warn("core: auto-update", "err", err.Error())
 	}
 	time.AfterFunc(updateEvery, func() { c.autoUpdate(ctx) })
+}
+
+// isDevBuild: сборка без номера выпуска (build 0) или с git-суффиксом/dirty — автообновление отключено.
+func (c *core) isDevBuild() bool {
+	v := c.f.Version
+	return c.build() == 0 || strings.Contains(v, "dirty") || strings.Contains(v, "-g")
 }
 
 // build — номер сборки из версии "3.0.<build>"; "dev" и прочее → 0 (любой выпуск новее).

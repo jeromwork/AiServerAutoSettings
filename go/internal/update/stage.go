@@ -105,7 +105,7 @@ func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 	ccmd.WaitDelay = time.Second
 	if err := ccmd.Run(); err != nil {
 		_ = os.Remove(candidate)
-		return fail("config", "candidate rejected current config: "+err.Error())
+		return fmt.Errorf("update: config: candidate rejected current config: %w (%w)", ErrConfigRejected, err)
 	}
 
 	if slotExists {
