@@ -30,9 +30,7 @@ open(H + '/.ssh/authorized_keys', 'a').write(open(d + '/k.pub').read())
 # 2. узел входа sparfum: client.json лежит только на sparfum, берём через ПК (ra-lab)
 entries, secrets = [], {}
 if '--no-fetch' not in sys.argv:
-    sh('ra-lab', 'exec', 'ssh -n -o BatchMode=yes -o ConnectTimeout=8 sparfum "cat /opt/rd-entry/client.json" > "%TEMP%\\sp-client.json"', '--shell', 'cmd', '--max-time', '20', t=30)
-    sh('ra-lab', 'read', r'C:\Users\user\AppData\Local\Temp\sp-client.json', d + '/sp.json', t=25)
-    sh('ra-lab', 'exec', 'del "%TEMP%\\sp-client.json"', '--shell', 'cmd', '--max-time', '8', t=15)
+    open(d + '/sp.json', 'w').write(sh('ra-lab', 'exec', 'ssh -n -o BatchMode=yes -o ConnectTimeout=8 sparfum cat /opt/rd-entry/client.json', '--max-time', '20', t=30))
     sp = json.load(open(d + '/sp.json'))
     entries, secrets = ['sparfum'], {'sparfum': json.dumps(sp, separators=(',', ':'))}
 pub = open('/etc/ssh/ssh_host_ed25519_key.pub').read().split()
