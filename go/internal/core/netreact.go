@@ -78,8 +78,25 @@ type netReact struct {
 	chReset func()                // канал: оборвать попытку, круг путей с первого
 	chUp    func() bool           // канал сейчас up
 	log     api.Logger
+	foreign func() string // чужой VPN (маршрут к 1.1.1.1); nil — не отслеживается
 	last    string
 	inited  bool
+	lastFV  string
+	fvInit  bool
+}
+
+// foreignChanged — имя чужого VPN изменилось с прошлого события (канал не трогаем).
+func (n *netReact) foreignChanged() bool {
+	if n.foreign == nil {
+		return false
+	}
+	cur := n.foreign()
+	changed := n.fvInit && cur != n.lastFV
+	n.lastFV, n.fvInit = cur, true
+	if changed {
+		n.log.Info("foreign-vpn-changed", "foreign", cur)
+	}
+	return changed
 }
 
 // onChange вызывается после debounce. Перестраивает, если физическая сеть реально изменилась
@@ -125,12 +142,20 @@ func (c *core) watchNet(ctx context.Context) {
 				ch.NetChanged()
 			}
 		},
-		chUp: func() bool { ch := c.getCh(); return ch != nil && ch.State().State == "up" },
+		chUp:    func() bool { ch := c.getCh(); return ch != nil && ch.State().State == "up" },
+		foreign: c.plat.ForeignVPN,
 	}
 	n.last, n.inited = n.sig(), true
+	n.lastFV, n.fvInit = n.foreign(), true
 	for range debounce(ctx, platform.WatchNet(ctx), netDebounce) {
-		if n.onChange(ctx) && c.tun != nil {
+		rebuilt := n.onChange(ctx)
+		fc := n.foreignChanged()
+		switch {
+		case c.tun == nil:
+		case rebuilt:
 			c.tun.reconcile(ctx, "net-changed")
+		case fc:
+			c.tun.reconcile(ctx, "foreign-changed")
 		}
 	}
 }

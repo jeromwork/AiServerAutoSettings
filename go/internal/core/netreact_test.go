@@ -66,3 +66,65 @@ func TestNetReactRebuildsOnlyOnRealChangeOrDownChannel(t *testing.T) {
 		t.Fatalf("sb=%d ch=%d", sb, ch)
 	}
 }
+
+type fvPlat struct {
+	api.Platform
+	fv string
+}
+
+func (p *fvPlat) Interfaces() ([]api.Iface, error) { return []api.Iface{wifi("192.168.1.5")}, nil }
+func (p *fvPlat) ForeignVPN() string               { return p.fv }
+
+type fvSb struct {
+	api.Singbox
+	eff     api.Effective
+	applied int
+}
+
+func (s *fvSb) Effective() api.Effective { return s.eff }
+func (s *fvSb) Status() map[string]any   { return map[string]any{} }
+func (s *fvSb) Apply(_ context.Context, e api.Effective) error {
+	s.eff = e
+	s.applied++
+	return nil
+}
+
+// Чужой VPN выключили/включили при той же физической сети и живом канале: наш VPN поднимается/снимается, канал не сбрасывается.
+func TestForeignVPNChangeReconcilesWithoutChannelReset(t *testing.T) {
+	plat := &fvPlat{fv: "HappTun"}
+	sb := &fvSb{}
+	c := &core{log: &fake.Logger{}, plat: plat, sb: sb, cfg: &api.Config{}}
+	c.tun = &tunGuard{c: c, mode: "auto", vpnState: "off", lanState: "off"}
+	ctx := context.Background()
+	c.tun.reconcile(ctx, "start")
+	if sb.eff.VPN || c.tun.vpnState != "foreign" {
+		t.Fatalf("чужой VPN есть, наш не должен подниматься: %+v %s", sb.eff, c.tun.vpnState)
+	}
+	var chReset int
+	n := &netReact{log: c.log, sig: func() string { return "wifi|1" }, chUp: func() bool { return true },
+		chReset: func() { chReset++ }, foreign: plat.ForeignVPN}
+	n.last, n.inited, n.lastFV, n.fvInit = "wifi|1", true, "HappTun", true
+
+	if n.onChange(ctx) || n.foreignChanged() {
+		t.Fatal("ничего не менялось, а реакция есть")
+	}
+	plat.fv = "" // чужой выключили
+	if n.onChange(ctx) || !n.foreignChanged() {
+		t.Fatal("выключение чужого VPN не замечено")
+	}
+	c.tun.reconcile(ctx, "foreign-changed")
+	if !sb.eff.VPN || c.tun.vpnState != "up" {
+		t.Fatalf("наш VPN не поднялся: %+v %s", sb.eff, c.tun.vpnState)
+	}
+	plat.fv = "HappTun" // включили
+	if !n.foreignChanged() {
+		t.Fatal("появление чужого VPN не замечено")
+	}
+	c.tun.reconcile(ctx, "foreign-changed")
+	if sb.eff.VPN || c.tun.vpnState != "foreign" {
+		t.Fatalf("наш VPN не снят: %+v %s", sb.eff, c.tun.vpnState)
+	}
+	if chReset != 0 {
+		t.Fatalf("канал сброшен %d раз", chReset)
+	}
+}
