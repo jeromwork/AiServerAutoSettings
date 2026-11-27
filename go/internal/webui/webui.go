@@ -237,6 +237,8 @@ func (u *UI) registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/config/apply", u.handleConfigApply)
 	mux.HandleFunc("/config", u.handleConfigApply)
 	mux.HandleFunc("/api/config/revert", u.handleConfigRevert)
+	mux.HandleFunc("/api/config", u.handleConfigExport)
+	mux.HandleFunc("/api/vpn", u.handleVPN)
 	mux.HandleFunc("/revert", u.handleConfigRevert)
 	mux.HandleFunc("/api/events", u.handleEvents)
 	mux.HandleFunc("/api/restart", u.handleRestart)
@@ -482,6 +484,50 @@ func (u *UI) handleConfigApply(w http.ResponseWriter, req *http.Request) {
 	u.log.Secret(pw)
 	ctx := context.WithoutCancel(req.Context())
 	if err := callTimeout(configCallTimeout, "применение конфига", func() error { return u.act.ConfigApply(ctx, []byte(text), pw) }); err != nil {
+		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "problems": []string{err.Error()}})
+		return
+	}
+	replyJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleConfigExport — GET /api/config: сохранённый конфиг как есть (с ключами, без пароля); тот же токен.
+func (u *UI) handleConfigExport(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !u.checkAuth(w, req) {
+		return
+	}
+	b, err := u.act.ConfigExport()
+	if err != nil {
+		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(b)
+}
+
+// handleVPN — POST /api/vpn mode=off|auto|only: меняет vpn.mode в сохранённом конфиге и применяет его.
+func (u *UI) handleVPN(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !u.checkAuth(w, req) {
+		return
+	}
+	if !parseForm(w, req) {
+		return
+	}
+	mode := req.PostFormValue("mode")
+	if mode != "off" && mode != "auto" && mode != "only" {
+		replyJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "режим должен быть off, auto или only"})
+		return
+	}
+	ctx := context.WithoutCancel(req.Context())
+	if err := callTimeout(configCallTimeout, "смена режима VPN", func() error { return u.act.ConfigSetVPN(ctx, mode) }); err != nil {
 		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "problems": []string{err.Error()}})
 		return
 	}

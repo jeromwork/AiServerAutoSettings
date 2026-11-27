@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -222,6 +223,11 @@ func Apply(p api.Paths, data []byte, password string, log api.Logger) (string, e
 		return "", err
 	}
 	defer clear(key)
+	return applyOpened(p, data, c, key, ptr, log)
+}
+
+// applyOpened: общая часть Apply после проверки конфига (ptr без незавершённого переключения).
+func applyOpened(p api.Paths, data []byte, c *api.Config, key []byte, ptr Pointers, log api.Logger) (string, error) {
 	register(c, log)
 	if err := os.MkdirAll(p.Config, 0o700); err != nil {
 		return "", err
@@ -466,3 +472,78 @@ type discard struct{}
 
 func (discard) Write(b []byte) (int, error) { return len(b), nil }
 func (discard) Close() error                { return nil }
+
+// ExportCurrent отдаёт сохранённый конфиг текущего поколения как есть (с зашифрованными ключами, без пароля).
+func ExportCurrent(p api.Paths) ([]byte, error) {
+	ptr, err := ReadPointers(p)
+	if err != nil {
+		return nil, err
+	}
+	if ptr.Current == "" {
+		return nil, ErrNoConfig
+	}
+	b, err := os.ReadFile(filepath.Join(GenDir(p, ptr.Current), "active.json"))
+	if err != nil {
+		return nil, fmt.Errorf("config: gen-missing: %s", ptr.Current)
+	}
+	return trimBOM(b), nil
+}
+
+// SetVPNMode меняет только vpn.mode в сохранённом конфиге и применяет его обычным путём Apply
+// (новое поколение, switch.json, откат по сторожу). Пароль не нужен: берётся сохранённый ключ.
+func SetVPNMode(p api.Paths, mode string, log api.Logger) (string, error) {
+	if mode != "off" && mode != "auto" && mode != "only" {
+		return "", errors.New("config: vpn-mode: режим должен быть off, auto или only")
+	}
+	if log == nil {
+		log = nopLog{}
+	}
+	ptr, err := ReadPointers(p)
+	if err != nil {
+		return "", err
+	}
+	if ptr.Switch != nil {
+		return "", ErrPending
+	}
+	if ptr.Current == "" {
+		return "", ErrNoConfig
+	}
+	dir := GenDir(p, ptr.Current)
+	data, err := ExportCurrent(p)
+	if err != nil {
+		return "", err
+	}
+	key, err := readGenKey(dir)
+	if err != nil {
+		return "", fmt.Errorf("config: key: cannot read key of %s", ptr.Current)
+	}
+	defer clear(key)
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var root map[string]any
+	if err := dec.Decode(&root); err != nil {
+		return "", fmt.Errorf("config: parse: %w", err)
+	}
+	vpn, _ := root["vpn"].(map[string]any)
+	if vpn == nil {
+		if _, has := root["vpn"]; has {
+			return "", errors.New("config: vpn: раздел vpn не объект")
+		}
+		vpn = map[string]any{}
+	}
+	vpn["mode"] = mode
+	root["vpn"] = vpn
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(root); err != nil {
+		return "", err
+	}
+	nd := buf.Bytes()
+	c, err := OpenWithKey(nd, key)
+	if err != nil {
+		return "", err
+	}
+	return applyOpened(p, nd, c, key, ptr, log)
+}
