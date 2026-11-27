@@ -140,6 +140,7 @@ func vpnSelect(cfg *api.Config) (vpnSel, error) {
 		if err != nil {
 			return sel, err
 		}
+		for _, p := range paths {
 			bad := strings.HasSuffix(p.final, "-vpn") || seenFinal[p.final] || seenTag[p.final]
 			for _, o := range p.outs {
 				if t, _ := o["type"].(string); t == "ssh" || t == "direct" || t == "socks" {
