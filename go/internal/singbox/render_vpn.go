@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -252,9 +253,10 @@ func RenderVPN(rc api.RenderContext) ([]byte, error) {
 		{"action": "sniff"},
 		{"ip_is_private": true, "outbound": "vpn-direct"},
 	}
+	lock := rc.Cfg.VPN.LockExit // «выход только через наш адрес»: никаких прямых исключений (РФ, домены), strict_route
 	var suffixes []string
 	for _, d := range rc.Cfg.VPN.Direct.Domains {
-		if strings.Trim(d, ". ") != "" {
+		if !lock && strings.Trim(d, ". ") != "" {
 			suffixes = append(suffixes, vpnIDNA(d))
 		}
 	}
@@ -266,16 +268,24 @@ func RenderVPN(rc api.RenderContext) ([]byte, error) {
 		delete(route, "auto_detect_interface")
 		route["default_interface"] = rc.DefaultIface
 	}
-	if rc.GeoIPPath != "" && vpnGeoIP(rc.Cfg.VPN.Direct.GeoIP) {
+	if !lock && rc.GeoIPPath != "" && vpnGeoIP(rc.Cfg.VPN.Direct.GeoIP) {
 		if st, err := os.Stat(rc.GeoIPPath); err == nil && st.Mode().IsRegular() {
 			rules = append(rules, m{"rule_set": []string{"geoip-ru"}, "outbound": "vpn-direct"})
 			route["rule_set"] = []m{{"type": "local", "tag": "geoip-ru", "format": "binary", "path": rc.GeoIPPath}}
 		}
 	}
+	if lock && rc.VPNBlock {
+		// Перекрыто: свой процесс программы ходит через vpn-out (проверка «вышли ли мы через наш адрес» — это и есть выход из перекрытия),
+		// остальное отклоняется. Исключения выше (приватные сети, процессы канала/Лаборатории) остаются: канал и страница 127.0.0.1 живы.
+		if self := selfProcName(); self != "" {
+			rules = append(rules, m{"process_name": []string{self}, "outbound": "vpn-out"})
+		}
+		rules = append(rules, m{"inbound": []string{"vpn-in"}, "action": "reject"})
+	}
 	route["rules"] = rules
 	tun := m{"type": "tun", "tag": "vpn-in", "interface_name": name,
 		"address": []string{"172.19.8.1/30", "fdfe:dcba:9877::1/126"}, "mtu": 1400,
-		"auto_route": true, "strict_route": false,
+		"auto_route": true, "strict_route": lock,
 		"route_address":         SplitRoutes(rc.VPNSplit),
 		"route_exclude_address": excludeSet(rc, sel.hosts)}
 	outs := append([]m(nil), sel.outs...)
@@ -285,6 +295,15 @@ func RenderVPN(rc api.RenderContext) ([]byte, error) {
 	// Журнал sing-box VPN — только предупреждения: в info попадают адреса сайтов.
 	return json.Marshal(m{"log": m{"level": "warn"}, "inbounds": []m{tun}, "outbounds": outs, "route": route,
 		"experimental": m{"clash_api": m{"external_controller": fmt.Sprintf("127.0.0.1:%d", rc.ClashPort), "secret": rc.ClashSecret}}})
+}
+
+// selfProcName — имя исполняемого файла этой программы (для правила process_name).
+func selfProcName() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return filepath.Base(exe)
 }
 
 // vpnGeoIP: нет поля — включено; явно пусто/ложь — выключено (_geoip_cfg v2).

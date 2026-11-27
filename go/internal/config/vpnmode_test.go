@@ -116,3 +116,32 @@ func TestSetVPNModeRejectsBadMode(t *testing.T) {
 		t.Fatal("ожидалась ошибка")
 	}
 }
+
+func TestSetVPNLockChangesOnlyLockExit(t *testing.T) {
+	p := api.NewPaths(t.TempDir())
+	applyAndCommit(t, p, sealedConfig(t, map[string]any{"vpn": map[string]any{"mode": "auto", "bridges": []any{"a"}}}))
+	before, _ := ExportCurrent(p)
+	if _, err := SetVPNLock(p, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := ExportCurrent(p)
+	b, a := decodeObj(t, before), decodeObj(t, after)
+	if a["vpn"].(map[string]any)["lockExit"] != true {
+		t.Fatalf("lockExit не записан: %v", a["vpn"])
+	}
+	b["vpn"].(map[string]any)["lockExit"] = true
+	if !reflect.DeepEqual(a, b) {
+		t.Fatalf("изменилось не только vpn.lockExit:\n%v\n%v", b, a)
+	}
+	c, _, err := Open(after, testPW)
+	if err != nil || !c.VPN.LockExit || c.VPN.Mode != "auto" {
+		t.Fatalf("разбор: err=%v cfg=%+v", err, c)
+	}
+}
+
+func TestParseRejectsNonBoolLockExit(t *testing.T) {
+	p := api.NewPaths(t.TempDir())
+	if _, err := Apply(p, sealedConfig(t, map[string]any{"vpn": map[string]any{"lockExit": "yes"}}), testPW, nil); err == nil {
+		t.Fatal("ожидалась ошибка схемы")
+	}
+}

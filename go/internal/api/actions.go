@@ -23,6 +23,7 @@ type Actions interface {
 	ConfigRevert(ctx context.Context) error
 	ConfigExport() ([]byte, error)                         // сохранённый конфиг как есть (с ключами, без пароля)
 	ConfigSetVPN(ctx context.Context, mode string) error   // vpn.mode в сохранённом конфиге + применение как ConfigApply
+	ConfigSetVPNLock(ctx context.Context, on bool) error   // vpn.lockExit («выход только через наш адрес») в сохранённом конфиге + применение
 	CheckExit(ctx context.Context) (map[string]any, error) // проверка внешнего адреса выхода по кнопке; итог = статус VPN
 	SetControl(on bool) error
 	SwitchPath(name string) error // → Channel.ForcePath

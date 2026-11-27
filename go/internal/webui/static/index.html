@@ -82,6 +82,9 @@ pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; word-break: brea
   <label><input type="radio" name="vpnmode" value="off"> Выключен</label>
   <label><input type="radio" name="vpnmode" value="auto"> Авто</label>
   <label><input type="radio" name="vpnmode" value="only"> Только наш</label>
+  <label><input type="checkbox" id="vpn-lock"> Выход только через наш адрес (при сбое интернет перекрывается, а не открывается)</label>
+  <div id="vpn-block" class="err" style="display:none"><b id="vpn-block-t"></b>
+    <button id="vpn-unlock" type="button">Снять галочку</button> <button id="vpn-stop" type="button">Выключить VPN</button></div>
   <div id="vpn-st"></div>
   <div id="vpn-exit"></div> <button id="vpn-check" type="button">Проверить</button>
   <div id="sysproxy" style="display:none"></div>
@@ -420,7 +423,7 @@ function onApply(a) {
 }
 
 var VPNMODE = {off: "выключен", auto: "авто", only: "только наш"};
-var VPNST = {off: "выключен", up: "работает", failopen: "не работает, сеть открыта напрямую", foreign: "работает другой VPN", error: "ошибка"};
+var VPNST = {blocked: "интернет перекрыт", off: "выключен", up: "работает", failopen: "не работает, сеть открыта напрямую", foreign: "работает другой VPN", error: "ошибка"};
 
 function onVPN(v) {
   var r = document.querySelectorAll("input[name=vpnmode]");
@@ -428,6 +431,17 @@ function onVPN(v) {
   var h = "Режим: <b>" + esc(VPNMODE[v.mode] || v.mode || "—") + "</b>, состояние: <b>" + esc(VPNST[v.state] || v.state || "—") + "</b>";
   if (v.reason) h += " <span class=err>" + esc(v.reason) + "</span>";
   if (v.underlay) h += "<br>Работает поверх: <b>" + esc(v.underlay) + "</b>";
+  if (v.split) h += "<br>Маршруты нарезаны блоками <b>" + esc(v.split) + "</b> (чужой VPN держит более мелкие маршруты)";
+  if (v.bypass) h += "<br><span class=err>Часть трафика уходит мимо нашего VPN через <b>" + esc(v.bypass) + "</b></span>";
+  var lk = document.getElementById("vpn-lock");
+  lk.checked = !!v.lock;
+  var bl = document.getElementById("vpn-block");
+  if (v.state === "blocked") {
+    bl.style.display = "";
+    document.getElementById("vpn-block-t").textContent = v.reason || "Интернет перекрыт";
+    document.getElementById("vpn-unlock").style.display = v.lock ? "" : "none";
+    h = h.replace(/ <span class=err>.*?<\/span>/, "");
+  } else bl.style.display = "none";
   document.getElementById("vpn-st").innerHTML = h;
   var e = v.exit, ex = document.getElementById("vpn-exit");
   if (!e) { ex.textContent = ""; return; }
@@ -456,6 +470,37 @@ function onSysProxy(p) {
   el.textContent = t;
   el.style.display = "";
 }
+
+document.getElementById("vpn-lock").onchange = function() {
+  var c = this, m = document.getElementById("vpn-msg");
+  m.className = "";
+  m.textContent = "Меняю галочку в конфиге...";
+  post("/api/vpn/lock", { on: c.checked ? "1" : "0" }).then(function(x) {
+    m.className = x.ok ? "ok" : "err";
+    m.textContent = x.ok ? "Записано, перезапускаю..." : (x.problems || [x.error || "Ошибка"]).join("\n");
+    if (!x.ok && S && S.vpn) onVPN(S.vpn);
+  }).catch(function(e) {
+    m.className = "err";
+    m.textContent = "Нет ответа (" + (e.shown || e.message) + "). Программа могла перезапуститься: смотрите блок «Ход работы».";
+  });
+};
+document.getElementById("vpn-unlock").onclick = function() {
+  var c = document.getElementById("vpn-lock");
+  c.checked = false;
+  c.onchange();
+};
+document.getElementById("vpn-stop").onclick = function() {
+  var m = document.getElementById("vpn-msg");
+  m.className = "";
+  m.textContent = "Выключаю VPN...";
+  post("/api/vpn/off", {}).then(function(x) {
+    m.className = x.ok ? "ok" : "err";
+    m.textContent = x.ok ? "VPN выключен." : (x.problems || [x.error || "Ошибка"]).join("\n");
+  }).catch(function(e) {
+    m.className = "err";
+    m.textContent = "Нет ответа (" + (e.shown || e.message) + ")";
+  });
+};
 
 document.getElementById("vpn-check").onclick = function() {
   var b = this, m = document.getElementById("vpn-msg");

@@ -139,6 +139,7 @@ func (g *tunGuard) checkExit(ctx context.Context, reason string) {
 	g.exit.Store(res)
 	g.mu.Lock()
 	g.event("vpn.exit", "ip", res.IP, "via", res.Via, "ok", res.OK, "known", res.Known, "reason", reason)
+	g.exitVerdictLocked(ctx, res)
 	g.mu.Unlock()
 }
 

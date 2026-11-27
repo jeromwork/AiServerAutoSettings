@@ -54,6 +54,8 @@ type VPNCfg struct {
 	Direct  VPNDirect
 	// ExitIPs — ожидаемые внешние адреса выхода (vpn.exitIPs); пусто → IP узлов vpn.nodes.
 	ExitIPs []string
+	// LockExit — галочка «выход только через наш адрес» (vpn.lockExit): strict_route, без прямых исключений РФ, при сбое — перекрытие, а не fail-open.
+	LockExit bool
 	// Nodes — собственные узлы VPN (vpn.nodes): имя → расшифрованный outbound sing-box (JSON с полем type). Работают без paths/server.
 	Nodes map[string]json.RawMessage
 }

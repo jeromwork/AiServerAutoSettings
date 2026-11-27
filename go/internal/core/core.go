@@ -355,6 +355,11 @@ func (c *core) startNetwork(ctx context.Context) {
 	c.tun = &tunGuard{c: c, mode: "off", vpnState: "off", lanState: "off"}
 	if c.cfg != nil {
 		c.tun.mode = c.cfg.VPN.Mode
+		// Сторож принудительно выключил VPN (зависшее ядро): на этот запуск VPN не включаем, пока владелец не включит снова.
+		if supervise.TakeVPNOff(c.p) {
+			log.Warn("core: vpn-forced-off", "was", c.tun.mode)
+			c.tun.mode = "off"
+		}
 	}
 
 	// 5. sing-box канала и ЛВС (не при --no-singbox и --no-channel; без сервера в конфиге «только VPN» канала нет).
@@ -398,6 +403,7 @@ func (c *core) startNetwork(ctx context.Context) {
 	if c.cfg != nil && !f.Mode.NoSingbox && f.Mode.AllowsTun() {
 		vsb, e := singbox.New(c.cfg, c.p, log, c.clean, c.pr, singbox.Options{
 			Role: singbox.RoleVPN, Mode: f.Mode, Instance: c.clean.Instance(), DefaultIface: c.vpnUnderlay,
+			VPNBlock: func() bool { return c.tun != nil && c.tun.blocked.Load() },
 			VPNSplit: func() int {
 				if c.tun == nil {
 					return 0

@@ -31,6 +31,7 @@ type tunGuard struct {
 	underlay    string       // адаптер, через который реально идёт трафик к нашему серверу (поверх чего работает VPN)
 	split       atomic.Int32 // длина нарезки route_address VPN (этап 1b), 0 — стандартные 0/1
 	bypass      string       // адаптер, куда уходят пробы мимо нашего TUN после нарезки ("" — нет)
+	blocked     atomic.Bool  // этап 3a: VPN перекрывает интернет (vpn.lockExit + сбой/непроверенный выход); читается при сборке конфига VPN
 	lanOff      bool         // ЛВС выключена после падения до смены сети
 	retry       *time.Timer
 	exitBusy    atomic.Bool  // проверка выхода уже идёт
@@ -71,8 +72,15 @@ func (g *tunGuard) statusLocked() map[string]any {
 	if r, ok := g.exit.Load().(exitResult); ok {
 		st["exit"] = r
 	}
+	if g.lock() {
+		st["lock"] = true
+		st["blocked"] = g.blocked.Load()
+	}
 	return st
 }
+
+// lock — включена галочка «выход только через наш адрес» (vpn.lockExit).
+func (g *tunGuard) lock() bool { return g.c.cfg != nil && g.c.cfg.VPN.LockExit }
 
 func (g *tunGuard) adapter(part string) string {
 	inst := g.inst
@@ -124,6 +132,7 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 		g.vpnState, g.vpnWhy = "off", ""
 	case g.mode == "off":
 		g.vpnState, g.vpnWhy = "off", ""
+		g.blocked.Store(false) // выключенный VPN ничего не блокирует
 		if g.retry != nil {
 			g.retry.Stop() // отложенная проверка не должна вмешиваться после выключения
 		}
@@ -142,10 +151,16 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 			g.resetSplit(ctx) // чужих маршрутов нет — нарезка не нужна (этап 1b)
 		}
 		wantVPN = true
+		if g.lock() && !vsb.Effective().VPN {
+			// Старт с галочкой: до проверки выхода интернет перекрыт (свой процесс программы ходит через vpn-out и проверяет адрес).
+			g.blocked.Store(true)
+			g.vpnState, g.vpnWhy = "blocked", "Интернет перекрыт: проверяю, что выход идёт через наш адрес"
+		}
 	}
 	if !wantVPN {
 		g.split.Store(0)
 		g.bypass = ""
+		g.blocked.Store(false)
 	}
 
 	// ЛВС (в общем sing-box вместе с каналом)
@@ -178,6 +193,10 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 	}
 	g.finish(got)
 	if vpnBad != "" {
+		if g.lock() {
+			g.blockLocked(ctx, "защита не действует: процесс VPN не запускается ("+vpnBad+")", false)
+			return
+		}
 		g.failLocked(ctx, vpnBad)
 		return
 	}
@@ -250,7 +269,9 @@ func (g *tunGuard) applyVPN(ctx context.Context, vsb api.Singbox, reason string,
 // finish — статусы по факту применённого состояния.
 func (g *tunGuard) finish(got api.Effective) {
 	if got.VPN {
-		g.vpnState, g.vpnWhy = "up", ""
+		if !g.blocked.Load() {
+			g.vpnState, g.vpnWhy = "up", ""
+		}
 		g.underlay = g.c.vpnUnderlay()
 	} else {
 		g.underlay = ""
@@ -317,6 +338,11 @@ func (g *tunGuard) probe(ctx context.Context) {
 
 // failLocked — шаг лестницы fail-open. Под mu.
 func (g *tunGuard) failLocked(ctx context.Context, why string) {
+	if g.lock() {
+		// С галочкой не отпускаем: процесс VPN остаётся, интернет перекрыт до восстановления (событиями) или до выключения владельцем.
+		g.blockLocked(ctx, "Интернет перекрыт: "+why, true)
+		return
+	}
 	g.fails++
 	g.vpnWhy = why
 	switch {
@@ -337,6 +363,54 @@ func (g *tunGuard) failLocked(ctx context.Context, why string) {
 		g.event("vpn.off", "why", why)
 		g.dropVPN(ctx)
 	}
+}
+
+// blockLocked — состояние «перекрыт» (галочка vpn.lockExit). Процесс VPN не останавливаем; если он жив — один раз перерисовываем
+// конфиг с отклонением всего, кроме исключений (приватные сети, канал/Лаборатория, свой процесс программы через vpn-out). Под mu.
+// Выход из состояния — события (net-changed, foreign-changed, vpn-cmd, кнопка «Проверить»): пробы и проверка выхода; таймеров нет.
+func (g *tunGuard) blockLocked(ctx context.Context, why string, rerender bool) {
+	g.vpnState, g.vpnWhy = "blocked", why
+	was := g.blocked.Swap(true)
+	vsb := g.c.getVpnSb()
+	if rerender && !was && !isNil(vsb) && vsb.Effective().VPN {
+		if err := g.restartVPN(ctx); err != nil {
+			g.vpnWhy = "защита не действует: процесс VPN не запускается (" + sanitize(err.Error()) + ")"
+		}
+	}
+	g.event("vpn.blocked", "why", g.vpnWhy)
+}
+
+// exitVerdictLocked — с галочкой: итог проверки выхода переключает перекрытие. Под mu. Выход не определён/не наш → перекрыть;
+// наш (или ожидаемый адрес не задан и проба туннеля прошла) → снять перекрытие. Выключенный VPN не трогаем.
+func (g *tunGuard) exitVerdictLocked(ctx context.Context, res exitResult) {
+	if !g.lock() || g.mode == "off" || (g.vpnState != "up" && g.vpnState != "blocked") {
+		return
+	}
+	vsb := g.c.getVpnSb()
+	if isNil(vsb) || !vsb.Effective().VPN {
+		return
+	}
+	if res.Err == "" && (!res.Known || res.OK) {
+		if !g.blocked.Load() {
+			return
+		}
+		g.blocked.Store(false)
+		g.vpnState, g.vpnWhy = "up", ""
+		if err := g.restartVPN(ctx); err != nil {
+			g.blockLocked(ctx, "защита не действует: процесс VPN не запускается ("+sanitize(err.Error())+")", false)
+			return
+		}
+		g.event("vpn.unblocked", "ip", res.IP)
+		return
+	}
+	why := "не удалось проверить выход (" + res.Err + ")"
+	if res.Err == "" {
+		why = "выход не через " + strings.Join(res.Expected, ", ") + ", сейчас через " + res.IP
+		if res.Via != "" {
+			why += " (" + res.Via + ")"
+		}
+	}
+	g.blockLocked(ctx, "Интернет перекрыт: "+why, true)
 }
 
 // dropVPN — остановка процесса VPN (канал и ЛВС не трогаем). Горутина: под mu Apply не вызываем повторно.
@@ -362,6 +436,14 @@ func (g *tunGuard) onTunCrash(ctx context.Context, e api.Effective) {
 	if e.LAN {
 		g.lanOff, g.lanState, g.lanWhy = true, "error", "sing-box с TUN упал; повтор при смене сети"
 	}
+	if e.VPN && g.lock() && g.mode != "off" {
+		// С галочкой не открываем сеть: перекрыть и перезапустить VPN событием падения (reconcile поднимет процесс заново).
+		g.blocked.Store(true)
+		g.vpnState, g.vpnWhy = "blocked", "Интернет перекрыт: sing-box с TUN упал, перезапускаю"
+		g.event("vpn.crash-blocked")
+		go g.reconcile(ctx, "tun-crash")
+		return
+	}
 	if e.VPN {
 		g.fails++
 		g.vpnWhy = "sing-box с TUN упал"
@@ -382,6 +464,9 @@ func (g *tunGuard) onTunCrash(ctx context.Context, e api.Effective) {
 func (g *tunGuard) setMode(ctx context.Context, mode string) {
 	g.mu.Lock()
 	g.mode, g.fails, g.vpnState, g.vpnWhy = mode, 0, "off", ""
+	if mode == "off" {
+		g.blocked.Store(false)
+	}
 	g.mu.Unlock()
 	g.reconcile(ctx, "vpn-cmd")
 }
