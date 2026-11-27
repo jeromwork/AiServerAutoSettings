@@ -200,6 +200,9 @@ func TestConfigNotAcceptedRollsBackBoth(t *testing.T) {
 	if ptr.Current != "gen-1" {
 		t.Fatalf("config current %s, want gen-1", ptr.Current)
 	}
+	if rb, ok := config.ReadRollback(r.p); !ok || rb.Reason == "" || rb.To != "gen-2" {
+		t.Fatalf("причина отката не записана: %+v %v", rb, ok)
+	}
 }
 
 // Сетевая ошибка не краш версии: версия шлёт good и сразу выходит с кодом 3 (fast-revert конфига) —

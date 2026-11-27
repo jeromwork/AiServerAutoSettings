@@ -717,9 +717,9 @@ func (s *box) exe() string {
 // vpnBinaryName — имя копии sing-box для процесса VPN (без «lab»).
 func vpnBinaryName() string {
 	if runtime.GOOS == "windows" {
-		return "RemoteAgents-VPN.exe"
+		return vpnNameWin
 	}
-	return "ra-vpn"
+	return vpnNameNix
 }
 
 // prepareVPN — перед запуском процесса VPN: свободный clash-порт и своя копия исполняемого файла.

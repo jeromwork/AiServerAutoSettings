@@ -34,11 +34,10 @@ var vpnExclude = []string{
 var vpnAlwaysDirect = []string{}
 
 // vpnDirectProcs — процессы, трафик которых идёт мимо нашего VPN: v2 Лаборатория (ra-lab, её sing-box) и чужие VPN.
-var vpnDirectProcs = []string{
+var vpnDirectProcs = append(ownProcNames(),
 	"ra-lab.exe", "ra-lab", "ralab-core.exe", "ralab-core", "ralab.exe", "sing-box.exe", "sing-box",
-	"RemoteAgents-VPN.exe", "ra-vpn",
 	"Happ.exe", "happ.exe", "xray.exe", "v2rayN.exe", "tailscaled.exe", "Tailscale.exe",
-}
+)
 
 // MaxVPNSplit — предел нарезки: 2^12 = 4096 блоков IPv4. /16 (65536 маршрутов) ОС добавляла бы минутами и сама стала бы помехой.
 const MaxVPNSplit = 12

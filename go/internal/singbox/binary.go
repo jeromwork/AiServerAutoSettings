@@ -28,11 +28,24 @@ const assetLimit = 128 << 20
 
 type asset struct{ OS, Arch, URL, SHA256, BinPath, BinSHA256 string }
 
+// Имена исполняемых файлов sing-box: канальное ядро и копия для VPN (один источник для запуска и для правил process_name).
+const (
+	coreNameWin = "ra-core.exe"
+	coreNameNix = "ra-core"
+	vpnNameWin  = "RemoteAgents-VPN.exe"
+	vpnNameNix  = "ra-vpn"
+)
+
 func binaryName() string {
 	if runtime.GOOS == "windows" {
-		return "ra-core.exe"
+		return coreNameWin
 	}
-	return "ra-core"
+	return coreNameNix
+}
+
+// ownProcNames — имена процессов самой программы (канальное и VPN-ядро, все ОС): они идут мимо нашего VPN.
+func ownProcNames() []string {
+	return []string{coreNameWin, coreNameNix, vpnNameWin, vpnNameNix}
 }
 
 // installBinary returns the path of sing-box in the home bin directory and the

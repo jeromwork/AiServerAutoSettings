@@ -500,7 +500,7 @@ func (c *core) vpnOnlyReady() {
 			c.log.Warn("core: config-commit", "gen", c.gen, "err", err.Error())
 		}
 	}
-	c.publishApply("ready", "Конфиг «только VPN» принят: канал не нужен.")
+	c.publishReady("Конфиг «только VPN» принят: канал не нужен.")
 }
 
 func (c *core) getCh() api.Channel {
@@ -607,7 +607,7 @@ func (c *core) watchChannel(ctx context.Context, ch <-chan api.ChannelState, uns
 						c.log.Warn("core: config-commit", "gen", c.gen, "err", err.Error())
 					}
 				}
-				c.publishApply("ready", "Связь с сервером установлена, конфиг принят.")
+				c.publishReady("Связь с сервером установлена, конфиг принят.")
 			}
 			c.onChannelState(st) // channel/attempts/paths + свежий status — после commit и очистки ошибки
 			if st.State == "up" {
