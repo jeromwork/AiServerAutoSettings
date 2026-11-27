@@ -94,6 +94,7 @@ type core struct {
 	compMu  sync.RWMutex // ch/sb/fw/ag пишет startNetwork (в своей горутине), читают страница и агент
 	ev      events
 	tun     *tunGuard
+	sysp    sysProxyGuard // системный прокси ПК: только читаем и показываем
 	netDone chan struct{}
 
 	// Пауза: netCancel гасит всё сетевое (контекст startNetwork); pauseMu — одна смена паузы за раз.
@@ -449,6 +450,9 @@ func (c *core) startNetwork(ctx context.Context) {
 				c.failStart(err)
 			}
 		}
+	}
+	if c.plat != nil && (c.getCh() != nil || !isNil(c.getVpnSb())) {
+		go c.watchSysProxy(ctx) // событие реестра (Windows) → предупреждение о системном прокси
 	}
 	if c.getCh() != nil || !isNil(c.getVpnSb()) {
 		go c.watchNet(ctx) // события смены сети → перестроить выход sing-box (канал и VPN) и канал

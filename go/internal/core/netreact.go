@@ -154,6 +154,7 @@ func (c *core) watchNet(ctx context.Context) {
 	n.last, n.inited = n.sig(), true
 	n.lastFV, n.fvInit = n.foreign(), true
 	for range debounce(ctx, platform.WatchNet(ctx), netDebounce) {
+		go c.checkSysProxy(ctx, "net-changed") // macOS: прокси без своего события — по смене сети; на Windows дубль гасится сравнением
 		rebuilt := n.onChange(ctx)
 		fc := n.foreignChanged()
 		switch {

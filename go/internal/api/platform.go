@@ -19,6 +19,14 @@ type Iface struct {
 	Metric       int    // метрика маршрута по умолчанию (меньше — предпочтительнее)
 }
 
+// SysProxy — системный прокси пользователя (браузеры ходят через него мимо TUN-маршрутов). Supported=false — ОС не определяет.
+type SysProxy struct {
+	Supported bool   `json:"supported"`
+	Enabled   bool   `json:"enabled"`
+	Server    string `json:"server,omitempty"` // как в ОС: "127.0.0.1:7890" или "http=h:p;https=h:p;socks=h:p"
+	PAC       string `json:"pac,omitempty"`    // адрес PAC-скрипта (только показываем, не исполняем)
+}
+
 type Platform interface {
 	OS() string
 	Arch() string
@@ -30,6 +38,7 @@ type Platform interface {
 	Autostart(binPath, home string, inst8 string) AutostartSpec
 	Interfaces() ([]Iface, error)
 	ExitIface(addr string) string // интерфейс выхода к "ip:port" по таблице маршрутов ОС ("" — не определён)
+	SystemProxy() SysProxy        // системный прокси (только чтение)
 	ForeignVPN() string           // имя чужого VPN-интерфейса (маршрут к 1.1.1.1), "" — нет
 }
 
