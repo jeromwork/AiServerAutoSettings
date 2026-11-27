@@ -21,7 +21,8 @@ type RenderContext struct {
 	DefaultIface string   // физический внешний интерфейс (route.default_interface); "" — auto_detect_interface
 	ExcludeIPs   []string // IP сервера, входов, мостов, DNS ПК — route_exclude_address (vpn.py 273–291)
 	Effective    Effective
-	VPNSplit     int // нарезка route_address VPN блоками /N (этап 1b); 0/1 — стандартные 0/1+128/1
+	VPNBlock     bool // VPN перекрывает интернет (этап 3a, vpn.lockExit): всё, что не исключено, отклоняется; свой процесс программы идёт через vpn-out для проверок
+	VPNSplit     int  // нарезка route_address VPN блоками /N (этап 1b); 0/1 — стандартные 0/1+128/1
 }
 
 // Part — вклад части в конфиг sing-box.

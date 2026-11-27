@@ -65,6 +65,9 @@ func (a *Actions) ConfigExport() ([]byte, error) { return nil, api.ErrNotSupport
 func (a *Actions) ConfigSetVPN(ctx context.Context, mode string) error {
 	return api.ErrNotSupported
 }
+func (a *Actions) ConfigSetVPNLock(ctx context.Context, on bool) error {
+	return api.ErrNotSupported
+}
 func (a *Actions) CheckExit(ctx context.Context) (map[string]any, error) {
 	return nil, api.ErrNotSupported
 }

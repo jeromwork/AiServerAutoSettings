@@ -461,6 +461,32 @@ func (s *slots) alignConfigLocked(ctx context.Context, log api.Logger) {
 	}
 }
 
+// forceVPNOff — запрос «выключить VPN любой ценой» к циклу сторожа.
+var forceVPNOff = make(chan struct{}, 1)
+
+const vpnOffMarker = "vpn-off.once"
+
+// ForceVPNOff — выключить VPN, даже если ядро не отвечает: маркер на следующий запуск + немедленное убийство ядра сторожем
+// (cleanup снимает sing-box, адаптеры и фильтры). Ничего постоянного не остаётся: маркер читается и стирается ядром при старте.
+func ForceVPNOff(p api.Paths) error {
+	if err := os.MkdirAll(p.State, 0700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(p.State, vpnOffMarker), []byte("1"), 0600); err != nil {
+		return err
+	}
+	select {
+	case forceVPNOff <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// TakeVPNOff — ядро при старте: был ли маркер принудительного выключения (маркер стирается).
+func TakeVPNOff(p api.Paths) bool {
+	return os.Remove(filepath.Join(p.State, vpnOffMarker)) == nil
+}
+
 // OnUI вызывается, когда ядро сообщило адрес страницы (сообщение "ui"); nil — не нужно.
 var OnUI func(url string)
 
@@ -860,6 +886,17 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 					messages = nil
 				}
 			case <-procDone:
+				break processLoop
+			case <-forceVPNOff:
+				// Принудительное выключение VPN (трей, ядро не отвечает): убиваем ядро сразу, без ожидания (отменённый контекст),
+				// cleanup снимает sing-box и адаптеры, новое ядро стартует с выключенным VPN (маркер). Падением не считается.
+				log.Warn("supervise: vpn-force-off, killing core")
+				configRestart = true
+				dead, deadCancel := context.WithCancel(ctx)
+				deadCancel()
+				if err := proc.Stop(dead); err != nil {
+					log.Warn("supervise: vpn-force-off: core did not exit", "err", err.Error())
+				}
 				break processLoop
 			case <-ctx.Done():
 				ticker.Stop()

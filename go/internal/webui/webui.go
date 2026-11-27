@@ -240,6 +240,8 @@ func (u *UI) registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/config", u.handleConfigExport)
 	mux.HandleFunc("/api/vpn", u.handleVPN)
 	mux.HandleFunc("/api/vpn/check", u.handleVPNCheck)
+	mux.HandleFunc("/api/vpn/lock", u.handleVPNLock)
+	mux.HandleFunc("/api/vpn/off", u.handleVPNOff)
 	mux.HandleFunc("/revert", u.handleConfigRevert)
 	mux.HandleFunc("/api/events", u.handleEvents)
 	mux.HandleFunc("/api/restart", u.handleRestart)
@@ -529,6 +531,48 @@ func (u *UI) handleVPN(w http.ResponseWriter, req *http.Request) {
 	}
 	ctx := context.WithoutCancel(req.Context())
 	if err := callTimeout(configCallTimeout, "смена режима VPN", func() error { return u.act.ConfigSetVPN(ctx, mode) }); err != nil {
+		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "problems": []string{err.Error()}})
+		return
+	}
+	replyJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleVPNLock — POST /api/vpn/lock on=1|0: галочка «выход только через наш адрес» (vpn.lockExit в сохранённом конфиге).
+func (u *UI) handleVPNLock(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !u.checkAuth(w, req) {
+		return
+	}
+	if !parseForm(w, req) {
+		return
+	}
+	on := req.PostFormValue("on")
+	if on != "0" && on != "1" {
+		replyJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "on должен быть 0 или 1"})
+		return
+	}
+	ctx := context.WithoutCancel(req.Context())
+	if err := callTimeout(configCallTimeout, "смена галочки «выход только через наш адрес»", func() error { return u.act.ConfigSetVPNLock(ctx, on == "1") }); err != nil {
+		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "problems": []string{err.Error()}})
+		return
+	}
+	replyJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleVPNOff — POST /api/vpn/off: выключить VPN сразу, на ходу (без записи конфига и перезапуска программы). Работает и в состоянии «перекрыт».
+// Быстрый путь для трея; если не ответил — трей просит сторожа убить ядро.
+func (u *UI) handleVPNOff(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !u.checkAuth(w, req) {
+		return
+	}
+	if err := callTimeout(10*time.Second, "выключение VPN", func() error { return u.act.VPN("off") }); err != nil {
 		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "problems": []string{err.Error()}})
 		return
 	}

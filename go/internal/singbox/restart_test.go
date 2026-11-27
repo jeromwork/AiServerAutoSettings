@@ -64,7 +64,9 @@ func TestRecoverSkipsWhenAlreadyRunning(t *testing.T) {
 	s.recover(context.Background(), api.Effective{})
 }
 
-func TestRenderUsesDefaultInterface(t *testing.T) {
+// Канал (Render) не привязан к интерфейсу: ни default_interface, ни auto_detect_interface (этап A убрал их). Привязка к
+// физическому адаптеру — только у процесса VPN (RenderVPN), он выходит к мостам мимо собственного TUN.
+func TestRenderChannelHasNoInterfaceBinding(t *testing.T) {
 	out, err := Render(api.RenderContext{Cfg: &api.Config{Servers: []api.Server{{Host: "203.0.113.5", Port: 22}}}, DefaultIface: "Wi-Fi", ChanPort: 1, ClashPort: 2})
 	if err != nil {
 		t.Skip("минимальный конфиг не рендерится: ", err)
@@ -75,12 +77,25 @@ func TestRenderUsesDefaultInterface(t *testing.T) {
 	if err = json.Unmarshal(out, &v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Route["default_interface"] != "Wi-Fi" || v.Route["auto_detect_interface"] != nil {
-		t.Fatalf("route=%v", v.Route)
+	if v.Route["default_interface"] != nil || v.Route["auto_detect_interface"] != nil {
+		t.Fatalf("канал не должен привязываться к интерфейсу: route=%v", v.Route)
 	}
-	out, _ = Render(api.RenderContext{Cfg: &api.Config{Servers: []api.Server{{Host: "203.0.113.5", Port: 22}}}, ChanPort: 1, ClashPort: 2})
-	if !strings.Contains(string(out), `"auto_detect_interface":true`) {
-		t.Fatalf("без интерфейса должен остаться auto_detect: %s", out)
+	vpn, err := RenderVPN(vpnRC(false, false, "Wi-Fi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var w struct {
+		Route map[string]any `json:"route"`
+	}
+	if err = json.Unmarshal(vpn, &w); err != nil {
+		t.Fatal(err)
+	}
+	if w.Route["default_interface"] != "Wi-Fi" || w.Route["auto_detect_interface"] != nil {
+		t.Fatalf("VPN: route=%v", w.Route)
+	}
+	vpn, _ = RenderVPN(vpnRC(false, false, ""))
+	if !strings.Contains(string(vpn), `"auto_detect_interface":true`) {
+		t.Fatalf("VPN без интерфейса должен остаться на auto_detect: %s", vpn)
 	}
 }
 

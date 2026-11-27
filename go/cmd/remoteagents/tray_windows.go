@@ -19,6 +19,7 @@ import (
 
 	"remoteagents/internal/api"
 	"remoteagents/internal/core"
+	"remoteagents/internal/supervise"
 )
 
 // tray — значок в области уведомлений сторожа. Состояние берёт из потока событий страницы (SSE /api/events):
@@ -70,6 +71,7 @@ func (t *tray) onReady() {
 	systray.SetTooltip("RemoteAgents: запускается")
 	open := systray.AddMenuItem("Открыть страницу", "")
 	t.pause = systray.AddMenuItem("Пауза", "")
+	vpnOff := systray.AddMenuItem("Выключить VPN", "")
 	systray.AddSeparator()
 	quit := systray.AddMenuItem("Выход", "")
 	systray.SetOnTapped(t.open)
@@ -80,6 +82,8 @@ func (t *tray) onReady() {
 				t.open()
 			case <-t.pause.ClickedCh:
 				t.togglePause()
+			case <-vpnOff.ClickedCh:
+				go t.vpnOff()
 			case <-quit.ClickedCh:
 				t.exit()
 				return
@@ -136,6 +140,41 @@ func (t *tray) togglePause() {
 		v = "1"
 	}
 	go func() { _ = t.call("/api/pause", url.Values{"on": {v}}) }() // итог придёт событием "pause"
+}
+
+// vpnOff — «Выключить VPN» всегда срабатывает: сначала быстрый запрос к ядру (3 с), нет ответа/ошибка (ядро зависло, страница недоступна) —
+// сторож сам убивает ядро (оно уносит с собой sing-box), cleanup снимает адаптер и фильтры, новое ядро стартует с выключенным VPN.
+func (t *tray) vpnOff() {
+	if t.callQuick("/api/vpn/off", 3*time.Second) == nil {
+		go func() { _ = t.call("/api/vpn", url.Values{"mode": {"off"}}) }() // и в конфиг, чтобы после перезапуска не включился
+		return
+	}
+	_ = supervise.ForceVPNOff(t.p)
+}
+
+// callQuick — POST к API страницы с коротким тайм-аутом; ошибка и не-200 — неудача.
+func (t *tray) callQuick(path string, d time.Duration) error {
+	raw := t.currentURL()
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return os.ErrNotExist
+	}
+	req, err := http.NewRequest(http.MethodPost, u.Scheme+"://"+u.Host+path, strings.NewReader(""))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Token", u.Query().Get("t"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := (&http.Client{Timeout: d}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	var r struct{ OK bool }
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&r) != nil || !r.OK {
+		return os.ErrInvalid
+	}
+	return nil
 }
 
 func (t *tray) exit() {

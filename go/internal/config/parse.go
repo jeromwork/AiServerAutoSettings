@@ -183,6 +183,11 @@ func (c *checker) validate(root obj) {
 			if b, has := vpn["bridges"]; has {
 				c.names(b, "vpn.bridges")
 			}
+			if l, has := vpn["lockExit"]; has {
+				if _, isBool := l.(bool); !isBool {
+					c.schema("vpn.lockExit", "must be true or false")
+				}
+			}
 			if e, has := vpn["exitIPs"]; has {
 				arr, ok := e.([]any)
 				if !ok {
@@ -626,6 +631,7 @@ func normalize(root obj, data []byte) *api.Config {
 	}
 	vpn, _ := root["vpn"].(obj)
 	c.VPN = api.VPNCfg{Mode: "off", Bridges: strList(vpn["bridges"]), ExitIPs: strList(vpn["exitIPs"]), Direct: api.VPNDirect{Domains: ruDomains}}
+	c.VPN.LockExit, _ = vpn["lockExit"].(bool)
 	if len(c.Servers) == 0 {
 		c.VPN.Mode = "auto" // «только VPN»: без режима в конфиге VPN включён сам
 	}

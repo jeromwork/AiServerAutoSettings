@@ -214,6 +214,10 @@ func (c *core) ConfigExport() ([]byte, error) { return config.ExportCurrent(c.p)
 // ConfigSetVPN: меняет только vpn.mode сохранённого конфига и применяет тем же путём, что ConfigApply.
 func (c *core) ConfigSetVPN(ctx context.Context, mode string) error {
 	c.publishApply("applying", "Меняю режим VPN в конфиге...")
+	if mode == "off" && c.tun != nil && c.cfg != nil && !c.f.Mode.Safe {
+		// Выключение обязано сработать сразу и независимо от записи конфига (занятая операция, ошибка записи): снимаем VPN и блок на ходу.
+		c.tun.setMode(context.WithoutCancel(ctx), "off")
+	}
 	fail := func(err error) error {
 		text := c.explainApplyErr(err)
 		c.log.Warn("core: config-vpn-failed", "text", text)
@@ -233,6 +237,33 @@ func (c *core) ConfigSetVPN(ctx context.Context, mode string) error {
 		return fail(err)
 	}
 	c.log.Info("core: config-vpn-applied", "gen", gen, "mode", mode)
+	c.publishApply("restarting", "Конфиг записан, перезапускаю программу и проверяю связь с сервером...")
+	c.requestQuit(api.ExitRestart, nil)
+	return nil
+}
+
+// ConfigSetVPNLock: меняет только vpn.lockExit сохранённого конфига и применяет тем же путём.
+func (c *core) ConfigSetVPNLock(ctx context.Context, on bool) error {
+	c.publishApply("applying", "Меняю галочку «выход только через наш адрес» в конфиге...")
+	fail := func(err error) error {
+		text := c.explainApplyErr(err)
+		c.log.Warn("core: config-vpn-lock-failed", "text", text)
+		c.publishApply("error", text)
+		return errors.New(text)
+	}
+	if c.f.Mode.Safe {
+		return fail(api.ErrSafe)
+	}
+	unlock, err := c.lockOp()
+	if err != nil {
+		return fail(err)
+	}
+	defer unlock()
+	gen, err := config.SetVPNLock(c.p, on, c.log)
+	if err != nil {
+		return fail(err)
+	}
+	c.log.Info("core: config-vpn-lock-applied", "gen", gen, "lock", on)
 	c.publishApply("restarting", "Конфиг записан, перезапускаю программу и проверяю связь с сервером...")
 	c.requestQuit(api.ExitRestart, nil)
 	return nil

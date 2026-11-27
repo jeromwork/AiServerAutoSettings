@@ -497,6 +497,15 @@ func SetVPNMode(p api.Paths, mode string, log api.Logger) (string, error) {
 	if mode != "off" && mode != "auto" && mode != "only" {
 		return "", errors.New("config: vpn-mode: режим должен быть off, auto или only")
 	}
+	return setVPNField(p, "mode", mode, log)
+}
+
+// SetVPNLock меняет только vpn.lockExit («выход только через наш адрес») и применяет тем же путём, что SetVPNMode.
+func SetVPNLock(p api.Paths, on bool, log api.Logger) (string, error) {
+	return setVPNField(p, "lockExit", on, log)
+}
+
+func setVPNField(p api.Paths, field string, val any, log api.Logger) (string, error) {
 	if log == nil {
 		log = nopLog{}
 	}
@@ -533,7 +542,7 @@ func SetVPNMode(p api.Paths, mode string, log api.Logger) (string, error) {
 		}
 		vpn = map[string]any{}
 	}
-	vpn["mode"] = mode
+	vpn[field] = val
 	root["vpn"] = vpn
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
