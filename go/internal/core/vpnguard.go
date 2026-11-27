@@ -115,6 +115,9 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 		g.vpnState, g.vpnWhy = "off", ""
 	case g.mode == "off":
 		g.vpnState, g.vpnWhy = "off", ""
+		if g.retry != nil {
+			g.retry.Stop() // отложенная проверка не должна вмешиваться после выключения
+		}
 	case g.fails >= 3:
 		g.vpnState, g.vpnWhy = "off", "три неудачные проверки — выключен до команды /vpn"
 	case g.vpnState == "failopen" && reason != "net-changed" && reason != "foreign-changed" && reason != "vpn-cmd":
@@ -202,6 +205,13 @@ func (g *tunGuard) applyVPN(ctx context.Context, vsb api.Singbox, reason string,
 		actx, cancel := context.WithTimeout(ctx, 40*time.Second)
 		err := vsb.Apply(actx, api.Effective{VPN: want})
 		cancel()
+		if err != nil && !want {
+			// выключение обязано сработать (например, прошлая операция, переподключение при смене адаптера, держала замок): ещё одна попытка
+			c.log.Error("vpn.stop-retry", "reason", reason, "err", err.Error())
+			actx, cancel = context.WithTimeout(ctx, 40*time.Second)
+			err = vsb.Apply(actx, api.Effective{VPN: false})
+			cancel()
+		}
 		if err != nil {
 			c.log.Error("vpn.apply-failed", "reason", reason, "err", err.Error())
 			if want {
