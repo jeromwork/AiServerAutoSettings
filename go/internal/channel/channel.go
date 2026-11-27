@@ -180,6 +180,7 @@ func (c *chn) set(state, path, reason string, up bool) {
 	c.mu.Lock()
 	if state == c.st.State && reason == c.st.Reason && path == c.st.Path && !up {
 		c.mu.Unlock()
+		c.log.Info("state-repeat", "state", state, "via", path, "reason", reason)
 		return
 	}
 	n := c.st.Session
@@ -250,7 +251,10 @@ func (c *chn) loop(ctx context.Context) {
 	fails := 0
 	first := true
 	sw := &sweep{failed: map[string]string{}, mismatch: map[string]bool{}}
+	round := 0
 	for ctx.Err() == nil {
+		round++
+		c.log.Info("attempt", "round", round, "fails", fails, "first", first)
 		c.set("connecting", "", c.takeNetReason(), false)
 		sctx, scancel := context.WithCancel(ctx)
 		c.mu.Lock()
@@ -262,9 +266,15 @@ func (c *chn) loop(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if err != nil {
+			c.log.Info("attempt-result", "round", round, "via", path, "ok", false, "err", err.Error())
+		} else {
+			c.log.Info("attempt-result", "round", round, "via", path, "ok", true, "err", "closed")
+		}
 		if c.consumeNetPending() { // сеть сменилась: старые отказы не в счёт, идём с начала списка без паузы
 			fails = 0
 			sw.reset()
+			c.log.Info("pause", "ms", 0, "why", "net-changed: новый круг без паузы")
 			select {
 			case <-c.kick:
 			default:
@@ -303,6 +313,7 @@ func (c *chn) loop(ctx context.Context) {
 			c.set("down", path, reason, false)
 			c.log.Info("path-next", "from", path, "to", next)
 			if c.selectPath(next) == nil {
+				c.log.Info("pause", "ms", 0, "why", "следующий путь по рангу без паузы")
 				continue // без паузы: идём дальше по рангу
 			}
 		} else if !wasUp && mism && all {
@@ -314,13 +325,16 @@ func (c *chn) loop(ctx context.Context) {
 		}
 		c.set("down", path, reason, false)
 		pause := retryDelay(fails) // связь была (fails=0) — минимальная пауза 0.5 с, чтобы не крутиться
+		c.log.Info("pause", "ms", pause.Milliseconds(), "fails", fails, "why", reason)
 		t := time.NewTimer(pause)
 		select {
 		case <-ctx.Done():
 			t.Stop()
 			return
 		case <-c.kick:
+			c.log.Info("pause-end", "by", "kick")
 		case <-t.C:
+			c.log.Info("pause-end", "by", "timer")
 		}
 		t.Stop()
 	}
@@ -363,6 +377,7 @@ func (c *chn) Underlay() {
 		return
 	}
 	c.mu.Unlock()
+	c.log.Info("underlay-changed", "session", st.Session, "state", st.State, "action", "net-changed")
 	c.NetChanged()
 }
 
@@ -530,12 +545,17 @@ func (c *chn) pickPath(ctx context.Context, first bool) (string, string) {
 		return "chan", c.sb.ChanAddr()
 	default:
 	}
+	c.log.Info("sb-wait", "timeout_s", int(sbWait.Seconds()))
+	t0 := time.Now()
 	select { // sing-box перезапускается (смена сети/падение): ждём его событие Ready, не опрашиваем
 	case <-c.sb.Ready():
+		c.log.Info("sb-ready", "waited_ms", time.Since(t0).Milliseconds())
 		return "chan", c.sb.ChanAddr()
 	case <-time.After(sbWait):
+		c.log.Warn("fallback-ssh-direct", "waited_ms", time.Since(t0).Milliseconds(), "why", "sing-box не стал Ready за отведённое время")
 		return "ssh-direct", direct
 	case <-ctx.Done():
+		c.log.Info("sb-wait-cancel", "waited_ms", time.Since(t0).Milliseconds())
 		return "", ""
 	}
 }
@@ -678,8 +698,10 @@ func (c *chn) session(ctx context.Context, first bool) (string, error) {
 	}
 	path = c.pathLabel(path)
 	c.set("connecting", path, "", false)
+	c.log.Info("dial", "via", path, "addr", addr)
 	cl, ac, err := c.dial(ctx, addr)
 	if err != nil {
+		c.log.Warn("dial-fail", "via", path, "addr", addr, "err", err.Error())
 		return path, err
 	}
 	sctx, stop := context.WithCancel(ctx)
@@ -747,9 +769,11 @@ func (c *chn) session(ctx context.Context, first bool) (string, error) {
 	select {
 	case err = <-upCh:
 		if err != nil {
+			c.log.Warn("handshake-fail", "via", path, "err", err.Error())
 			return path, err
 		}
 	case <-time.After(upTimeout):
+		c.log.Warn("handshake-fail", "via", path, "err", "timeout")
 		return path, errors.New("handshake: timeout")
 	case <-connLost:
 		return path, errors.New("handshake: connection lost")

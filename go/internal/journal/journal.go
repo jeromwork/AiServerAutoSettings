@@ -39,6 +39,8 @@ type Journal struct {
 	ring           []string
 	lastKey        *dedupKey
 	repeat         int
+	repeatFirst    string
+	forceSync      bool
 	streamJournals map[string]*Journal
 }
 
@@ -223,6 +225,10 @@ func (j *Journal) emitLocked(rec map[string]any) {
 		return
 	}
 	j.fileSize += int64(n)
+	if j.forceSync {
+		j.forceSync = false
+		_ = j.file.Sync() // редкие важные записи не должны пропадать при жёстком падении
+	}
 	if j.fileSize >= j.opts.MaxBytes {
 		j.rollLocked()
 	}
@@ -244,9 +250,11 @@ func (j *Journal) flushRepeatLocked() {
 			"ev":  j.lastKey.ev,
 			"data": map[string]any{
 				"repeated": j.repeat,
+				"first":    j.repeatFirst,
 			},
 		}
 		j.repeat = 0
+		j.repeatFirst = ""
 		j.emitLocked(repeatRec)
 	}
 }
@@ -275,13 +283,19 @@ func (j *Journal) logRecord(src, ev string, data any, why string) {
 		j.drops.Add(1)
 		return
 	}
-	if j.lastKey != nil && *j.lastKey == key {
+	// События канала и ошибки/предупреждения не агрегируются никогда: каждая попытка должна быть в журнале.
+	critical := src == "channel" || strings.HasPrefix(ev, "core: channel") || strings.Contains(dataJSON, `"level":"warn"`) || strings.Contains(dataJSON, `"level":"error"`)
+	if !critical && j.lastKey != nil && *j.lastKey == key {
+		if j.repeat == 0 {
+			j.repeatFirst = timeNowISO()
+		}
 		j.repeat++
 		return
 	}
 
 	j.flushRepeatLocked()
 	j.lastKey = &key
+	j.forceSync = critical
 
 	rec := map[string]any{
 		"ts":  timeNowISO(),
