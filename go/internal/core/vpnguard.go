@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"remoteagents/internal/api"
+	"remoteagents/internal/platform"
 	"remoteagents/internal/singbox"
 )
 
@@ -26,6 +27,7 @@ type tunGuard struct {
 	lanState    string // off | up | skipped-v2 | no-subnets | error
 	lanWhy      string
 	lastForeign string // последний чужой VPN, о котором писали в журнал
+	underlay    string // адаптер, через который реально идёт трафик к нашему серверу (поверх чего работает VPN)
 	lanOff      bool   // ЛВС выключена после падения до смены сети
 	retry       *time.Timer
 	exitBusy    atomic.Bool  // проверка выхода уже идёт
@@ -54,6 +56,9 @@ func (g *tunGuard) event(name string, kv ...any) {
 func (g *tunGuard) statusLocked() map[string]any {
 	st := map[string]any{"mode": g.mode, "state": g.vpnState, "reason": g.vpnWhy, "fails": g.fails,
 		"lan": map[string]any{"state": g.lanState, "reason": g.lanWhy}}
+	if g.underlay != "" {
+		st["underlay"] = g.underlay
+	}
 	if r, ok := g.exit.Load().(exitResult); ok {
 		st["exit"] = r
 	}
@@ -75,6 +80,20 @@ func hasIface(ifs []api.Iface, name string) bool {
 		}
 	}
 	return false
+}
+
+// vpnUnderlay — «нижний» адаптер VPN сейчас: куда ОС ведёт трафик к серверу (чужой VPN или физический адаптер).
+// Адрес сервера запоминается: DNS недоступен — берём прошлый. Узлов нет — прежнее поведение (PhysicalInterface).
+func (c *core) vpnUnderlay() string {
+	addr := singbox.VPNServerAddr(c.cfg)
+	c.underMu.Lock()
+	if addr == "" {
+		addr = c.underAddr
+	} else {
+		c.underAddr = addr
+	}
+	c.underMu.Unlock()
+	return platform.UnderlayInterface(addr)
 }
 
 // reconcile приводит процессы sing-box к желаемому состоянию; reason — событие-причина (в журнал).
@@ -101,19 +120,12 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 	case g.vpnState == "failopen" && reason != "net-changed" && reason != "foreign-changed" && reason != "vpn-cmd":
 		// остаёмся без TUN до смены сети или команды
 	default:
-		if fv := c.plat.ForeignVPN(); fv != "" {
-			g.vpnState, g.vpnWhy = "foreign", "работает другой VPN ("+fv+")"
-			if g.mode == "only" {
-				g.vpnWhy += " — отключите его, чтобы работал наш"
-			}
-			if fv != g.lastForeign {
-				g.event("vpn.skipped-foreign", "iface", fv, "mode", g.mode)
-			}
+		// чужой VPN не мешает: наш работает поверх него (трафик к серверу идёт по маршрутам ОС, см. vpnUnderlay)
+		if fv := c.plat.ForeignVPN(); fv != g.lastForeign {
+			g.event("vpn.over-foreign", "iface", fv, "mode", g.mode)
 			g.lastForeign = fv
-		} else {
-			g.lastForeign = ""
-			wantVPN = true
 		}
+		wantVPN = true
 	}
 
 	// ЛВС (в общем sing-box вместе с каналом)
@@ -212,6 +224,9 @@ func (g *tunGuard) applyVPN(ctx context.Context, vsb api.Singbox, reason string,
 func (g *tunGuard) finish(got api.Effective) {
 	if got.VPN {
 		g.vpnState, g.vpnWhy = "up", ""
+		g.underlay = g.c.vpnUnderlay()
+	} else {
+		g.underlay = ""
 	}
 	if got.LAN {
 		g.lanState, g.lanWhy = "up", ""

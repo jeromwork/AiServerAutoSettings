@@ -58,6 +58,32 @@ func resolveHost(host string) []string {
 	return addrs
 }
 
+// VPNServerAddr — "ip:443" первого узла vpn.nodes (по имени), чей адрес разрешился; "" — узлов нет/не резолвятся.
+// По нему определяется «нижний» адаптер (platform.UnderlayInterface): адрес исключён из нашего TUN.
+func VPNServerAddr(cfg *api.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	names := make([]string, 0, len(cfg.VPN.Nodes))
+	for n := range cfg.VPN.Nodes {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		o, err := decodeObj(cfg.VPN.Nodes[n])
+		if err != nil {
+			continue
+		}
+		h, _ := o["server"].(string)
+		for _, a := range resolveHost(h) {
+			if ip, err := netip.ParseAddr(a); err == nil && ip.Is4() {
+				return net.JoinHostPort(a, "443")
+			}
+		}
+	}
+	return ""
+}
+
 // vpnSel — мосты VPN: outbounds процесса, теги для urltest и хосты, которые не должны идти в наш TUN.
 type vpnSel struct {
 	outs   []m
@@ -114,7 +140,16 @@ func vpnSelect(cfg *api.Config) (vpnSel, error) {
 		if err != nil {
 			return sel, err
 		}
+		if h := cfg.Servers[0].Host; h != "" {
+			hosts[h] = true
+		}
 		for _, p := range paths {
+			// серверы всех путей (в т. ч. ssh/канал) — мимо нашего TUN, по маршрутам ОС (через чужой VPN, если он есть)
+			for _, o := range p.outs {
+				if h, _ := o["server"].(string); h != "" {
+					hosts[h] = true
+				}
+			}
 			bad := strings.HasSuffix(p.final, "-vpn") || seenFinal[p.final] || seenTag[p.final]
 			for _, o := range p.outs {
 				if t, _ := o["type"].(string); t == "ssh" || t == "direct" || t == "socks" {

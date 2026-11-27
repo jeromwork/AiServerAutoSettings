@@ -107,12 +107,12 @@ func (s *fvSb) Apply(_ context.Context, e api.Effective) error {
 func TestForeignVPNChangeReconcilesWithoutChannelReset(t *testing.T) {
 	plat := &fvPlat{fv: "HappTun"}
 	sb := &fvSb{}
-	c := &core{log: &fake.Logger{}, plat: plat, sb: sb, cfg: &api.Config{}}
+	c := &core{log: &fake.Logger{}, plat: plat, vsb: sb, cfg: &api.Config{}}
 	c.tun = &tunGuard{c: c, mode: "auto", vpnState: "off", lanState: "off", inst: "testinst"}
 	ctx := context.Background()
 	c.tun.reconcile(ctx, "start")
-	if sb.eff.VPN || c.tun.vpnState != "foreign" {
-		t.Fatalf("чужой VPN есть, наш не должен подниматься: %+v %s", sb.eff, c.tun.vpnState)
+	if !sb.eff.VPN || c.tun.vpnState != "up" {
+		t.Fatalf("наш VPN должен подниматься поверх чужого: %+v %s", sb.eff, c.tun.vpnState)
 	}
 	var chReset int
 	n := &netReact{log: c.log, sig: func() string { return "wifi|1" }, chUp: func() bool { return true },
@@ -135,8 +135,8 @@ func TestForeignVPNChangeReconcilesWithoutChannelReset(t *testing.T) {
 		t.Fatal("появление чужого VPN не замечено")
 	}
 	c.tun.reconcile(ctx, "foreign-changed")
-	if sb.eff.VPN || c.tun.vpnState != "foreign" {
-		t.Fatalf("наш VPN не снят: %+v %s", sb.eff, c.tun.vpnState)
+	if !sb.eff.VPN || c.tun.vpnState != "up" {
+		t.Fatalf("наш VPN должен остаться поверх чужого: %+v %s", sb.eff, c.tun.vpnState)
 	}
 	if chReset != 0 {
 		t.Fatalf("канал сброшен %d раз", chReset)
@@ -145,7 +145,7 @@ func TestForeignVPNChangeReconcilesWithoutChannelReset(t *testing.T) {
 
 func newVerifyCore(plat *fvPlat) (*core, *fvSb) {
 	sb := &fvSb{}
-	c := &core{log: &fake.Logger{}, plat: plat, sb: sb, cfg: &api.Config{}}
+	c := &core{log: &fake.Logger{}, plat: plat, vsb: sb, cfg: &api.Config{}}
 	c.tun = &tunGuard{c: c, mode: "auto", vpnState: "off", lanState: "off", inst: "testinst"}
 	return c, sb
 }
@@ -162,7 +162,7 @@ func TestApplyOkButNoAdapterIsFail(t *testing.T) {
 // Apply вернул nil, но sing-box фактически без TUN (Effective пуст) — не up.
 func TestApplyFellBackWithoutTunIsFail(t *testing.T) {
 	c, _ := newVerifyCore(&fvPlat{})
-	c.sb = &fellBackSb{}
+	c.vsb = &fellBackSb{}
 	c.tun.reconcile(context.Background(), "start")
 	if c.tun.vpnState == "up" || c.tun.fails != 1 {
 		t.Fatalf("state=%s fails=%d", c.tun.vpnState, c.tun.fails)

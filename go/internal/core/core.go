@@ -58,13 +58,15 @@ type quitReq struct {
 }
 
 type core struct {
-	f     Flags
-	p     api.Paths
-	log   api.Logger
-	jr    *journal.Journal
-	plat  api.Platform
-	clean *cleanup.Cleaner
-	start time.Time
+	underMu   sync.Mutex // underAddr: последний разрешённый адрес сервера VPN для определения нижнего адаптера
+	underAddr string
+	f         Flags
+	p         api.Paths
+	log       api.Logger
+	jr        *journal.Journal
+	plat      api.Platform
+	clean     *cleanup.Cleaner
+	start     time.Time
 
 	cfg *api.Config
 	gen string
@@ -389,7 +391,7 @@ func (c *core) startNetwork(ctx context.Context) {
 	// Запускается только сторожем (Apply VPN:true); здесь — подготовка (бинарь).
 	if c.cfg != nil && !f.Mode.NoSingbox && f.Mode.AllowsTun() {
 		vsb, e := singbox.New(c.cfg, c.p, log, c.clean, c.pr, singbox.Options{
-			Role: singbox.RoleVPN, Mode: f.Mode, Instance: c.clean.Instance(), DefaultIface: platform.PhysicalInterface,
+			Role: singbox.RoleVPN, Mode: f.Mode, Instance: c.clean.Instance(), DefaultIface: c.vpnUnderlay,
 			OnTunCrash: func(e api.Effective) { c.tun.onTunCrash(ctx, e) },
 		})
 		if e != nil {
