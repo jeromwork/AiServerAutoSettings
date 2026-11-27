@@ -12,12 +12,11 @@ import (
 	"remoteagents/internal/api"
 	"remoteagents/internal/config"
 	"remoteagents/internal/core"
-	"remoteagents/internal/supervise"
 )
 
 func dispatch(ctx context.Context, args []string) int {
 	if len(args) == 0 {
-		return launch(ctx)
+		return launch(ctx, nil)
 	}
 	switch args[0] {
 	case "version":
@@ -50,13 +49,16 @@ func dispatch(ctx context.Context, args []string) int {
 		}
 		return core.Run(ctx, withBuildInfo(f))
 
+	case "launch":
+		return launch(ctx, args[1:])
+
 	case "supervise":
 		f, err := parseRunFlags(args[1:], true)
 		if err != nil {
 			return 2
 		}
 		p := api.NewPaths(f.Home)
-		return supervise.Run(ctx, p, nil, nil, os.Args[0], f.Mode, args[1:])
+		return runSupervised(ctx, p, f.Mode, args[1:])
 
 	case "dev":
 		if len(args) < 2 {

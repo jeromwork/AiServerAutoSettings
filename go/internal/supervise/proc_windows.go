@@ -5,6 +5,7 @@ package supervise
 import (
 	"golang.org/x/sys/windows"
 	"os/exec"
+	"remoteagents/internal/wincon"
 	"syscall"
 	"time"
 	"unsafe"
@@ -12,12 +13,12 @@ import (
 
 func setSysProcAttr(cmd *exec.Cmd) {
 	// Attach the Job before any user code can spawn children or exit.
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_SUSPENDED}
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_SUSPENDED, HideWindow: true}
 }
 
 func stopProcessGroup(cmd *exec.Cmd) {
 	if cmd != nil && cmd.Process != nil {
-		_ = windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(cmd.Process.Pid))
+		_ = wincon.SendBreak(uint32(cmd.Process.Pid))
 	}
 }
 

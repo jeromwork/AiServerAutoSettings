@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"remoteagents/internal/wincon"
 	"strconv"
 	"unsafe"
 
@@ -118,10 +119,11 @@ func killWindowsProcess(pid uint32) error {
 	}
 	defer windows.CloseHandle(h)
 
-	_ = windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, pid)
+	_ = wincon.SendBreak(pid)
 	state, _ := windows.WaitForSingleObject(h, 300)
 	if state != windows.WAIT_OBJECT_0 {
 		cmd := exec.Command("taskkill.exe", "/F", "/T", "/PID", strconv.FormatUint(uint64(pid), 10))
+		cmd.SysProcAttr = wincon.HiddenAttr()
 		_ = cmd.Run()
 		state, _ = windows.WaitForSingleObject(h, 300)
 		if state != windows.WAIT_OBJECT_0 {
