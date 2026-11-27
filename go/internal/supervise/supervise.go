@@ -372,6 +372,10 @@ func (t *commandTree) kill(cmd *exec.Cmd) {
 func runCleanup(ctx context.Context, p api.Paths, log api.Logger, reason string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
+	// pf-якорь галочки (macOS): смерть/убийство/выход ядра никогда не оставляют блок (ГЛАВНОЕ ТРЕБОВАНИЕ: выключение всегда работает)
+	if err := platform.ReleasePF(ctx, p.State); err != nil {
+		log.Warn("supervise: pf-release", "err", err.Error())
+	}
 	cl, err := cleanup.New(p, log, platform.Current())
 	if err == nil && cl != nil {
 		if issues := cl.Run(ctx, reason); len(issues) != 0 {

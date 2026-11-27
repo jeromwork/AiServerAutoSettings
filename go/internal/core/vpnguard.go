@@ -32,6 +32,8 @@ type tunGuard struct {
 	split       atomic.Int32 // длина нарезки route_address VPN (этап 1b), 0 — стандартные 0/1
 	bypass      string       // адаптер, куда уходят пробы мимо нашего TUN после нарезки ("" — нет)
 	blocked     atomic.Bool  // этап 3a: VPN перекрывает интернет (vpn.lockExit + сбой/непроверенный выход); читается при сборке конфига VPN
+	pfh         pfHolder     // этап 4: pf-якорь галочки (macOS)
+	pfWhy       string       // почему pf-блок не действует (— действует или не нужен)
 	lanOff      bool         // ЛВС выключена после падения до смены сети
 	retry       *time.Timer
 	exitBusy    atomic.Bool  // проверка выхода уже идёт
@@ -75,6 +77,9 @@ func (g *tunGuard) statusLocked() map[string]any {
 	if g.lock() {
 		st["lock"] = true
 		st["blocked"] = g.blocked.Load()
+		if g.pfWhy != "" {
+			st["pfWarn"] = g.pfWhy
+		}
 	}
 	return st
 }
@@ -133,6 +138,7 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 	case g.mode == "off":
 		g.vpnState, g.vpnWhy = "off", ""
 		g.blocked.Store(false) // выключенный VPN ничего не блокирует
+		g.releasePF(ctx, "mode-off")
 		if g.retry != nil {
 			g.retry.Stop() // отложенная проверка не должна вмешиваться после выключения
 		}
@@ -192,6 +198,7 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 		got.VPN, vpnBad = g.applyVPN(ctx, vsb, reason, wantVPN)
 	}
 	g.finish(got)
+	g.syncPF(ctx, wantVPN, got.VPN)
 	if vpnBad != "" {
 		if g.lock() {
 			g.blockLocked(ctx, "защита не действует: процесс VPN не запускается ("+vpnBad+")", false)
@@ -462,6 +469,9 @@ func (g *tunGuard) onTunCrash(ctx context.Context, e api.Effective) {
 
 // setMode — команда /vpn (в конфиг не пишется): сброс счётчика и пересчёт.
 func (g *tunGuard) setMode(ctx context.Context, mode string) {
+	if mode == "off" {
+		g.releasePF(ctx, "vpn-cmd-off") // первым делом и без mu: выключение не ждёт зависшую операцию
+	}
 	g.mu.Lock()
 	g.mode, g.fails, g.vpnState, g.vpnWhy = mode, 0, "off", ""
 	if mode == "off" {

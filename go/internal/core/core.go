@@ -353,6 +353,7 @@ func (c *core) startNetwork(ctx context.Context) {
 	f, log := c.f, c.log
 	var err error
 	c.tun = &tunGuard{c: c, mode: "off", vpnState: "off", lanState: "off"}
+	c.tun.releasePF(ctx, "start") // этап 4: остатки pf-якоря прошлого запуска (macOS) не должны переживать старт программы
 	if c.cfg != nil {
 		c.tun.mode = c.cfg.VPN.Mode
 		// Сторож принудительно выключил VPN (зависшее ядро): на этот запуск VPN не включаем, пока владелец не включит снова.
@@ -688,6 +689,9 @@ func (c *core) stopNetwork(step func(name string, err error)) {
 	}
 	if c.sh != nil {
 		c.bounded("shell", stopStepTimeout, func() { done("shell", c.sh.KillAll()) })
+	}
+	if c.tun != nil {
+		c.tun.releasePF(context.Background(), "exit") // выход снимает pf-блок галочки
 	}
 	if vsb := c.getVpnSb(); !isNil(vsb) {
 		ctx, cancel := stopCtx()
