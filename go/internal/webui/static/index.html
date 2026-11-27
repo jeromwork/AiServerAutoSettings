@@ -37,6 +37,7 @@ pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; word-break: brea
 <div class="box">
   <button id="btn-update" type="button">Обновить</button>
   <button id="btn-rollback" type="button">Вернуть прежнюю версию</button>
+  <button id="btn-pause" type="button">Пауза</button>
   <button id="btn-exit" type="button" class="danger">Выход</button>
   <div id="umsg"></div>
   <div id="upd-st"></div>
@@ -157,6 +158,8 @@ function show(s) {
   document.getElementById("cfg-info").textContent = noCfg ? "Конфиг не задан — вставьте его ниже и нажмите «Применить»." : "";
   if (noCfg) document.getElementById("cform").style.display = "";
 
+  var pz = s.paused === true;
+  document.getElementById("btn-pause").textContent = pz ? "Продолжить" : "Пауза";
   var ctl = s.control !== false;
   document.getElementById("ctl").textContent = ctl ? "разрешено" : "запрещено";
   document.getElementById("btn-control").textContent = ctl ? "Запретить" : "Разрешить";
@@ -215,11 +218,26 @@ document.getElementById("btn-rollback").onclick = function() {
   });
 };
 
-var USTAGE = {checking: "Проверяю", downloading: "Скачиваю", verifying: "Проверяю кандидата", restarting: "Запускаю", ready: "Готово", uptodate: "Обновлений нет", rolledback: "Откат", error: "Ошибка"};
+var USTAGE = {checking: "Проверяю", downloading: "Скачиваю", verifying: "Проверяю кандидата", restarting: "Запускаю", ready: "Готово", uptodate: "Обновлений нет", rolledback: "Откат", warn: "Внимание", error: "Ошибка"};
 function onUpdate(a) {
   var el = document.getElementById("upd-st");
   el.className = (a.stage === "error" || a.stage === "rolledback") ? "err" : (a.stage === "ready" || a.stage === "uptodate" ? "ok" : "");
   el.textContent = (a.at || "") + " " + (USTAGE[a.stage] || a.stage) + ": " + (a.text || "");
+}
+
+document.getElementById("btn-pause").onclick = function() {
+  var b = document.getElementById("btn-pause");
+  var pz = S && S.paused === true;
+  b.disabled = true;
+  post("/api/pause", { on: pz ? "0" : "1" }).then(function(r) {
+    if (!r.ok) document.getElementById("umsg").textContent = r.error || "Ошибка паузы";
+  }).then(function() { b.disabled = false; }, function() { b.disabled = false; });
+};
+function onPause(a) {
+  var el = document.getElementById("umsg");
+  el.className = "";
+  var TX = {start: "начинаю", step: a.step || "шаг", done: "готово", error: "ошибка"};
+  el.textContent = (a.at || "") + " " + (a.action === "resume" ? "Продолжение" : "Пауза") + ": " + (TX[a.stage] || a.stage);
 }
 
 document.getElementById("btn-exit").onclick = function() {
@@ -425,6 +443,7 @@ function listen(kind, fn) {
 var es = new EventSource("/api/events?t=" + encodeURIComponent(T));
 listen("status", show);
 listen("apply", onApply);
+listen("pause", onPause);
 listen("update", onUpdate);
 listen("channel", onChannel);
 listen("singbox", onSingbox);

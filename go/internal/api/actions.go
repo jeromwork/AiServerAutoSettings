@@ -32,6 +32,8 @@ type Actions interface {
 	Restart(ctx context.Context) error
 	Rollback(ctx context.Context, reason string) error
 	Exit(ctx context.Context) error
+	Pause(ctx context.Context) error  // остановить всё сетевое, программа остаётся
+	Resume(ctx context.Context) error // поднять сеть обратно по текущему конфигу
 }
 
 // AgentDeps. Fwd — ленивый: агент создаётся раньше forward (порядок — блок C, C4); nil → /expose 503 "forward-not-ready".

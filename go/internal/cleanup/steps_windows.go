@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"remoteagents/internal/wincon"
 	"strconv"
 	"strings"
 	"time"
@@ -129,7 +130,7 @@ func (s *windowsSteps) removeProcess(ctx context.Context, t api.Trace) error {
 	pid, _ := strconv.ParseUint(t.Data["pid"], 10, 32)
 	// A console-less caller may be unable to send CTRL_BREAK. In that case
 	// continue to the bounded hard-stop path, rather than assuming success.
-	_ = windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(pid))
+	_ = wincon.SendBreak(uint32(pid))
 	timer := time.NewTimer(500 * time.Millisecond)
 	defer timer.Stop()
 	select {
@@ -144,7 +145,9 @@ func (s *windowsSteps) removeProcess(ctx context.Context, t api.Trace) error {
 		return err
 	}
 	// taskkill also terminates descendants; never select processes by name.
-	err = exec.CommandContext(ctx, "taskkill.exe", "/F", "/T", "/PID", strconv.FormatUint(pid, 10)).Run()
+	tk := exec.CommandContext(ctx, "taskkill.exe", "/F", "/T", "/PID", strconv.FormatUint(pid, 10))
+	tk.SysProcAttr = wincon.HiddenAttr()
+	err = tk.Run()
 	if err != nil {
 		state, queryErr := windows.WaitForSingleObject(h, 0)
 		if queryErr == nil && state == windows.WAIT_OBJECT_0 {
@@ -166,6 +169,7 @@ func windowsPS(ctx context.Context, script string) (string, error) {
 	}
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.StdEncoding.EncodeToString(buf))
 	cmd.WaitDelay = 100 * time.Millisecond
+	cmd.SysProcAttr = wincon.HiddenAttr()
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("cleanup: powershell: %w", err)

@@ -22,6 +22,11 @@ var releaseRepo = ""
 var testFault = ""
 
 func main() {
+	cmdName := ""
+	if len(os.Args) > 1 {
+		cmdName = os.Args[1]
+	}
+	prepareConsole(cmdName)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := dispatch(ctx, os.Args[1:])
 	stop()

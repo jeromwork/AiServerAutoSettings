@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -45,6 +46,9 @@ type updater struct {
 	keys     []ssh.PublicKey
 	os, arch string
 }
+
+// ErrConfigRejected: кандидат не принял текущий конфиг (старый выпуск без config check --current и т.п.).
+var ErrConfigRejected = errors.New("config rejected by candidate")
 
 func fail(code, reason string) error { return fmt.Errorf("update: %s: %s", code, reason) }
 

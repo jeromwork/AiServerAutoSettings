@@ -460,6 +460,9 @@ func (s *slots) alignConfigLocked(ctx context.Context, log api.Logger) {
 // OnUI вызывается, когда ядро сообщило адрес страницы (сообщение "ui"); nil — не нужно.
 var OnUI func(url string)
 
+// OnLocked вызывается один раз, когда сторож взял блокировку единственного экземпляра (значок в трее и т. п.).
+var OnLocked func()
+
 func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self string, mode api.Mode, args []string) (code int) {
 	if log == nil {
 		j, err := journal.New(p, api.StreamSup, journal.Options{MaxBytes: 5 << 20, Keep: 4})
@@ -491,6 +494,10 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		return 1
 	}
 	defer unlock()
+	if OnLocked != nil {
+		OnLocked()
+	}
+	_ = os.Remove(filepath.Join(p.State, api.PauseFile)) // новый запуск программы: пауза снята
 
 	// Любой выход сторожа (в том числе остановка по boot-failures и паника) —
 	// сразу уборка: на ПК не остаются процессы, порты, lock/url-файлы.

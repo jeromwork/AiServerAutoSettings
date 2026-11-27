@@ -89,8 +89,11 @@ build() {
       tags=singbox_embed
     fi
     printf 'Building %s (%s)\n' "$target" "$version"
+    # Windows: GUI-подсистема (-H windowsgui) — ни сторож, ни ядро не открывают окно консоли.
+    target_ldflags=$ldflags
+    [[ $os != windows ]] || target_ldflags+=" -H windowsgui"
     GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build ${tags:+-tags "$tags"} \
-      -mod=readonly -trimpath -ldflags "$ldflags" -o "$work/$name" ./cmd/remoteagents
+      -mod=readonly -trimpath -ldflags "$target_ldflags" -o "$work/$name" ./cmd/remoteagents
     if [[ -n $resource ]]; then
       rm -f -- "$resource"
       resource=''

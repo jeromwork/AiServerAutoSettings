@@ -15,6 +15,7 @@ import (
 	"remoteagents/internal/api"
 	"remoteagents/internal/config"
 	"remoteagents/internal/supervise"
+	"remoteagents/internal/update"
 )
 
 var _ api.Actions = (*core)(nil)
@@ -44,6 +45,7 @@ func (c *core) Status() map[string]any {
 		"uptime":      int(time.Since(c.start).Seconds()),
 		"mode":        map[string]bool{"safe": c.f.Mode.Safe, "noTun": c.f.Mode.NoTun, "noChannel": c.f.Mode.NoChannel, "noSingbox": c.f.Mode.NoSingbox},
 		"control":     c.control.Load(),
+		"paused":      c.paused.Load(),
 		"config":      c.cfg != nil,
 		"gen":         c.gen,
 		"prevVersion": supervise.ReadInfo(c.p).Previous,
@@ -59,6 +61,9 @@ func (c *core) Status() map[string]any {
 			st["binaryError"] = sanitize(e)
 		}
 		m["singbox"] = st
+	}
+	if c.tun != nil {
+		m["vpn"] = c.tun.status()
 	}
 	if fw := c.getFw(); !isNil(fw) {
 		m["forwards"] = fw.List()
@@ -101,11 +106,19 @@ func (c *core) updateNow(ctx context.Context, manual bool) (err error) {
 	}
 	defer unlock()
 	defer func() {
+		if errors.Is(err, update.ErrConfigRejected) {
+			c.log.Warn("core: update-config-rejected", "err", err.Error())
+			c.publishUpdate("warn", "Новая версия не подходит к вашему конфигу, остаёмся на текущей.")
+			err = nil
+			return
+		}
 		if err != nil && !errors.Is(err, api.ErrBusy) {
 			c.publishUpdate("error", "Обновление не выполнено: "+sanitize(err.Error()))
 		}
 	}()
-	if manual {
+	if manual && c.isDevBuild() {
+		c.publishUpdate("checking", "Внимание: это dev-сборка ("+c.f.Version+"), обновляю по вашей команде. Проверяю наличие новой версии...")
+	} else if manual {
 		c.publishUpdate("checking", "Проверяю наличие новой версии и подпись выпуска...")
 	}
 	r, err := c.UpdateCheck(ctx)
@@ -223,12 +236,16 @@ func (c *core) SwitchPath(name string) error {
 	return sb.Clash(ctx, "PUT", "/proxies/chan", map[string]string{"name": name}, nil)
 }
 
-// VPN: до N1b (vpnguard) — ErrNotSupported; в --safe — ErrSafe.
+// VPN: сменить режим на время работы (в конфиг не пишется); в --safe — ErrSafe.
 func (c *core) VPN(mode string) error {
 	if c.f.Mode.Safe {
 		return api.ErrSafe
 	}
-	return api.ErrNotSupported
+	if c.tun == nil || c.cfg == nil || isNil(c.getSb()) {
+		return api.ErrNotSupported
+	}
+	c.tun.setMode(context.Background(), mode)
+	return nil
 }
 
 func (c *core) HappierURL() (string, error) {

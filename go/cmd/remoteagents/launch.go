@@ -15,14 +15,20 @@ import (
 	"time"
 
 	"remoteagents/internal/api"
-	"remoteagents/internal/core"
 	"remoteagents/internal/platform"
 	"remoteagents/internal/supervise"
 )
 
-// launch — запуск без аргументов (двойной щелчок): сторож + ядро, home по умолчанию,
-// пока идёт разработка — режим --safe. Браузер открывается по сообщению ядра «ui».
-func launch(ctx context.Context) (code int) {
+// launch — запуск без аргументов (двойной щелчок): то же, что ярлык `supervise --home <по умолчанию>`.
+// Режим --safe — только по явному флагу `launch --safe` или если конфига ещё нет (применять нечего).
+// Браузер открывается по сообщению ядра «ui».
+func launch(ctx context.Context, args []string) (code int) {
+	safeFlag := false
+	for _, a := range args {
+		if a == "--safe" || a == "-safe" {
+			safeFlag = true
+		}
+	}
 	plat := platform.Current()
 	home := os.Getenv("REMOTEAGENTS_HOME")
 	if home == "" {
@@ -56,9 +62,12 @@ func launch(ctx context.Context) (code int) {
 		}
 	}
 	var once sync.Once
+	prevUI := supervise.OnUI
 	supervise.OnUI = func(url string) {
+		if prevUI != nil {
+			prevUI(url)
+		}
 		once.Do(func() {
-			fmt.Printf("Запущено, страница: %s\n", url)
 			if !hasConfig(p) {
 				fmt.Println("Конфиг не задан — вставьте его на странице")
 			}
@@ -67,18 +76,14 @@ func launch(ctx context.Context) (code int) {
 			}
 		})
 	}
-	fmt.Println("Запускаю RemoteAgents (режим --safe)...")
-	code = supervise.Run(ctx, p, nil, nil, os.Args[0], api.Mode{Safe: true}, []string{"--home", home, "--reset"})
-	if code == api.SupExitRunning {
-		b, err := os.ReadFile(filepath.Join(p.State, core.UIURLFile))
-		if err == nil {
-			url := strings.TrimSpace(string(b))
-			fmt.Printf("Уже запущено, страница: %s\n", url)
-			_ = openURL(url)
-			return 0
-		}
-		fmt.Fprintln(os.Stderr, "Уже запущено, но адрес страницы неизвестен.")
+	mode := api.Mode{Safe: safeFlag || !hasConfig(p)}
+	runArgs := []string{"--home", home, "--reset"}
+	if mode.Safe {
+		fmt.Println("Запускаю RemoteAgents (режим --safe)...")
+	} else {
+		fmt.Println("Запускаю RemoteAgents...")
 	}
+	code = runSupervised(ctx, p, mode, runArgs)
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return code
 	}

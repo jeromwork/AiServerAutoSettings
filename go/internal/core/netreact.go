@@ -129,6 +129,8 @@ func (c *core) watchNet(ctx context.Context) {
 	}
 	n.last, n.inited = n.sig(), true
 	for range debounce(ctx, platform.WatchNet(ctx), netDebounce) {
-		n.onChange(ctx)
+		if n.onChange(ctx) && c.tun != nil {
+			c.tun.reconcile(ctx, "net-changed")
+		}
 	}
 }
