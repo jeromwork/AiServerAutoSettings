@@ -12,8 +12,19 @@ func ForeignVPN() string {
 	return ni.Name
 }
 
-func outIface() *net.Interface {
-	c, err := net.Dial("udp4", "1.1.1.1:53")
+// ExitIface — имя интерфейса, через который ОС ведёт трафик к addr ("ip:port"); "" — не определён.
+// Нужен проверке туннеля: адрес не из РФ и не из исключений должен выходить через наш TUN-адаптер.
+func ExitIface(addr string) string {
+	if ni := outIfaceTo(addr); ni != nil {
+		return ni.Name
+	}
+	return ""
+}
+
+func outIface() *net.Interface { return outIfaceTo("1.1.1.1:53") }
+
+func outIfaceTo(addr string) *net.Interface {
+	c, err := net.Dial("udp4", addr)
 	if err != nil {
 		return nil
 	}

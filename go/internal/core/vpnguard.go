@@ -28,6 +28,7 @@ type tunGuard struct {
 	lastForeign string // последний чужой VPN, о котором писали в журнал
 	lanOff      bool   // ЛВС выключена после падения до смены сети
 	retry       *time.Timer
+	inst        string       // тесты: экземпляр вместо c.clean.Instance()
 	snap        atomic.Value // map[string]any, последний снимок для Status
 }
 
@@ -51,6 +52,14 @@ func (g *tunGuard) event(name string, kv ...any) {
 func (g *tunGuard) statusLocked() map[string]any {
 	return map[string]any{"mode": g.mode, "state": g.vpnState, "reason": g.vpnWhy, "fails": g.fails,
 		"lan": map[string]any{"state": g.lanState, "reason": g.lanWhy}}
+}
+
+func (g *tunGuard) adapter(part string) string {
+	inst := g.inst
+	if inst == "" && g.c.clean != nil {
+		inst = g.c.clean.Instance()
+	}
+	return singbox.AdapterName(inst, part)
 }
 
 func hasIface(ifs []api.Iface, name string) bool {
@@ -134,7 +143,24 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 		}
 		return
 	}
-	g.finish(want)
+	// Факт, а не запрошенное: Apply мог молча откатиться без TUN (запуск с TUN не удался → apply без TUN → nil).
+	got := sb.Effective()
+	ifs, _ = c.plat.Interfaces()
+	var bad []string
+	if want.LAN && (!got.LAN || !hasIface(ifs, g.adapter("lan"))) {
+		g.lanOff, g.lanState, g.lanWhy = true, "error", "TUN ЛВС не поднялся (адаптера "+g.adapter("lan")+" нет)"
+		got.LAN = false
+		c.log.Error("lan.tun-missing", "reason", reason)
+	}
+	if want.VPN && (!got.VPN || !hasIface(ifs, g.adapter("vpn"))) {
+		bad = append(bad, "TUN VPN не поднялся (адаптера "+g.adapter("vpn")+" нет)")
+		got.VPN = false
+	}
+	g.finish(got)
+	if len(bad) > 0 {
+		g.failLocked(ctx, bad[0])
+		return
+	}
 	if want.VPN {
 		go g.probe(ctx)
 	}
@@ -153,8 +179,27 @@ func (g *tunGuard) finish(got api.Effective) {
 	g.event("vpn.state", "vpn", g.vpnState, "lan", g.lanState)
 }
 
+// tunExitOK — трафик к адресу пробы действительно выходит через наш vpn-адаптер.
+func (g *tunGuard) tunExitOK() (string, bool) {
+	out := g.c.plat.ExitIface(singbox.VPNProbeAddr)
+	return out, out != "" && strings.EqualFold(out, g.adapter("vpn"))
+}
+
 // probe — одна проверка туннеля (после включения): запрос к адресу не из РФ идёт через TUN → vpn-out.
 func (g *tunGuard) probe(ctx context.Context) {
+	// Сначала факт маршрута: HTTP-проба мимо туннеля (провайдерский IP) ничего не доказывает.
+	if out, ok := g.tunExitOK(); !ok {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.vpnState == "foreign" || g.vpnState == "off" || g.mode == "off" {
+			return
+		}
+		if out == "" {
+			out = "не определён"
+		}
+		g.failLocked(ctx, "трафик к пробе идёт не через наш TUN (выход: "+out+")")
+		return
+	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(cctx, http.MethodGet, singbox.VPNProbeURL, nil)

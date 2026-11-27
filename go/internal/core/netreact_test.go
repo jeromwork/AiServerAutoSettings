@@ -69,11 +69,25 @@ func TestNetReactRebuildsOnlyOnRealChangeOrDownChannel(t *testing.T) {
 
 type fvPlat struct {
 	api.Platform
-	fv string
+	fv        string
+	noAdapter bool
+	exit      string
 }
 
-func (p *fvPlat) Interfaces() ([]api.Iface, error) { return []api.Iface{wifi("192.168.1.5")}, nil }
-func (p *fvPlat) ForeignVPN() string               { return p.fv }
+func (p *fvPlat) Interfaces() ([]api.Iface, error) {
+	ifs := []api.Iface{wifi("192.168.1.5")}
+	if !p.noAdapter {
+		ifs = append(ifs, api.Iface{Name: "ra3-testinst-vpn", Up: true})
+	}
+	return ifs, nil
+}
+func (p *fvPlat) ForeignVPN() string { return p.fv }
+func (p *fvPlat) ExitIface(string) string {
+	if p.exit != "" {
+		return p.exit
+	}
+	return "ra3-testinst-vpn"
+}
 
 type fvSb struct {
 	api.Singbox
@@ -94,7 +108,7 @@ func TestForeignVPNChangeReconcilesWithoutChannelReset(t *testing.T) {
 	plat := &fvPlat{fv: "HappTun"}
 	sb := &fvSb{}
 	c := &core{log: &fake.Logger{}, plat: plat, sb: sb, cfg: &api.Config{}}
-	c.tun = &tunGuard{c: c, mode: "auto", vpnState: "off", lanState: "off"}
+	c.tun = &tunGuard{c: c, mode: "auto", vpnState: "off", lanState: "off", inst: "testinst"}
 	ctx := context.Background()
 	c.tun.reconcile(ctx, "start")
 	if sb.eff.VPN || c.tun.vpnState != "foreign" {
@@ -126,5 +140,45 @@ func TestForeignVPNChangeReconcilesWithoutChannelReset(t *testing.T) {
 	}
 	if chReset != 0 {
 		t.Fatalf("канал сброшен %d раз", chReset)
+	}
+}
+
+func newVerifyCore(plat *fvPlat) (*core, *fvSb) {
+	sb := &fvSb{}
+	c := &core{log: &fake.Logger{}, plat: plat, sb: sb, cfg: &api.Config{}}
+	c.tun = &tunGuard{c: c, mode: "auto", vpnState: "off", lanState: "off", inst: "testinst"}
+	return c, sb
+}
+
+// Apply «успешен», а адаптера нет (sing-box откатился без TUN) — это не up, а vpn.fail.
+func TestApplyOkButNoAdapterIsFail(t *testing.T) {
+	c, sb := newVerifyCore(&fvPlat{noAdapter: true})
+	c.tun.reconcile(context.Background(), "start")
+	if sb.applied != 1 || c.tun.vpnState == "up" || c.tun.fails != 1 || c.tun.vpnState != "error" {
+		t.Fatalf("state=%s fails=%d why=%q", c.tun.vpnState, c.tun.fails, c.tun.vpnWhy)
+	}
+}
+
+// Apply вернул nil, но sing-box фактически без TUN (Effective пуст) — не up.
+func TestApplyFellBackWithoutTunIsFail(t *testing.T) {
+	c, _ := newVerifyCore(&fvPlat{})
+	c.sb = &fellBackSb{}
+	c.tun.reconcile(context.Background(), "start")
+	if c.tun.vpnState == "up" || c.tun.fails != 1 {
+		t.Fatalf("state=%s fails=%d", c.tun.vpnState, c.tun.fails)
+	}
+}
+
+type fellBackSb struct{ fvSb }
+
+func (s *fellBackSb) Apply(context.Context, api.Effective) error { return nil }
+
+// Интерфейс выхода пробы не наш — проба неудачна, HTTP не нужен.
+func TestProbeFailsWhenExitIfaceNotOurs(t *testing.T) {
+	c, _ := newVerifyCore(&fvPlat{exit: "Ethernet"})
+	c.tun.vpnState = "up"
+	c.tun.probe(context.Background())
+	if c.tun.fails != 1 || c.tun.vpnState != "error" {
+		t.Fatalf("state=%s fails=%d why=%q", c.tun.vpnState, c.tun.fails, c.tun.vpnWhy)
 	}
 }
