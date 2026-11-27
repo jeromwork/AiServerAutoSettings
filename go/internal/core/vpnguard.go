@@ -19,15 +19,16 @@ type tunGuard struct {
 	c  *core
 	mu sync.Mutex // одна операция за раз
 
-	mode     string // текущий режим VPN (конфиг или /vpn)
-	fails    int
-	vpnState string // off | up | failopen | foreign | error
-	vpnWhy   string
-	lanState string // off | up | skipped-v2 | no-subnets | error
-	lanWhy   string
-	lanOff   bool // ЛВС выключена после падения до смены сети
-	retry    *time.Timer
-	snap     atomic.Value // map[string]any, последний снимок для Status
+	mode        string // текущий режим VPN (конфиг или /vpn)
+	fails       int
+	vpnState    string // off | up | failopen | foreign | error
+	vpnWhy      string
+	lanState    string // off | up | skipped-v2 | no-subnets | error
+	lanWhy      string
+	lastForeign string // последний чужой VPN, о котором писали в журнал
+	lanOff      bool   // ЛВС выключена после падения до смены сети
+	retry       *time.Timer
+	snap        atomic.Value // map[string]any, последний снимок для Status
 }
 
 // status читает снимок без mu: Status() вызывается из event() под mu.
@@ -50,22 +51,6 @@ func (g *tunGuard) event(name string, kv ...any) {
 func (g *tunGuard) statusLocked() map[string]any {
 	return map[string]any{"mode": g.mode, "state": g.vpnState, "reason": g.vpnWhy, "fails": g.fails,
 		"lan": map[string]any{"state": g.lanState, "reason": g.lanWhy}}
-}
-
-// foreignVPN — имя чужого VPN-адаптера (Happ, WireGuard и т.п.); наши и Tailscale/Hyper-V не считаются.
-func foreignVPN(ifs []api.Iface) string {
-	for _, f := range ifs {
-		n := strings.ToLower(f.Name)
-		if strings.HasPrefix(n, "ra3-") || strings.HasPrefix(n, "ra2-") {
-			continue
-		}
-		for _, k := range []string{"happ", "wintun", "wg", "openvpn", "nordlynx", "proton"} {
-			if strings.Contains(n, k) {
-				return f.Name
-			}
-		}
-	}
-	return ""
 }
 
 func hasIface(ifs []api.Iface, name string) bool {
@@ -95,16 +80,20 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 		g.vpnState, g.vpnWhy = "off", ""
 	case g.fails >= 3:
 		g.vpnState, g.vpnWhy = "off", "три неудачные проверки — выключен до команды /vpn"
-	case g.vpnState == "failopen" && reason != "net-changed" && reason != "vpn-cmd":
+	case g.vpnState == "failopen" && reason != "net-changed" && reason != "foreign-changed" && reason != "vpn-cmd":
 		// остаёмся без TUN до смены сети или команды
 	default:
-		if fv := foreignVPN(ifs); fv != "" {
+		if fv := c.plat.ForeignVPN(); fv != "" {
 			g.vpnState, g.vpnWhy = "foreign", "работает другой VPN ("+fv+")"
 			if g.mode == "only" {
 				g.vpnWhy += " — отключите его, чтобы работал наш"
 			}
-			g.event("vpn.skipped-foreign", "iface", fv, "mode", g.mode)
+			if fv != g.lastForeign {
+				g.event("vpn.skipped-foreign", "iface", fv, "mode", g.mode)
+			}
+			g.lastForeign = fv
 		} else {
+			g.lastForeign = ""
 			want.VPN = true
 		}
 	}

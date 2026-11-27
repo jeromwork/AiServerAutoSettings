@@ -29,6 +29,7 @@ type Platform interface {
 	OpenBrowser(url, runAs string) error
 	Autostart(binPath, home string, inst8 string) AutostartSpec
 	Interfaces() ([]Iface, error)
+	ForeignVPN() string // имя чужого VPN-интерфейса (маршрут к 1.1.1.1), "" — нет
 }
 
 // LANOps — платформенные изменения для ЛВС (N2). Каждое — через Traces (Kind nrpt/hosts/dns), только при Mode.AllowsSystemChanges.

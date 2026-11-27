@@ -2,4 +2,13 @@
 
 package platform
 
-// N4: поиск чужого VPN. Сигнатуры пока не заданы контрактом.
+import (
+	"net"
+	"os"
+)
+
+// isHardwareIface — у железного интерфейса есть /sys/class/net/<if>/device.
+func isHardwareIface(ni net.Interface) bool {
+	_, err := os.Stat("/sys/class/net/" + ni.Name + "/device")
+	return err == nil
+}
