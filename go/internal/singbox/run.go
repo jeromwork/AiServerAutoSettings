@@ -17,6 +17,7 @@ import (
 
 	"remoteagents/internal/api"
 	"remoteagents/internal/config"
+	"remoteagents/internal/platform"
 )
 
 // RoleVPN — отдельный экземпляр sing-box только для VPN (свой процесс, конфиг, clash-порт и адаптер ra3-<id>-vpn).
@@ -344,7 +345,20 @@ func (s *box) traceAdapters(e api.Effective) error {
 	return nil
 }
 
+// sweepVPNLock — убрать остатки правил «только через наш адрес» (nft/ip rule) от мёртвого sing-box; подменяется в тестах.
+var sweepVPNLock = platform.SweepVPNLock
+
+func (s *box) sweepLock() {
+	if !s.isVPN() {
+		return
+	}
+	if err := sweepVPNLock(context.Background()); err != nil {
+		s.log.Warn("singbox.lock-sweep", "err", err.Error())
+	}
+}
+
 func (s *box) launch(ctx context.Context, e api.Effective) error {
+	s.sweepLock() // перед запуском: правила только у живого процесса, остатки прошлого убираем
 	if err := s.traceAdapters(e); err != nil {
 		return fmt.Errorf("singbox: trace: %w", err)
 	}
@@ -438,6 +452,7 @@ func (s *box) watch(ctx context.Context, p api.Process, e api.Effective) {
 		s.crashes = 0
 	}
 	s.mu.Unlock()
+	s.sweepLock() // процесс умер — его правила (nft redirect на мёртвый порт) не должны резать интернет
 	s.log.Error("singbox.exited", "code", p.ExitCode(), "crashes", s.crashes)
 	if e.VPN || e.LAN {
 		if s.o.OnTunCrash != nil {
@@ -744,6 +759,7 @@ func (s *box) stopVPN(ctx context.Context) error {
 		}
 		s.config = ""
 	}
+	s.sweepLock()
 	s.rc.Effective = api.Effective{}
 	s.view(func() { s.vRunning, s.vEff = false, api.Effective{} })
 	return nil

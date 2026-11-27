@@ -88,3 +88,21 @@ func TestRenderVPNBlocked(t *testing.T) {
 		t.Fatal("без галочки перекрытие не рендерится")
 	}
 }
+
+// Linux + галочка: sing-box сам ставит nft (auto_redirect) вместе со strict_route; без галочки или вне Linux — нет.
+func TestRenderVPNAutoRedirectLinuxOnly(t *testing.T) {
+	old := vpnGOOS
+	defer func() { vpnGOOS = old }()
+	for _, c := range []struct {
+		goos string
+		lock bool
+		want bool
+	}{{"linux", true, true}, {"linux", false, false}, {"windows", true, false}, {"darwin", true, false}} {
+		vpnGOOS = c.goos
+		v, _ := renderVPNOut(t, vpnRC(c.lock, false, ""))
+		got, _ := v.Inbounds[0]["auto_redirect"].(bool)
+		if got != c.want {
+			t.Fatalf("%s lock=%v: auto_redirect=%v", c.goos, c.lock, got)
+		}
+	}
+}

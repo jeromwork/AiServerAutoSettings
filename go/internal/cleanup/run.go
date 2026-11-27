@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"remoteagents/internal/api"
+	"remoteagents/internal/platform"
 )
 
 type platformSteps interface {
@@ -205,6 +206,11 @@ func (c *Cleaner) Run(ctx context.Context, reason string) []string {
 		} else {
 			issues = append(issues, fmt.Sprintf("cleanup: %s/%s: %v", t.Kind, t.ID, removeErr))
 		}
+	}
+
+	// Остатки правил «только через наш адрес» (nft/ip rule убитого sing-box): уборка при старте ядра и при выходе.
+	if err := platform.SweepVPNLock(ctx); err != nil {
+		issues = append(issues, fmt.Sprintf("cleanup: vpn lock rules: %v", err))
 	}
 
 	if reason == "startup" {
