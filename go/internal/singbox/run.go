@@ -748,7 +748,7 @@ func (s *box) reallocPorts() error {
 	return nil
 }
 
-// NetChanged — сеть сменилась. Интерфейс выхода изменился — перерисовать конфиг и перезапустить (все соединения
+// NetChanged — сеть сменилась (канальный бокс без DefaultIface — ничего не делает: он не привязан к интерфейсу). Интерфейс выхода изменился — перерисовать конфиг и перезапустить (все соединения
 // пересоздаются); не изменился — только сбросить зависшие соединения. restarted — был ли перезапуск.
 func (s *box) NetChanged(ctx context.Context) (restarted bool, err error) {
 	ctx, deadline := context.WithTimeout(ctx, 30*time.Second)

@@ -359,7 +359,7 @@ func (c *core) startNetwork(ctx context.Context) {
 	hasChannel := c.cfg.HasChannel()
 	if hasChannel && !f.Mode.NoSingbox && !f.Mode.NoChannel {
 		sb, e := singbox.New(c.cfg, c.p, log, c.clean, c.pr, singbox.Options{
-			Mode: f.Mode, Instance: c.clean.Instance(), DefaultIface: platform.PhysicalInterface,
+			Mode: f.Mode, Instance: c.clean.Instance(),
 			OnTunCrash: func(e api.Effective) { c.tun.onTunCrash(ctx, e) },
 			LANSocks: func() string {
 				if fw := c.getFw(); fw != nil {

@@ -132,7 +132,7 @@ func (c *core) watchNet(ctx context.Context) {
 			return netSignature(ifs)
 		},
 		sbReset: func(ctx context.Context) {
-			for _, box := range []api.Singbox{c.getSb(), c.getVpnSb()} {
+			for _, box := range []api.Singbox{c.getVpnSb()} { // канальный sing-box не привязан к интерфейсу — не трогаем
 				if sb, ok := box.(interface {
 					NetChanged(context.Context) (bool, error)
 				}); ok {
@@ -142,11 +142,7 @@ func (c *core) watchNet(ctx context.Context) {
 				}
 			}
 		},
-		chReset: func() {
-			if ch, ok := c.getCh().(interface{ NetChanged() }); ok {
-				ch.NetChanged()
-			}
-		},
+		chReset: c.underlay,
 		chUp: func() bool {
 			if c.cfg != nil && !c.cfg.HasChannel() {
 				return true // конфиг «только VPN»: канала нет, перестраиваем только при реальной смене сети
@@ -166,7 +162,15 @@ func (c *core) watchNet(ctx context.Context) {
 		case rebuilt:
 			c.tun.reconcile(ctx, "net-changed")
 		case fc:
+			c.underlay()
 			c.tun.reconcile(ctx, "foreign-changed")
 		}
+	}
+}
+
+// underlay — сеть под каналом изменилась (любая причина): channel.Underlay() (живую сессию не рвёт).
+func (c *core) underlay() {
+	if ch, ok := c.getCh().(interface{ Underlay() }); ok {
+		ch.Underlay()
 	}
 }

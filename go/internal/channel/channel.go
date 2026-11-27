@@ -84,6 +84,7 @@ type chn struct {
 	cleaned bool
 
 	sessCancel context.CancelFunc // отмена текущей попытки/сессии (смена сети)
+	underlayAt time.Time          // последняя смена сети под живой сессией (для этапа B)
 	netPending bool               // смена сети: следующий круг — с начала списка путей
 	retPref    chan struct{}      // сработал таймер возврата на предпочтительный путь
 	retFails   int                // подряд неудачных возвратов (растит задержку)
@@ -346,6 +347,23 @@ func (c *chn) NetChanged() {
 	case c.kick <- struct{}{}:
 	default:
 	}
+}
+
+// Underlay: сеть под каналом изменилась (физическая сеть, чужой VPN, старт/стоп нашего VPN). Канал — слой поверх сети,
+// поэтому живая сессия НЕ рвётся (проверка и переключение — следующий этап). Если сессия не up — как NetChanged:
+// сразу новый круг путей.
+func (c *chn) Underlay() {
+	c.mu.Lock()
+	st := c.st
+	started := c.started && c.cancel != nil
+	if started && st.State == "up" {
+		c.underlayAt = time.Now()
+		c.mu.Unlock()
+		c.log.Info("underlay-changed", "session", st.Session, "state", st.State)
+		return
+	}
+	c.mu.Unlock()
+	c.NetChanged()
 }
 
 func (c *chn) takeNetReason() string {

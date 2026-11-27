@@ -93,12 +93,8 @@ func Render(rc api.RenderContext) ([]byte, error) {
 		outs = append(outs, m{"type": "selector", "tag": "chan", "outbounds": names, "default": names[0], "interrupt_exist_connections": false})
 		rules = append(rules, m{"inbound": "in-chan", "outbound": "chan"})
 	}
-	route := m{"auto_detect_interface": true}
-	if rc.DefaultIface != "" {
-		// Выход строго через физический адаптер: чужой TUN (Happ/Tailscale) как маршрут по умолчанию и его DNS не влияют.
-		delete(route, "auto_detect_interface")
-		route["default_interface"] = rc.DefaultIface
-	}
+	// Канал — обычное приложение поверх сети: без привязки к интерфейсу, сокеты идут по маршрутам ОС.
+	route := m{}
 	var ruleSets []m
 	if rc.Mode.AllowsTun() {
 		type part struct {
