@@ -21,6 +21,8 @@ type Actions interface {
 	ConfigCheck(data []byte, password string) error
 	ConfigApply(ctx context.Context, data []byte, password string) error
 	ConfigRevert(ctx context.Context) error
+	ConfigExport() ([]byte, error)                       // сохранённый конфиг как есть (с ключами, без пароля)
+	ConfigSetVPN(ctx context.Context, mode string) error // vpn.mode в сохранённом конфиге + применение как ConfigApply
 	SetControl(on bool) error
 	SwitchPath(name string) error // → Channel.ForcePath
 	VPN(mode string) error        // до N1b → ErrNotSupported; в Safe → ErrSafe

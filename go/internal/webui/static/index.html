@@ -78,6 +78,22 @@ pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; word-break: brea
 </div>
 
 <div class="box">
+  <b>VPN</b>
+  <label><input type="radio" name="vpnmode" value="off"> Выключен</label>
+  <label><input type="radio" name="vpnmode" value="auto"> Авто</label>
+  <label><input type="radio" name="vpnmode" value="only"> Только наш</label>
+  <div id="vpn-st"></div>
+  <div id="vpn-msg"></div>
+</div>
+
+<div class="box">
+  <b>Экспорт конфига</b>
+  <button id="btn-cfg-copy" type="button">Скопировать конфиг</button>
+  <button id="btn-cfg-dl" type="button">Скачать конфиг</button>
+  <div id="exp-msg"></div>
+</div>
+
+<div class="box">
   Управление компьютером: <b id="ctl"></b>
   <button id="btn-control" type="button"></button>
 </div>
@@ -153,6 +169,8 @@ function show(s) {
   if (s.name || s.pc) document.getElementById("ver").title = (s.name || "") + (s.pc ? " (" + s.pc + " на сервере)" : "");
   var pcl = document.getElementById("pcl");
   if (pcl) pcl.textContent = s.pc ? (s.name || "Компьютер") + " (" + s.pc + " на сервере)" : "";
+
+  if (s.vpn) onVPN(s.vpn);
 
   var noCfg = s.config === false;
   document.getElementById("cfg-info").textContent = noCfg ? "Конфиг не задан — вставьте его ниже и нажмите «Применить»." : "";
@@ -397,6 +415,75 @@ function onApply(a) {
   }
 }
 
+var VPNMODE = {off: "выключен", auto: "авто", only: "только наш"};
+var VPNST = {off: "выключен", up: "работает", failopen: "не работает, сеть открыта напрямую", foreign: "работает другой VPN", error: "ошибка"};
+
+function onVPN(v) {
+  var r = document.querySelectorAll("input[name=vpnmode]");
+  for (var i = 0; i < r.length; i++) r[i].checked = r[i].value === v.mode;
+  var h = "Режим: <b>" + esc(VPNMODE[v.mode] || v.mode || "—") + "</b>, состояние: <b>" + esc(VPNST[v.state] || v.state || "—") + "</b>";
+  if (v.reason) h += " <span class=err>" + esc(v.reason) + "</span>";
+  document.getElementById("vpn-st").innerHTML = h;
+}
+
+Array.prototype.forEach.call(document.querySelectorAll("input[name=vpnmode]"), function(r) {
+  r.onchange = function() {
+    var m = document.getElementById("vpn-msg");
+    m.className = "";
+    m.textContent = "Меняю режим в конфиге...";
+    post("/api/vpn", { mode: r.value }).then(function(x) {
+      m.className = x.ok ? "ok" : "err";
+      m.textContent = x.ok ? "Режим записан, перезапускаю..." : (x.problems || [x.error || "Ошибка"]).join("\n");
+      if (!x.ok && S && S.vpn) onVPN(S.vpn);
+    }).catch(function(e) {
+      m.className = "err";
+      m.textContent = "Нет ответа (" + (e.shown || e.message) + "). Программа могла перезапуститься: смотрите блок «Ход работы».";
+    });
+  };
+});
+
+function exportConfig() {
+  var u = "/api/config?t=" + encodeURIComponent(T);
+  return fetch(u).then(function(r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.text();
+  }).then(function(t) {
+    try { var j = JSON.parse(t); if (j && j.ok === false) throw new Error(j.error || "конфиг недоступен"); } catch (x) { if (x.message && x.name !== "SyntaxError") throw x; }
+    return t;
+  });
+}
+
+function expMsg(ok, t) {
+  var m = document.getElementById("exp-msg");
+  m.className = ok ? "ok" : "err";
+  m.textContent = t;
+}
+
+document.getElementById("btn-cfg-copy").onclick = function() {
+  exportConfig().then(function(t) {
+    return navigator.clipboard.writeText(t);
+  }).then(function() {
+    expMsg(true, "Конфиг скопирован в буфер.");
+  }).catch(function(e) {
+    expMsg(false, "Не удалось скопировать: " + e.message);
+  });
+};
+
+document.getElementById("btn-cfg-dl").onclick = function() {
+  exportConfig().then(function(t) {
+    var n = String((S && S.name) || "pc").replace(/[^A-Za-z0-9._-]/g, "_");
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([t], {type: "application/json"}));
+    a.download = "remoteagents-config-" + n + ".json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    expMsg(true, "Конфиг скачан.");
+  }).catch(function(e) {
+    expMsg(false, "Не удалось скачать: " + e.message);
+  });
+};
+
 function onChannel(c) {
   var el = document.getElementById("net-st");
   var h = "Канал: <b>" + esc(c.state) + "</b>";
@@ -446,6 +533,7 @@ listen("apply", onApply);
 listen("pause", onPause);
 listen("update", onUpdate);
 listen("channel", onChannel);
+listen("vpn", onVPN);
 listen("singbox", onSingbox);
 listen("paths", onPaths);
 listen("attempts", onAttempts);

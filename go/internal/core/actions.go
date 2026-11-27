@@ -203,6 +203,36 @@ func (c *core) ConfigApply(ctx context.Context, data []byte, password string) er
 	return nil
 }
 
+// ConfigExport: сохранённый конфиг как есть (ключи в нём зашифрованы паролем конфига).
+func (c *core) ConfigExport() ([]byte, error) { return config.ExportCurrent(c.p) }
+
+// ConfigSetVPN: меняет только vpn.mode сохранённого конфига и применяет тем же путём, что ConfigApply.
+func (c *core) ConfigSetVPN(ctx context.Context, mode string) error {
+	c.publishApply("applying", "Меняю режим VPN в конфиге...")
+	fail := func(err error) error {
+		text := c.explainApplyErr(err)
+		c.log.Warn("core: config-vpn-failed", "text", text)
+		c.publishApply("error", text)
+		return errors.New(text)
+	}
+	if c.f.Mode.Safe {
+		return fail(api.ErrSafe)
+	}
+	unlock, err := c.lockOp()
+	if err != nil {
+		return fail(err)
+	}
+	defer unlock()
+	gen, err := config.SetVPNMode(c.p, mode, c.log)
+	if err != nil {
+		return fail(err)
+	}
+	c.log.Info("core: config-vpn-applied", "gen", gen, "mode", mode)
+	c.publishApply("restarting", "Конфиг записан, перезапускаю программу и проверяю связь с сервером...")
+	c.requestQuit(api.ExitRestart, nil)
+	return nil
+}
+
 func (c *core) ConfigRevert(ctx context.Context) error {
 	unlock, err := c.lockOp()
 	if err != nil {
