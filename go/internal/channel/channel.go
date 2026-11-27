@@ -70,18 +70,19 @@ type chn struct {
 	signr ssh.Signer
 	hkey  ssh.PublicKey
 
-	mu      sync.Mutex
-	st      api.ChannelState
-	client  *ssh.Client // current connection (nil unless connected)
-	subs    map[int]chan api.ChannelState
-	subSeq  int
-	pinned  time.Time
-	cancel  context.CancelFunc
-	done    chan struct{}
-	started bool
-	kick    chan struct{} // ForcePath: drop the current ssh
-	rcur    int
-	cleaned bool
+	mu       sync.Mutex
+	st       api.ChannelState
+	client   *ssh.Client // current connection (nil unless connected)
+	subs     map[int]chan api.ChannelState
+	subSeq   int
+	pinned   time.Time
+	cancel   context.CancelFunc
+	done     chan struct{}
+	started  bool
+	kick     chan struct{} // ForcePath: drop the current ssh
+	rcur     int
+	handover chan struct{} // запрос «поднять новую сессию, затем закрыть старую»
+	ulEvent  chan struct{} // событие «сеть под каналом изменилась» для проверки
 
 	sessCancel context.CancelFunc // отмена текущей попытки/сессии (смена сети)
 	underlayAt time.Time          // последняя смена сети под живой сессией (для этапа B)
@@ -121,7 +122,8 @@ func New(cfg *api.Config, sb api.Singbox, agent api.AgentHost, log api.Logger, t
 		return nil, err
 	}
 	c := &chn{cfg: cfg, sb: sb, agent: agent, log: log.With("channel"), tr: tr, o: o, sv: sv, signr: signer, hkey: hk,
-		subs: map[int]chan api.ChannelState{}, kick: make(chan struct{}, 1), retPref: make(chan struct{}, 1)}
+		subs: map[int]chan api.ChannelState{}, kick: make(chan struct{}, 1), retPref: make(chan struct{}, 1),
+		handover: make(chan struct{}, 1), ulEvent: make(chan struct{}, 1)}
 	c.st = api.ChannelState{State: "waiting", Since: time.Now()}
 	c.log.Secret(agent.Token())
 	return c, nil
@@ -223,6 +225,7 @@ func (c *chn) Start(ctx context.Context) error {
 	c.cancel, c.done = cancel, make(chan struct{})
 	c.mu.Unlock()
 	go c.loop(rc)
+	go c.verifier(rc)
 	return nil
 }
 
@@ -374,6 +377,10 @@ func (c *chn) Underlay() {
 		c.underlayAt = time.Now()
 		c.mu.Unlock()
 		c.log.Info("underlay-changed", "session", st.Session, "state", st.State)
+		select {
+		case c.ulEvent <- struct{}{}:
+		default:
+		}
 		return
 	}
 	c.mu.Unlock()
@@ -690,7 +697,109 @@ func nonce() string {
 	return hex.EncodeToString(b)
 }
 
+// conn — одно ssh-соединение канала со всем, что к нему привязано (rport-слушатель, серверная сессия, keepalive).
+type conn struct {
+	cl       *ssh.Client
+	stop     context.CancelFunc
+	connLost chan struct{}
+	dead     chan struct{}
+	waitSess chan error
+	closers  []func()
+}
+
+func (k *conn) close() {
+	k.stop()
+	for i := len(k.closers) - 1; i >= 0; i-- {
+		k.closers[i]()
+	}
+	_ = k.cl.Close()
+}
+
+// connect поднимает соединение до RALAB-CHANNEL-UP. Ничего не публикует (c.client, состояние) — это делает вызывающий.
+// При каждом подключении снимаются прежние серверные сессии этого ПК («последняя побеждает»).
+func (c *chn) connect(ctx context.Context, path, addr string) (*conn, error) {
+	cl, ac, err := c.dial(ctx, addr)
+	if err != nil {
+		c.log.Warn("dial-fail", "via", path, "addr", addr, "err", err.Error())
+		return nil, err
+	}
+	sctx, stop := context.WithCancel(ctx)
+	k := &conn{cl: cl, stop: stop, connLost: make(chan struct{}), dead: make(chan struct{})}
+	fail := func(err error) (*conn, error) { k.close(); return nil, err }
+	go c.keepalive(sctx, cl, ac, k.dead)
+	go func() { _ = cl.Wait(); close(k.connLost) }()
+	go func() { // external close (Stop) or keepalive death drops the connection
+		select {
+		case <-k.dead:
+		case <-ctx.Done():
+		case <-sctx.Done():
+			return
+		}
+		_ = cl.Close()
+	}()
+
+	c.cleanStale(cl)
+	l, rport, err := c.listen(cl)
+	if err != nil {
+		return fail(err)
+	}
+	k.closers = append(k.closers, func() { _ = l.Close() })
+	c.agent.Serve(l) // the agent already serves before the server connects
+
+	sess, err := cl.NewSession()
+	if err != nil {
+		return fail(fmt.Errorf("session: %w", err))
+	}
+	k.closers = append(k.closers, func() { _ = sess.Close() })
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		return fail(err)
+	}
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		return fail(err)
+	}
+	errw := c.log.Writer(api.StreamCore, "ra-lab")
+	k.closers = append(k.closers, func() { _ = errw.Close() })
+	sess.Stderr = errw
+	n := nonce()
+	cmd := fmt.Sprintf("~/.local/bin/ra-lab session --pc %s --nonce %s --port %d --version go-%s", c.o.PC, n, rport, shq(strings.TrimPrefix(c.o.Version, "go-")))
+	if c.o.Rollback != "" {
+		cmd += " --rollback " + shq(c.o.Rollback)
+	}
+	if err = sess.Start(cmd); err != nil {
+		return fail(fmt.Errorf("exec: %w", err))
+	}
+	upCh := make(chan error, 1)
+	go func() { upCh <- c.handshake(bufio.NewReaderSize(stdout, 1<<16), stdin, n, rport) }()
+	select {
+	case err = <-upCh:
+		if err != nil {
+			c.log.Warn("handshake-fail", "via", path, "err", err.Error())
+			return fail(err)
+		}
+	case <-time.After(upTimeout):
+		c.log.Warn("handshake-fail", "via", path, "err", "timeout")
+		return fail(errors.New("handshake: timeout"))
+	case <-k.connLost:
+		return fail(errors.New("handshake: connection lost"))
+	case <-ctx.Done():
+		return fail(ctx.Err())
+	}
+	k.waitSess = make(chan error, 1)
+	go func() { k.waitSess <- sess.Wait() }()
+	c.log.Info("up", "rport", rport, "via", path)
+	return k, nil
+}
+
+func (c *chn) setClient(cl *ssh.Client) {
+	c.mu.Lock()
+	c.client = cl
+	c.mu.Unlock()
+}
+
 // session runs one connection until it is lost. Returns the path and the reason.
+// Пока сессия up, по запросу handover (сеть устоялась, а сессия мертва) сначала поднимается новая, затем закрывается старая.
 func (c *chn) session(ctx context.Context, first bool) (string, error) {
 	path, addr := c.pickPath(ctx, first)
 	if path == "" {
@@ -699,110 +808,57 @@ func (c *chn) session(ctx context.Context, first bool) (string, error) {
 	path = c.pathLabel(path)
 	c.set("connecting", path, "", false)
 	c.log.Info("dial", "via", path, "addr", addr)
-	cl, ac, err := c.dial(ctx, addr)
+	k, err := c.connect(ctx, path, addr)
 	if err != nil {
-		c.log.Warn("dial-fail", "via", path, "addr", addr, "err", err.Error())
 		return path, err
 	}
-	sctx, stop := context.WithCancel(ctx)
-	defer stop()
-	c.mu.Lock()
-	c.client = cl
-	c.mu.Unlock()
 	defer func() {
-		c.mu.Lock()
-		c.client = nil
-		c.mu.Unlock()
-		_ = cl.Close()
+		c.setClient(nil)
+		k.close()
 	}()
-	dead := make(chan struct{})
-	go c.keepalive(sctx, cl, ac, dead)
-	connLost := make(chan struct{})
-	go func() { _ = cl.Wait(); close(connLost) }()
-	go func() { // external close (Stop) or keepalive death drops the connection
-		select {
-		case <-dead:
-		case <-ctx.Done():
-		case <-sctx.Done():
-			return
-		}
-		_ = cl.Close()
-	}()
-
-	if !c.cleaned { // previous runs: stale server-side "ra-lab session" of this PC
-		c.cleaned = true
-		c.cleanStale(cl)
-	}
-	l, rport, err := c.listen(cl)
-	if err != nil {
-		return path, err
-	}
-	defer l.Close()
-	c.agent.Serve(l) // the agent already serves before the server connects
-
-	sess, err := cl.NewSession()
-	if err != nil {
-		return path, fmt.Errorf("session: %w", err)
-	}
-	defer sess.Close()
-	stdin, err := sess.StdinPipe()
-	if err != nil {
-		return path, err
-	}
-	stdout, err := sess.StdoutPipe()
-	if err != nil {
-		return path, err
-	}
-	errw := c.log.Writer(api.StreamCore, "ra-lab")
-	defer errw.Close()
-	sess.Stderr = errw
-	n := nonce()
-	cmd := fmt.Sprintf("~/.local/bin/ra-lab session --pc %s --nonce %s --port %d --version go-%s", c.o.PC, n, rport, shq(strings.TrimPrefix(c.o.Version, "go-")))
-	if c.o.Rollback != "" {
-		cmd += " --rollback " + shq(c.o.Rollback)
-	}
-	if err = sess.Start(cmd); err != nil {
-		return path, fmt.Errorf("exec: %w", err)
-	}
-	upCh := make(chan error, 1)
-	go func() { upCh <- c.handshake(bufio.NewReaderSize(stdout, 1<<16), stdin, n, rport) }()
-	select {
-	case err = <-upCh:
-		if err != nil {
-			c.log.Warn("handshake-fail", "via", path, "err", err.Error())
-			return path, err
-		}
-	case <-time.After(upTimeout):
-		c.log.Warn("handshake-fail", "via", path, "err", "timeout")
-		return path, errors.New("handshake: timeout")
-	case <-connLost:
-		return path, errors.New("handshake: connection lost")
-	case <-ctx.Done():
-		return path, ctx.Err()
-	}
+	c.setClient(k.cl)
 	c.set("up", path, "", true)
-	c.log.Info("up", "rport", rport, "via", path)
 	c.armReturn(path)
 	defer c.disarmReturnKeep()
-	waitSess := make(chan error, 1)
-	go func() { waitSess <- sess.Wait() }()
-	select { // block on events: connection lost, session end, forced switch, stop
-	case <-connLost:
-		select {
-		case <-dead:
-			return path, fmt.Errorf("%w: keepalive", errWasUp)
-		default:
-			return path, fmt.Errorf("%w: closed", errWasUp)
+	for {
+		select { // block on events: connection lost, session end, forced switch, handover, stop
+		case <-k.connLost:
+			select {
+			case <-k.dead:
+				return path, fmt.Errorf("%w: keepalive", errWasUp)
+			default:
+				return path, fmt.Errorf("%w: closed", errWasUp)
+			}
+		case <-k.waitSess:
+			return path, fmt.Errorf("%w: server session ended", errWasUp)
+		case <-c.kick:
+			return path, fmt.Errorf("%w: path switch", errWasUp)
+		case <-c.retPref:
+			c.retPref <- struct{}{} // consumeReturn в цикле увидит признак
+			return path, fmt.Errorf("%w: возврат на предпочтительный путь", errWasUp)
+		case <-c.handover:
+			c.selectFirst()
+			np, na := c.pickPath(ctx, false)
+			if np == "" {
+				return path, ctx.Err()
+			}
+			np = c.pathLabel(np)
+			c.log.Info("handover-dial", "from", path, "via", np, "addr", na)
+			nk, err := c.connect(ctx, np, na)
+			if err != nil {
+				c.log.Warn("handover-fail", "via", np, "err", err.Error())
+				continue // старая сессия остаётся; если она мертва — её закроет keepalive/connLost
+			}
+			c.setClient(nk.cl)
+			old := k
+			k, path = nk, np
+			old.close()
+			c.set("up", path, "", true)
+			c.armReturn(path)
+			c.log.Info("handover-done", "via", path)
+		case <-ctx.Done():
+			return path, ctx.Err()
 		}
-	case <-waitSess:
-		return path, fmt.Errorf("%w: server session ended", errWasUp)
-	case <-c.kick:
-		return path, fmt.Errorf("%w: path switch", errWasUp)
-	case <-c.retPref:
-		c.retPref <- struct{}{} // consumeReturn в цикле увидит признак
-		return path, fmt.Errorf("%w: возврат на предпочтительный путь", errWasUp)
-	case <-ctx.Done():
-		return path, ctx.Err()
 	}
 }
 

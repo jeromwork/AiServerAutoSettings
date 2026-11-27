@@ -99,8 +99,7 @@ func (n *netReact) foreignChanged() bool {
 	return changed
 }
 
-// onChange вызывается после debounce. Перестраивает, если физическая сеть реально изменилась
-// или канал сейчас не up (тогда смена могла быть причиной и лишний повтор безвреден).
+// onChange вызывается после debounce. Перестраивает только при реальной смене физической сети.
 func (n *netReact) onChange(ctx context.Context) bool {
 	cur := n.sig()
 	if cur == "" && n.last != "" {
@@ -108,7 +107,7 @@ func (n *netReact) onChange(ctx context.Context) bool {
 	}
 	changed := n.inited && cur != n.last
 	n.last, n.inited = cur, true
-	if !changed && n.chUp() {
+	if !changed { // без реальной смены физической сети не реагируем (пустые события раз в минуту не пересобирают канал)
 		return false
 	}
 	n.log.Info("net-changed", "physical", cur, "changed", changed)
