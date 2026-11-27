@@ -58,6 +58,32 @@ func resolveHost(host string) []string {
 	return addrs
 }
 
+// VPNServerAddr — "ip:443" первого узла vpn.nodes (по имени), чей адрес разрешился; "" — узлов нет/не резолвятся.
+// По нему определяется «нижний» адаптер (platform.UnderlayInterface): адрес исключён из нашего TUN.
+func VPNServerAddr(cfg *api.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	names := make([]string, 0, len(cfg.VPN.Nodes))
+	for n := range cfg.VPN.Nodes {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		o, err := decodeObj(cfg.VPN.Nodes[n])
+		if err != nil {
+			continue
+		}
+		h, _ := o["server"].(string)
+		for _, a := range resolveHost(h) {
+			if ip, err := netip.ParseAddr(a); err == nil && ip.Is4() {
+				return net.JoinHostPort(a, "443")
+			}
+		}
+	}
+	return ""
+}
+
 // vpnSel — мосты VPN: outbounds процесса, теги для urltest и хосты, которые не должны идти в наш TUN.
 type vpnSel struct {
 	outs   []m

@@ -425,6 +425,7 @@ function onVPN(v) {
   for (var i = 0; i < r.length; i++) r[i].checked = r[i].value === v.mode;
   var h = "Режим: <b>" + esc(VPNMODE[v.mode] || v.mode || "—") + "</b>, состояние: <b>" + esc(VPNST[v.state] || v.state || "—") + "</b>";
   if (v.reason) h += " <span class=err>" + esc(v.reason) + "</span>";
+  if (v.underlay) h += "<br>Работает поверх: <b>" + esc(v.underlay) + "</b>";
   document.getElementById("vpn-st").innerHTML = h;
   var e = v.exit, ex = document.getElementById("vpn-exit");
   if (!e) { ex.textContent = ""; return; }

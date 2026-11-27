@@ -83,6 +83,17 @@ func PhysicalInterface() string {
 	return ""
 }
 
+// UnderlayInterface — «нижний» адаптер нашего VPN: через него ОС реально ведёт трафик к серверу addr ("ip:port",
+// адрес исключён из нашего TUN, значит это чужой VPN или физический адаптер). Не определён/наш — PhysicalInterface.
+func UnderlayInterface(addr string) string {
+	if addr != "" {
+		if n := ExitIface(addr); n != "" && !isOurIface(n) {
+			return n
+		}
+	}
+	return PhysicalInterface()
+}
+
 var (
 	physMu   sync.Mutex
 	lastPhys string
