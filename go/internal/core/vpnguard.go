@@ -178,6 +178,7 @@ func (g *tunGuard) applyLAN(ctx context.Context, sb api.Singbox, reason string, 
 func (g *tunGuard) applyVPN(ctx context.Context, vsb api.Singbox, reason string, want bool) (bool, string) {
 	c := g.c
 	if want != vsb.Effective().VPN {
+		defer c.underlay() // старт/стоп нашего VPN меняет сеть под каналом
 		actx, cancel := context.WithTimeout(ctx, 40*time.Second)
 		err := vsb.Apply(actx, api.Effective{VPN: want})
 		cancel()

@@ -28,12 +28,12 @@ var vpnExclude = []string{
 	"255.255.255.255/32", "1.1.1.1/32", "fc00::/7", "fe80::/10", "ff00::/8",
 }
 
-// vpnAlwaysDirect — адреса, которые никогда не идут через наш VPN: сервер каналов (v2 Лаборатория 14.3 держит через него связь с ПК).
-var vpnAlwaysDirect = []string{"109.199.110.63/32"}
+// vpnAlwaysDirect — адреса, которые никогда не идут через наш VPN (канал — слой поверх сети, исключений для него нет).
+var vpnAlwaysDirect = []string{}
 
 // vpnDirectProcs — процессы, трафик которых идёт мимо нашего VPN: v2 Лаборатория (ra-lab, её sing-box) и чужие VPN.
 var vpnDirectProcs = []string{
-	"ra-lab.exe", "ra-lab", "ralab-core.exe", "ralab-core", "ralab.exe", "sing-box.exe", "sing-box", "ra-core.exe", "ra-core",
+	"ra-lab.exe", "ra-lab", "ralab-core.exe", "ralab-core", "ralab.exe", "sing-box.exe", "sing-box",
 	"RemoteAgents-VPN.exe", "ra-vpn",
 	"Happ.exe", "happ.exe", "xray.exe", "v2rayN.exe", "tailscaled.exe", "Tailscale.exe",
 }
@@ -114,14 +114,9 @@ func vpnSelect(cfg *api.Config) (vpnSel, error) {
 		if err != nil {
 			return sel, err
 		}
-		hosts[cfg.Servers[0].Host] = true
 		for _, p := range paths {
-			hosts[p.node] = true
 			bad := strings.HasSuffix(p.final, "-vpn") || seenFinal[p.final] || seenTag[p.final]
 			for _, o := range p.outs {
-				if s, _ := o["server"].(string); s != "" {
-					hosts[s] = true
-				}
 				if t, _ := o["type"].(string); t == "ssh" || t == "direct" || t == "socks" {
 					bad = true
 				}
