@@ -36,6 +36,9 @@ var vpnDirectProcs = []string{
 }
 
 // VPNProbeURL — адрес проверки туннеля (не РФ → всегда через vpn-out).
+// VPNProbeAddr — адрес для проверки интерфейса выхода (не РФ, не в исключениях vpnExclude → по маршрутам идёт в наш TUN).
+const VPNProbeAddr = "8.8.8.8:53"
+
 const VPNProbeURL = "https://www.gstatic.com/generate_204"
 
 // resolveHost — IP узла для исключения из TUN; имена — через системный DNS с пределом 3 с (событийно: только при сборке конфига).

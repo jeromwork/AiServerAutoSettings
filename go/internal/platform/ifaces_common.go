@@ -74,6 +74,9 @@ func (p *stubPlatform) Interfaces() ([]api.Iface, error) { return listIfaces() }
 // ForeignVPN — имя чужого VPN-интерфейса: через него ОС ведёт трафик к 1.1.1.1, он не железный и не наш; "" — нет.
 func (p *stubPlatform) ForeignVPN() string { return ForeignVPN() }
 
+// ExitIface — интерфейс выхода к addr (UDP-dial, пакетов не шлёт).
+func (p *stubPlatform) ExitIface(addr string) string { return ExitIface(addr) }
+
 // isOurIface — наши адаптеры (v3, v2, Лаборатория) чужим VPN не считаются.
 func isOurIface(name string) bool {
 	n := strings.ToLower(name)
