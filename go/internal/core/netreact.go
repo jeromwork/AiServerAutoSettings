@@ -103,6 +103,9 @@ func (n *netReact) foreignChanged() bool {
 // или канал сейчас не up (тогда смена могла быть причиной и лишний повтор безвреден).
 func (n *netReact) onChange(ctx context.Context) bool {
 	cur := n.sig()
+	if cur == "" && n.last != "" {
+		cur = n.last // физический не определился (появился/исчез наш TUN) — не смена сети для канала
+	}
 	changed := n.inited && cur != n.last
 	n.last, n.inited = cur, true
 	if !changed && n.chUp() {
