@@ -59,7 +59,7 @@ func (c *core) failStart(err error) {
 		return
 	}
 	text := explainNetErr(err)
-	if c.pcName() == "" {
+	if c.cfg.HasChannel() && c.pcName() == "" {
 		text = "В конфиге нет имени компьютера латиницей."
 	}
 	text = sanitize(text)

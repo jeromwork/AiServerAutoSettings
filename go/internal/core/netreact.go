@@ -129,11 +129,13 @@ func (c *core) watchNet(ctx context.Context) {
 			return netSignature(ifs)
 		},
 		sbReset: func(ctx context.Context) {
-			if sb, ok := c.getSb().(interface {
-				NetChanged(context.Context) (bool, error)
-			}); ok {
-				if _, err := sb.NetChanged(ctx); err != nil {
-					c.log.Warn("core: net-singbox", "err", err.Error())
+			for _, box := range []api.Singbox{c.getSb(), c.getVpnSb()} {
+				if sb, ok := box.(interface {
+					NetChanged(context.Context) (bool, error)
+				}); ok {
+					if _, err := sb.NetChanged(ctx); err != nil {
+						c.log.Warn("core: net-singbox", "err", err.Error())
+					}
 				}
 			}
 		},
@@ -142,7 +144,13 @@ func (c *core) watchNet(ctx context.Context) {
 				ch.NetChanged()
 			}
 		},
-		chUp:    func() bool { ch := c.getCh(); return ch != nil && ch.State().State == "up" },
+		chUp: func() bool {
+			if c.cfg != nil && !c.cfg.HasChannel() {
+				return true // конфиг «только VPN»: канала нет, перестраиваем только при реальной смене сети
+			}
+			ch := c.getCh()
+			return ch != nil && ch.State().State == "up"
+		},
 		foreign: c.plat.ForeignVPN,
 	}
 	n.last, n.inited = n.sig(), true

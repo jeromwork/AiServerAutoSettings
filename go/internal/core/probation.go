@@ -55,7 +55,7 @@ func (c *core) decide(kind, text string) {
 
 // startProbation — после обновления ждёт канал probationWait и решает, оставлять ли версию.
 func (c *core) startProbation(ctx context.Context) {
-	if c.freshFrom == "" || c.cfg == nil || c.f.Mode.NoChannel {
+	if c.freshFrom == "" || c.cfg == nil || !c.cfg.HasChannel() || c.f.Mode.NoChannel {
 		return
 	}
 	go func() {

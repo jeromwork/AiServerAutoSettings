@@ -58,12 +58,14 @@ func decrypt(c *api.Config, root obj, key []byte) error {
 	if len(key) != 64 || !secret.CheckPassword(key, strOf(root["check"])) {
 		return fail("password", "password", "check", "invalid password")
 	}
-	srv, _ := root["server"].(obj)
-	pk, err := secret.Open(key, strOf(srv["key"]))
-	if err != nil {
-		return fail("decrypt", "decrypt", "server.key", "cannot decrypt")
+	if len(c.Servers) > 0 {
+		srv, _ := root["server"].(obj)
+		pk, err := secret.Open(key, strOf(srv["key"]))
+		if err != nil {
+			return fail("decrypt", "decrypt", "server.key", "cannot decrypt")
+		}
+		c.Servers[0].Key = pk
 	}
-	c.Servers[0].Key = pk
 	paths, _ := root["paths"].(obj)
 	if ch := strOf(paths["channel"]); ch != "" {
 		plain, err := secret.Open(key, ch)
@@ -74,6 +76,18 @@ func decrypt(c *api.Config, root obj, key []byte) error {
 			return fail("decrypt", "json", "paths.channel", "decrypted channel is not JSON")
 		}
 		c.Paths.Channel = plain
+	}
+	vpn, _ := root["vpn"].(obj)
+	vn, _ := vpn["nodes"].(obj)
+	for _, n := range sortedKeys(vn) {
+		plain, err := secret.Open(key, strOf(vn[n]))
+		if err != nil {
+			return fail("decrypt", "decrypt", "vpn.nodes."+n, "cannot decrypt")
+		}
+		if !json.Valid(plain) {
+			return fail("decrypt", "json", "vpn.nodes."+n, "decrypted node is not JSON")
+		}
+		c.VPN.Nodes[n] = plain
 	}
 	s, _ := paths["secrets"].(obj)
 	for _, n := range sortedKeys(s) {
@@ -104,6 +118,12 @@ func register(c *api.Config, log api.Logger) {
 		registerJSON(c.Paths.Channel, log)
 	}
 	for _, v := range c.Paths.Secrets {
+		if len(v) > 0 {
+			log.Secret(string(v))
+			registerJSON(v, log)
+		}
+	}
+	for _, v := range c.VPN.Nodes {
 		if len(v) > 0 {
 			log.Secret(string(v))
 			registerJSON(v, log)

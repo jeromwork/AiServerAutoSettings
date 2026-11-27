@@ -171,6 +171,7 @@ function show(s) {
   if (pcl) pcl.textContent = s.pc ? (s.name || "Компьютер") + " (" + s.pc + " на сервере)" : "";
 
   if (s.vpn) onVPN(s.vpn);
+  if (s.channelConfigured === false) document.getElementById("net-st").innerHTML = "Канал: <b>не настроен</b> (конфиг только для VPN)";
 
   var noCfg = s.config === false;
   document.getElementById("cfg-info").textContent = noCfg ? "Конфиг не задан — вставьте его ниже и нажмите «Применить»." : "";

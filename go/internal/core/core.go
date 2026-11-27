@@ -72,6 +72,7 @@ type core struct {
 	pr  api.Procs
 	sh  api.Shell
 	sb  api.Singbox
+	vsb api.Singbox // отдельный процесс sing-box только для VPN (singbox.RoleVPN)
 	ag  *agent.Agent
 	ch  api.Channel
 	fw  api.Forwarder
@@ -354,10 +355,12 @@ func (c *core) startNetwork(ctx context.Context) {
 		c.tun.mode = c.cfg.VPN.Mode
 	}
 
-	// 5. sing-box (не при --no-singbox и не при --no-channel).
-	if !f.Mode.NoSingbox && !f.Mode.NoChannel {
+	// 5. sing-box канала и ЛВС (не при --no-singbox и --no-channel; без сервера в конфиге «только VPN» канала нет).
+	hasChannel := c.cfg.HasChannel()
+	if hasChannel && !f.Mode.NoSingbox && !f.Mode.NoChannel {
 		sb, e := singbox.New(c.cfg, c.p, log, c.clean, c.pr, singbox.Options{
 			Mode: f.Mode, Instance: c.clean.Instance(), DefaultIface: platform.PhysicalInterface,
+			OnTunCrash: func(e api.Effective) { c.tun.onTunCrash(ctx, e) },
 			LANSocks: func() string {
 				if fw := c.getFw(); fw != nil {
 					return fw.InternalSocks()
@@ -383,6 +386,27 @@ func (c *core) startNetwork(ctx context.Context) {
 		}
 	}
 
+	// 5b. sing-box VPN — отдельный процесс (RemoteAgents-VPN): его запуск/падение не трогает sing-box канала и ЛВС.
+	// Запускается только сторожем (Apply VPN:true); здесь — подготовка (бинарь).
+	if c.cfg != nil && !f.Mode.NoSingbox && f.Mode.AllowsTun() {
+		vsb, e := singbox.New(c.cfg, c.p, log, c.clean, c.pr, singbox.Options{
+			Role: singbox.RoleVPN, Mode: f.Mode, Instance: c.clean.Instance(), DefaultIface: platform.PhysicalInterface,
+			OnTunCrash: func(e api.Effective) { c.tun.onTunCrash(ctx, e) },
+		})
+		if e != nil {
+			log.Error("core: singbox-vpn", "err", e.Error())
+		} else if e = vsb.Start(ctx); e != nil {
+			log.Error("core: singbox-vpn-start", "err", e.Error())
+			if !hasChannel {
+				c.failStart(e)
+			}
+		} else {
+			c.compMu.Lock()
+			c.vsb = vsb
+			c.compMu.Unlock()
+		}
+	}
+
 	// 6. Агент создаётся первым, но ещё не слушает (§5.1).
 	if c.sh != nil {
 		ag, e := agent.New(api.AgentDeps{
@@ -401,7 +425,7 @@ func (c *core) startNetwork(ctx context.Context) {
 	}
 
 	// 7. Канал.
-	if !f.Mode.NoChannel && c.ag != nil {
+	if hasChannel && !f.Mode.NoChannel && c.ag != nil {
 		ch, e := channel.New(c.cfg, c.getSb(), c.ag, log, c.clean, channel.Options{
 			PC: c.pcName(), Version: f.Version, Rollback: f.RollbackReason, Mode: f.Mode,
 		})
@@ -418,8 +442,10 @@ func (c *core) startNetwork(ctx context.Context) {
 				log.Error("core: channel-start", "err", err.Error())
 				c.failStart(err)
 			}
-			go c.watchNet(ctx) // события смены сети → перестроить выход sing-box и канал
 		}
+	}
+	if c.getCh() != nil || !isNil(c.getVpnSb()) {
+		go c.watchNet(ctx) // события смены сети → перестроить выход sing-box (канал и VPN) и канал
 	}
 
 	// 8. forward (поверх канала).
@@ -437,6 +463,21 @@ func (c *core) startNetwork(ctx context.Context) {
 		}
 	}
 	c.startTunGuard(ctx)
+	if c.cfg != nil && !hasChannel && !isNil(c.getVpnSb()) {
+		c.vpnOnlyReady()
+	}
+}
+
+// vpnOnlyReady — конфиг «только VPN»: канала нет, ждать нечего; конфиг считается принятым, как после первого up канала.
+func (c *core) vpnOnlyReady() {
+	c.upOnce.Store(true)
+	c.clearLastErr()
+	if c.gen != "" {
+		if err := config.Commit(c.p, c.gen, c.start); err != nil {
+			c.log.Warn("core: config-commit", "gen", c.gen, "err", err.Error())
+		}
+	}
+	c.publishApply("ready", "Конфиг «только VPN» принят: канал не нужен.")
 }
 
 func (c *core) getCh() api.Channel {
@@ -449,6 +490,12 @@ func (c *core) getSb() api.Singbox {
 	c.compMu.RLock()
 	defer c.compMu.RUnlock()
 	return c.sb
+}
+
+func (c *core) getVpnSb() api.Singbox {
+	c.compMu.RLock()
+	defer c.compMu.RUnlock()
+	return c.vsb
 }
 
 func (c *core) getFw() api.Forwarder {
@@ -618,6 +665,11 @@ func (c *core) stopNetwork(step func(name string, err error)) {
 	}
 	if c.sh != nil {
 		c.bounded("shell", stopStepTimeout, func() { done("shell", c.sh.KillAll()) })
+	}
+	if vsb := c.getVpnSb(); !isNil(vsb) {
+		ctx, cancel := stopCtx()
+		done("singbox-vpn", vsb.Stop(ctx))
+		cancel()
 	}
 	if sb := c.getSb(); !isNil(sb) {
 		ctx, cancel := stopCtx()

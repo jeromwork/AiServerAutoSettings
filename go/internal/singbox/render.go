@@ -105,7 +105,7 @@ func Render(rc api.RenderContext) ([]byte, error) {
 			on bool
 			f  func(api.RenderContext) (api.Part, error)
 		}
-		for _, pt := range []part{{rc.Effective.LAN, renderLAN}, {rc.Effective.VPN, renderVPN}} {
+		for _, pt := range []part{{rc.Effective.LAN, renderLAN}} {
 			if !pt.on {
 				continue
 			}

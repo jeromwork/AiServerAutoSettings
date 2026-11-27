@@ -275,20 +275,22 @@ func build(dir string, data []byte, c *api.Config, key []byte) error {
 	if err := writeFile(filepath.Join(dir, "active.json"), trimBOM(data), 0o600); err != nil {
 		return err
 	}
-	s := c.Servers[0]
-	idKey := strings.ReplaceAll(string(s.Key), "\r\n", "\n")
-	if !strings.HasSuffix(idKey, "\n") {
-		idKey += "\n"
-	}
-	if err := writeFile(filepath.Join(priv, "id_key"), []byte(idKey), 0o600); err != nil {
-		return err
-	}
-	host := s.Host
-	if s.Port != 22 {
-		host = fmt.Sprintf("[%s]:%d", s.Host, s.Port)
-	}
-	if err := writeFile(filepath.Join(priv, "known_hosts"), []byte(host+" "+s.HostKey+"\n"), 0o600); err != nil {
-		return err
+	if len(c.Servers) > 0 { // в конфиге «только VPN» сервера нет
+		s := c.Servers[0]
+		idKey := strings.ReplaceAll(string(s.Key), "\r\n", "\n")
+		if !strings.HasSuffix(idKey, "\n") {
+			idKey += "\n"
+		}
+		if err := writeFile(filepath.Join(priv, "id_key"), []byte(idKey), 0o600); err != nil {
+			return err
+		}
+		host := s.Host
+		if s.Port != 22 {
+			host = fmt.Sprintf("[%s]:%d", s.Host, s.Port)
+		}
+		if err := writeFile(filepath.Join(priv, "known_hosts"), []byte(host+" "+s.HostKey+"\n"), 0o600); err != nil {
+			return err
+		}
 	}
 	if len(c.Paths.Channel) > 0 {
 		if err := writeFile(filepath.Join(priv, "channel.json"), c.Paths.Channel, 0o600); err != nil {
