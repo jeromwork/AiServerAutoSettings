@@ -239,6 +239,7 @@ func (u *UI) registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/config/revert", u.handleConfigRevert)
 	mux.HandleFunc("/api/config", u.handleConfigExport)
 	mux.HandleFunc("/api/vpn", u.handleVPN)
+	mux.HandleFunc("/api/vpn/check", u.handleVPNCheck)
 	mux.HandleFunc("/revert", u.handleConfigRevert)
 	mux.HandleFunc("/api/events", u.handleEvents)
 	mux.HandleFunc("/api/restart", u.handleRestart)
@@ -532,6 +533,24 @@ func (u *UI) handleVPN(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	replyJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleVPNCheck — POST /api/vpn/check: проверка внешнего адреса выхода сейчас (кнопка «Проверить»).
+func (u *UI) handleVPNCheck(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !u.checkAuth(w, req) {
+		return
+	}
+	ctx := context.WithoutCancel(req.Context())
+	var st map[string]any
+	if err := callTimeout(20*time.Second, "проверка выхода", func() (e error) { st, e = u.act.CheckExit(ctx); return }); err != nil {
+		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "problems": []string{err.Error()}})
+		return
+	}
+	replyJSON(w, http.StatusOK, map[string]any{"ok": true, "vpn": st})
 }
 
 func (u *UI) handleConfigRevert(w http.ResponseWriter, req *http.Request) {

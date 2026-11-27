@@ -83,6 +83,7 @@ pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; word-break: brea
   <label><input type="radio" name="vpnmode" value="auto"> Авто</label>
   <label><input type="radio" name="vpnmode" value="only"> Только наш</label>
   <div id="vpn-st"></div>
+  <div id="vpn-exit"></div> <button id="vpn-check" type="button">Проверить</button>
   <div id="vpn-msg"></div>
 </div>
 
@@ -425,7 +426,28 @@ function onVPN(v) {
   var h = "Режим: <b>" + esc(VPNMODE[v.mode] || v.mode || "—") + "</b>, состояние: <b>" + esc(VPNST[v.state] || v.state || "—") + "</b>";
   if (v.reason) h += " <span class=err>" + esc(v.reason) + "</span>";
   document.getElementById("vpn-st").innerHTML = h;
+  var e = v.exit, ex = document.getElementById("vpn-exit");
+  if (!e) { ex.textContent = ""; return; }
+  if (e.error) { ex.className = "err"; ex.textContent = "Выход: не удалось определить (" + e.error + ")"; return; }
+  var via = e.via ? " через " + e.via : "";
+  if (!e.known) { ex.className = ""; ex.textContent = "Выход: " + e.ip + via + " (ожидаемый адрес не задан)"; }
+  else if (e.ok) { ex.className = "ok"; ex.textContent = "Выход: " + e.ip + " \u2713"; }
+  else { ex.className = "err"; ex.textContent = "Выход: " + e.ip + via + " \u2014 не наш адрес"; }
 }
+
+document.getElementById("vpn-check").onclick = function() {
+  var b = this, m = document.getElementById("vpn-msg");
+  b.disabled = true;
+  post("/api/vpn/check", {}).then(function(x) {
+    b.disabled = false;
+    if (x.ok && x.vpn) onVPN(x.vpn);
+    else { m.className = "err"; m.textContent = (x.problems || [x.error || "Ошибка"]).join("\n"); }
+  }).catch(function(e) {
+    b.disabled = false;
+    m.className = "err";
+    m.textContent = "Нет ответа (" + (e.shown || e.message) + ")";
+  });
+};
 
 Array.prototype.forEach.call(document.querySelectorAll("input[name=vpnmode]"), function(r) {
   r.onchange = function() {

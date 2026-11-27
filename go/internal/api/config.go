@@ -52,6 +52,8 @@ type VPNCfg struct {
 	Mode    string // off | auto | only
 	Bridges []string
 	Direct  VPNDirect
+	// ExitIPs — ожидаемые внешние адреса выхода (vpn.exitIPs); пусто → IP узлов vpn.nodes.
+	ExitIPs []string
 	// Nodes — собственные узлы VPN (vpn.nodes): имя → расшифрованный outbound sing-box (JSON с полем type). Работают без paths/server.
 	Nodes map[string]json.RawMessage
 }
