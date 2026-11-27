@@ -30,10 +30,13 @@ type Options struct {
 	LANSocks           func() string
 	RawConfig          string
 	OnTunCrash         func(api.Effective) // sing-box с TUN упал (откат без TUN уже запущен)
+	OnEvent            func(kind string)   // события из журнала канального sing-box (EvNetworkChanged, EvOutboundError)
 	DefaultIface       func() string       // физический внешний интерфейс сейчас ("" — не определён)
 }
 
 type box struct {
+	pmu            sync.Mutex
+	procs          map[api.Process]struct{} // живые процессы (счётчик, уборка забытых)
 	mu             sync.Mutex
 	control        sync.Mutex
 	opCancel       context.CancelFunc
@@ -348,7 +351,8 @@ func (s *box) launch(ctx context.Context, e api.Effective) error {
 	}
 	s.liveCancel = cancel
 	s.control.Unlock()
-	proc, err := s.pr.Start(life, api.ProcSpec{Name: s.Name(), Path: s.exe(), Args: []string{"run", "-c", s.config}, Stream: api.StreamSB})
+	so, se := s.outWriters()
+	proc, err := s.pr.Start(life, api.ProcSpec{Name: s.Name(), Path: s.exe(), Args: []string{"run", "-c", s.config}, Stream: api.StreamSB, Stdout: so, Stderr: se})
 	s.control.Lock()
 	s.live = proc
 	s.control.Unlock()
@@ -358,6 +362,7 @@ func (s *box) launch(ctx context.Context, e api.Effective) error {
 	}
 	s.proc = proc
 	s.cancel = cancel
+	s.track(proc)
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
