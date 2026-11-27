@@ -140,16 +140,6 @@ func vpnSelect(cfg *api.Config) (vpnSel, error) {
 		if err != nil {
 			return sel, err
 		}
-		if h := cfg.Servers[0].Host; h != "" {
-			hosts[h] = true
-		}
-		for _, p := range paths {
-			// серверы всех путей (в т. ч. ssh/канал) — мимо нашего TUN, по маршрутам ОС (через чужой VPN, если он есть)
-			for _, o := range p.outs {
-				if h, _ := o["server"].(string); h != "" {
-					hosts[h] = true
-				}
-			}
 			bad := strings.HasSuffix(p.final, "-vpn") || seenFinal[p.final] || seenTag[p.final]
 			for _, o := range p.outs {
 				if t, _ := o["type"].(string); t == "ssh" || t == "direct" || t == "socks" {
