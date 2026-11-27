@@ -240,6 +240,7 @@ func (u *UI) registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/revert", u.handleConfigRevert)
 	mux.HandleFunc("/api/events", u.handleEvents)
 	mux.HandleFunc("/api/restart", u.handleRestart)
+	mux.HandleFunc("/api/pause", u.handlePause)
 	mux.HandleFunc("/api/exit", u.handleExit)
 	mux.HandleFunc("/exit", u.handleExit)
 }
@@ -517,6 +518,34 @@ func (u *UI) handleRestart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	replyJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handlePause — POST /api/pause on=1 (пауза) | on=0 (продолжить); та же авторизация, что у остальных действий.
+func (u *UI) handlePause(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !u.checkAuth(w, req) {
+		return
+	}
+	if !parseForm(w, req) {
+		return
+	}
+	onVal := req.PostFormValue("on")
+	on := onVal == "1" || strings.EqualFold(onVal, "true")
+	ctx := context.WithoutCancel(req.Context())
+	var err error
+	if on {
+		err = u.act.Pause(ctx)
+	} else {
+		err = u.act.Resume(ctx)
+	}
+	if err != nil {
+		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	replyJSON(w, http.StatusOK, map[string]any{"ok": true, "paused": on})
 }
 
 func (u *UI) handleExit(w http.ResponseWriter, req *http.Request) {

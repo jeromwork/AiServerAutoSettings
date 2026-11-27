@@ -92,6 +92,12 @@ type core struct {
 	tun     *tunGuard
 	netDone chan struct{}
 
+	// Пауза: netCancel гасит всё сетевое (контекст startNetwork); pauseMu — одна смена паузы за раз.
+	paused    atomic.Bool
+	pauseMu   sync.Mutex
+	netCancel context.CancelFunc
+	runCtx    context.Context
+
 	onStop   []func()
 	outMu    sync.Mutex
 	goodOnce sync.Once
@@ -164,6 +170,7 @@ func Run(ctx context.Context, f Flags) int {
 	defer cancel()
 
 	c.control.Store(true)
+	c.runCtx = runCtx
 	c.startComponents(runCtx)
 
 	// 11. health, 12. сигналы сторожу.
@@ -304,22 +311,33 @@ func (c *core) startComponents(ctx context.Context) {
 	}
 
 	// 5–8. Сеть стартует в своей горутине: страница, health и alive не ждут загрузку/запуск sing-box.
-	if c.cfg != nil && c.pr != nil {
-		c.netDone = make(chan struct{})
-		go func() {
-			defer close(c.netDone)
-			c.startNetwork(ctx)
-			if isNil(c.getCh()) && !c.failed.Load() {
-				c.sendGood() // канала нет (--no-channel / сбой, не требующий отката)
-			}
-			c.publishStatus()
-		}()
+	if _, err := os.Stat(filepath.Join(c.p.State, api.PauseFile)); err == nil && c.cfg != nil {
+		c.paused.Store(true) // ядро упало на паузе: сторож поднял его снова, сеть остаётся выключенной
+		log.Info("pause.restored", "reason", "core restarted while paused")
+	}
+	if c.cfg != nil && c.pr != nil && !c.paused.Load() {
+		c.startNet(ctx)
 	}
 
 	// 10. Обновления: первая проверка и далее по расписанию; под одним мьютексом с остальными записями.
 	if c.upd != nil && (c.cfg == nil || c.cfg.Update.Auto) {
 		time.AfterFunc(updateFirst, func() { c.autoUpdate(ctx) })
 	}
+}
+
+// startNet — запуск сети в своей горутине под отменяемым контекстом (его гасит пауза).
+func (c *core) startNet(ctx context.Context) {
+	nctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	c.netCancel, c.netDone = cancel, done
+	go func() {
+		defer close(done)
+		c.startNetwork(nctx)
+		if isNil(c.getCh()) && !c.failed.Load() {
+			c.sendGood() // канала нет (--no-channel / сбой, не требующий отката)
+		}
+		c.publishStatus()
+	}()
 }
 
 func (c *core) updateChannel() string {
@@ -545,16 +563,12 @@ func (c *core) bounded(name string, d time.Duration, fn func()) {
 
 // stopComponents — обратный порядок, затем cleanup.Run("exit"). Каждый шаг ограничен по времени.
 func (c *core) stopComponents() {
+	c.pauseMu.Lock()
+	defer c.pauseMu.Unlock()
 	stopCtx := func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.Background(), stopStepTimeout)
 	}
-	if c.netDone != nil { // запуск сети уже отменён контекстом; ждём его конец, но не бесконечно
-		select {
-		case <-c.netDone:
-		case <-time.After(stopStepTimeout):
-			c.log.Warn("core: stop-timeout", "component", "network-start")
-		}
-	}
+	c.waitNetDone()
 	for _, fn := range c.onStop {
 		fn()
 	}
@@ -564,42 +578,64 @@ func (c *core) stopComponents() {
 		cancel()
 		_ = os.Remove(filepath.Join(c.p.State, UIURLFile))
 	}
+	c.stopNetwork(nil)
+}
+
+// waitNetDone — запуск сети уже отменён контекстом; ждём его конец, но не бесконечно.
+func (c *core) waitNetDone() {
+	if c.netDone == nil {
+		return
+	}
+	select {
+	case <-c.netDone:
+	case <-time.After(stopStepTimeout):
+		c.log.Warn("core: stop-timeout", "component", "network-start")
+	}
+}
+
+// stopNetwork — остановка всего сетевого (канал, forward, агент, shell, sing-box, процессы) и уборка.
+// step (может быть nil) вызывается после каждого шага: имя и ошибка. Общая часть выхода и паузы.
+func (c *core) stopNetwork(step func(name string, err error)) {
+	stopCtx := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), stopStepTimeout)
+	}
+	done := func(name string, err error) {
+		if err != nil {
+			c.log.Warn("core: stop", "component", name, "err", err.Error())
+		}
+		if step != nil {
+			step(name, err)
+		}
+	}
 	for _, comp := range []api.Component{c.getFw(), c.getCh()} {
 		if isNil(comp) {
 			continue
 		}
 		ctx, cancel := stopCtx()
-		if err := comp.Stop(ctx); err != nil {
-			c.log.Warn("core: stop", "component", comp.Name(), "err", err.Error())
-		}
+		done(comp.Name(), comp.Stop(ctx))
 		cancel()
 	}
 	if c.ag != nil {
-		c.bounded("agent", stopStepTimeout, func() {
-			if err := c.ag.Close(); err != nil {
-				c.log.Warn("core: stop", "component", "agent", "err", err.Error())
-			}
-		})
+		c.bounded("agent", stopStepTimeout, func() { done("agent", c.ag.Close()) })
 	}
 	if c.sh != nil {
-		c.bounded("shell", stopStepTimeout, func() { _ = c.sh.KillAll() })
+		c.bounded("shell", stopStepTimeout, func() { done("shell", c.sh.KillAll()) })
 	}
 	if sb := c.getSb(); !isNil(sb) {
 		ctx, cancel := stopCtx()
-		if err := sb.Stop(ctx); err != nil {
-			c.log.Warn("core: stop", "component", "singbox", "err", err.Error())
-		}
+		done("singbox", sb.Stop(ctx))
 		cancel()
 	}
 	if c.pr != nil {
 		ctx, cancel := stopCtx()
-		_ = c.pr.KillAll(ctx)
+		done("procs", c.pr.KillAll(ctx))
 		cancel()
 	}
 	c.bounded("cleanup", 30*time.Second, func() {
 		for _, issue := range c.clean.Run(context.Background(), "exit") {
 			c.log.Warn("core: cleanup-exit", "issue", issue)
 		}
+		done("cleanup", nil)
 	})
 }
 

@@ -491,6 +491,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		return 1
 	}
 	defer unlock()
+	_ = os.Remove(filepath.Join(p.State, api.PauseFile)) // новый запуск программы: пауза снята
 
 	// Любой выход сторожа (в том числе остановка по boot-failures и паника) —
 	// сразу уборка: на ПК не остаются процессы, порты, lock/url-файлы.

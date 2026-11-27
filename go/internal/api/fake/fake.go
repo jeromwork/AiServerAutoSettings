@@ -77,7 +77,9 @@ func (a *Actions) Rollback(ctx context.Context, reason string) error {
 	fmt.Printf("fake: Rollback %s\n", reason)
 	return nil
 }
-func (a *Actions) Exit(ctx context.Context) error { fmt.Println("fake: Exit"); return nil }
+func (a *Actions) Exit(ctx context.Context) error   { fmt.Println("fake: Exit"); return nil }
+func (a *Actions) Pause(ctx context.Context) error  { fmt.Println("fake: Pause"); return nil }
+func (a *Actions) Resume(ctx context.Context) error { fmt.Println("fake: Resume"); return nil }
 
 // Channel is a stub api.Channel.
 type Channel struct{}

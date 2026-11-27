@@ -44,6 +44,7 @@ func (c *core) Status() map[string]any {
 		"uptime":      int(time.Since(c.start).Seconds()),
 		"mode":        map[string]bool{"safe": c.f.Mode.Safe, "noTun": c.f.Mode.NoTun, "noChannel": c.f.Mode.NoChannel, "noSingbox": c.f.Mode.NoSingbox},
 		"control":     c.control.Load(),
+		"paused":      c.paused.Load(),
 		"config":      c.cfg != nil,
 		"gen":         c.gen,
 		"prevVersion": supervise.ReadInfo(c.p).Previous,

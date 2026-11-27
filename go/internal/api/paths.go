@@ -20,3 +20,6 @@ const (
 	LockOp      = "op.lock"      // одна операция записи: обновление, push, apply/revert конфига, откат, uninstall
 	LockCleanup = "cleanup.lock" // одна уборка одновременно
 )
+
+// PauseFile — файл в State: пауза включена. Переживает падение ядра; сторож удаляет его при своём старте.
+const PauseFile = "paused"

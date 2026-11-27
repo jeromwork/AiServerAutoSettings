@@ -162,11 +162,54 @@ func runCLI(ctx context.Context, name string, args []string) int {
 	case "rollback":
 		return cliRollback(ctx, p, log)
 
+	case "pause", "resume":
+		return cliPause(p, name == "pause")
+
 	case "update":
 		fmt.Fprintln(os.Stderr, "update: run through the web page or the running core (api.Actions.UpdateNow)")
 		return 1
 	}
 	return 1
+}
+
+// cliPause — `remoteagents pause|resume`: просит живое ядро через его страницу (токен из webui.url).
+func cliPause(p api.Paths, on bool) int {
+	b, err := os.ReadFile(filepath.Join(p.State, core.UIURLFile))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "core is not running (no webui address)")
+		return 1
+	}
+	u, err := url.Parse(strings.TrimSpace(string(b)))
+	if err != nil || u.Host == "" {
+		fmt.Fprintln(os.Stderr, "pause: bad webui address")
+		return 1
+	}
+	u.Path = "/api/pause"
+	v := "0"
+	if on {
+		v = "1"
+	}
+	cl := &http.Client{Timeout: 90 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	resp, err := cl.PostForm(u.String(), url.Values{"on": {v}})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pause: core did not answer:", err)
+		return 1
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var r struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&r) != nil || !r.OK {
+		fmt.Fprintln(os.Stderr, "pause:", r.Error)
+		return 1
+	}
+	if on {
+		fmt.Println("paused")
+	} else {
+		fmt.Println("resumed")
+	}
+	return 0
 }
 
 // cliRollback — `remoteagents rollback`: вернуться на предыдущую рабочую версию (и конфиг, который она читает).
