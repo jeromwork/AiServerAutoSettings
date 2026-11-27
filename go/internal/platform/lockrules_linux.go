@@ -4,6 +4,7 @@ package platform
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -26,8 +27,9 @@ const (
 
 // Подменяются в тестах.
 var (
-	sweepExec  = realSweepExec
-	sweepComms = liveComms
+	sweepExec     = realSweepExec
+	sweepProcs    = liveProcs
+	sweepReadFile = os.ReadFile
 )
 
 // realSweepExec — в тестовых бинарниках системные команды не запускаем никогда (nft/ip на хосте разработки).
@@ -38,13 +40,19 @@ func realSweepExec(ctx context.Context, name string, args ...string) ([]byte, er
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
-// liveComms — имена (comm) всех живых процессов из /proc.
-func liveComms() []string {
+// sweepProc — живой процесс: comm и аргументы командной строки.
+type sweepProc struct {
+	comm string
+	args []string
+}
+
+// liveProcs — все живые процессы из /proc (comm + cmdline).
+func liveProcs() []sweepProc {
 	ents, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
 	}
-	var out []string
+	var out []sweepProc
 	for _, e := range ents {
 		if _, err := strconv.Atoi(e.Name()); err != nil {
 			continue
@@ -53,30 +61,70 @@ func liveComms() []string {
 		if err != nil {
 			continue
 		}
-		out = append(out, strings.TrimSpace(string(b)))
+		c, _ := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		out = append(out, sweepProc{comm: strings.TrimSpace(string(b)), args: strings.Split(strings.TrimRight(string(c), "\x00"), "\x00")})
 	}
 	return out
 }
 
-// SweepVPNLock снимает остатки nft-таблицы sing-box и ip rule 9000–9010, если не осталось живого sing-box, которому они принадлежат.
-// Живой процесс VPN (ra-vpn) или чужой sing-box — правила его, не трогаем. ip rule трогаем только если нет и ядра/LAN (ra-core), у них те же приоритеты.
+// holdsTun — процесс sing-box, который держит TUN (а значит, и свои правила ОС): в его конфиге (`run -c <файл>`) есть inbound type=tun.
+// Канальный sing-box (ra-core без TUN) правил не держит и уборку не блокирует. Нечитаемый конфиг: чужой sing-box — считаем держателем
+// (чужое не трогаем), наш ra-core/ra-vpn — нет.
+func holdsTun(p sweepProc) bool {
+	ours := p.comm == "ra-core" || p.comm == "ra-vpn"
+	cfg := ""
+	for i, a := range p.args {
+		if (a == "-c" || a == "--config") && i+1 < len(p.args) {
+			cfg = p.args[i+1]
+		}
+	}
+	if cfg == "" {
+		return !ours
+	}
+	b, err := sweepReadFile(cfg)
+	if err != nil {
+		return !ours
+	}
+	var doc struct {
+		Inbounds []struct {
+			Type string `json:"type"`
+		} `json:"inbounds"`
+	}
+	if json.Unmarshal(b, &doc) != nil {
+		return !ours
+	}
+	for _, in := range doc.Inbounds {
+		if in.Type == "tun" {
+			return true
+		}
+	}
+	return false
+}
+
+// SweepVPNLock снимает остатки nft-таблицы sing-box и ip rule 9000–9010, если не осталось живого sing-box с TUN, которому они принадлежат.
+// Таблицу держит живой ra-vpn или чужой sing-box с TUN; ip rule — любой sing-box с TUN (LAN ядра ra-core тоже ставит 9000+).
+// Канальный sing-box без TUN уборку не блокирует.
 func SweepVPNLock(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, sweepTimeout)
 	defer cancel()
-	vpn, anyBox := false, false
-	for _, c := range sweepComms() {
-		switch c {
-		case "ra-vpn", "sing-box":
-			vpn, anyBox = true, true
-		case "ra-core":
-			anyBox = true
+	vpn, anyTun := false, false
+	for _, p := range sweepProcs() {
+		switch p.comm {
+		case "ra-vpn", "sing-box", "ra-core":
+			if !holdsTun(p) {
+				continue
+			}
+			anyTun = true
+			if p.comm != "ra-core" {
+				vpn = true
+			}
 		}
 	}
 	var errs []error
 	if !vpn {
 		errs = append(errs, sweepNft(ctx))
 	}
-	if !anyBox {
+	if !anyTun {
 		errs = append(errs, sweepIPRules(ctx))
 	}
 	return errors.Join(errs...)
