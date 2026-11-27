@@ -403,6 +403,9 @@ func (a *Agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(path) > 200 {
 		path = path[:200]
 	}
+	if r.Method == http.MethodGet && res.code < 400 {
+		return // успешные чтения не пишем: они вытесняли события канала; ошибки и изменяющие запросы остаются
+	}
 	a.d.Log.Info("request", "method", r.Method, "path", path, "code", res.code)
 }
 

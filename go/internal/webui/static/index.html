@@ -237,7 +237,7 @@ document.getElementById("btn-rollback").onclick = function() {
   });
 };
 
-var USTAGE = {checking: "Проверяю", downloading: "Скачиваю", verifying: "Проверяю кандидата", restarting: "Запускаю", ready: "Готово", uptodate: "Обновлений нет", rolledback: "Откат", warn: "Внимание", error: "Ошибка"};
+var USTAGE = {checking: "Проверяю", downloading: "Скачиваю", verifying: "Проверяю кандидата", restarting: "Запускаю", ready: "Готово", uptodate: "Обновлений нет", available: "Доступно обновление", rolledback: "Откат", warn: "Внимание", error: "Ошибка"};
 function onUpdate(a) {
   var el = document.getElementById("upd-st");
   el.className = (a.stage === "error" || a.stage === "rolledback") ? "err" : (a.stage === "ready" || a.stage === "uptodate" ? "ok" : "");

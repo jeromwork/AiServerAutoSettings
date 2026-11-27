@@ -28,6 +28,7 @@ import (
 	"remoteagents/internal/platform"
 	"remoteagents/internal/procs"
 	"remoteagents/internal/singbox"
+	"remoteagents/internal/supervise"
 	"remoteagents/internal/update"
 	"remoteagents/internal/webui"
 )
@@ -44,8 +45,7 @@ type Flags struct {
 const (
 	aliveEvery      = 10 * time.Second // протокол сторожа (§5.3), не опрос
 	healthEvery     = 60 * time.Second // строка health (§2)
-	updateFirst     = 10 * time.Minute
-	updateEvery     = 6 * time.Hour
+	updateCheckGap  = 30 * time.Minute // не чаще одной проверки в 30 мин (проверка по событию «канал up», без таймеров)
 	stopStepTimeout = 10 * time.Second
 )
 
@@ -82,11 +82,12 @@ type core struct {
 	control atomic.Bool
 
 	// Ошибка запуска сети (понятный текст для страницы) и признак «первый up уже был».
-	failed  atomic.Bool
-	upOnce  atomic.Bool
-	errMu   sync.Mutex
-	lastErr string
-	opMu    sync.Mutex // UpdateNow, ConfigApply и прочие записи — одна за раз (+ LockOp между процессами)
+	failed     atomic.Bool
+	upOnce     atomic.Bool
+	errMu      sync.Mutex
+	lastErr    string
+	updCheckAt atomic.Int64
+	opMu       sync.Mutex // UpdateNow, ConfigApply и прочие записи — одна за раз (+ LockOp между процессами)
 
 	compMu  sync.RWMutex // ch/sb/fw/ag пишет startNetwork (в своей горутине), читают страница и агент
 	ev      events
@@ -321,10 +322,8 @@ func (c *core) startComponents(ctx context.Context) {
 		c.startNet(ctx)
 	}
 
-	// 10. Обновления: первая проверка и далее по расписанию; под одним мьютексом с остальными записями.
-	if c.upd != nil && (c.cfg == nil || c.cfg.Update.Auto) {
-		time.AfterFunc(updateFirst, func() { c.autoUpdate(ctx) })
-	}
+	// 10. Обновления только вручную: проверка «есть ли новая» идёт по событию «канал up» (см. checkUpdateAvailable),
+	// ставит версию только кнопка «Обновить» (UpdateNow / POST /api/update).
 }
 
 // startNet — запуск сети в своей горутине под отменяемым контекстом (его гасит пауза).
@@ -576,6 +575,7 @@ func (c *core) watchChannel(ctx context.Context, ch <-chan api.ChannelState, uns
 				c.failStart(errors.New(st.Reason))
 			}
 			if st.State == "up" {
+				go c.checkUpdateAvailable(ctx)
 				c.upOnce.Store(true)
 				c.clearLastErr()
 				if c.gen != "" {
@@ -723,18 +723,35 @@ func (c *core) healthLoop(ctx context.Context) {
 	}
 }
 
-func (c *core) autoUpdate(ctx context.Context) {
-	if ctx.Err() != nil {
+// checkUpdateAvailable: только проверка (без загрузки и установки); если есть новее — событие «available» на страницу.
+func (c *core) checkUpdateAvailable(ctx context.Context) {
+	if c.upd == nil || ctx.Err() != nil || (c.cfg != nil && !c.cfg.Update.Auto) {
 		return
 	}
-	if c.isDevBuild() {
-		c.log.Info("core: auto-update-skip-dev", "version", c.f.Version)
-		return // dev/dirty/build 0: только вручную
+	now := time.Now().UnixNano()
+	last := c.updCheckAt.Load()
+	if last != 0 && now-last < int64(updateCheckGap) {
+		return
 	}
-	if err := c.updateNow(ctx, false); err != nil && err != api.ErrBusy {
-		c.log.Warn("core: auto-update", "err", err.Error())
+	if !c.updCheckAt.CompareAndSwap(last, now) {
+		return
 	}
-	time.AfterFunc(updateEvery, func() { c.autoUpdate(ctx) })
+	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	r, err := c.UpdateCheck(cctx)
+	if err != nil {
+		c.log.Warn("core: update-check", "err", err.Error())
+		return
+	}
+	if r == nil {
+		return
+	}
+	if supervise.ReadInfo(c.p).Bad == r.Version {
+		c.log.Info("core: update-available-skip-bad", "version", r.Version)
+		return
+	}
+	c.log.Info("core: update-available", "version", r.Version)
+	c.publishUpdate("available", "Доступна версия "+r.Version+" (установлена "+c.f.Version+"). Нажмите «Обновить», когда удобно.")
 }
 
 // isDevBuild: сборка без номера выпуска (build 0) или с git-суффиксом/dirty — автообновление отключено.
