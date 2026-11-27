@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -288,6 +289,10 @@ func RenderVPN(rc api.RenderContext) ([]byte, error) {
 		"auto_route": true, "strict_route": lock,
 		"route_address":         SplitRoutes(rc.VPNSplit),
 		"route_exclude_address": excludeSet(rc, sel.hosts)}
+	if lock && vpnGOOS == "linux" {
+		// Linux: sing-box сам ставит таблицу nftables и ip rule и снимает их при выходе; остатки после kill убирает platform.SweepVPNLock.
+		tun["auto_redirect"] = true
+	}
 	outs := append([]m(nil), sel.outs...)
 	outs = append(outs,
 		m{"type": "urltest", "tag": "vpn-out", "outbounds": sel.finals, "url": VPNProbeURL, "interval": "3m", "tolerance": 100, "interrupt_exist_connections": false},
@@ -296,6 +301,9 @@ func RenderVPN(rc api.RenderContext) ([]byte, error) {
 	return json.Marshal(m{"log": m{"level": "warn"}, "inbounds": []m{tun}, "outbounds": outs, "route": route,
 		"experimental": m{"clash_api": m{"external_controller": fmt.Sprintf("127.0.0.1:%d", rc.ClashPort), "secret": rc.ClashSecret}}})
 }
+
+// vpnGOOS — ОС для выбора способа перекрытия (подменяется в тестах).
+var vpnGOOS = runtime.GOOS
 
 // selfProcName — имя исполняемого файла этой программы (для правила process_name).
 func selfProcName() string {
