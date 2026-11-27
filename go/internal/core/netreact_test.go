@@ -48,7 +48,7 @@ func TestNetSignatureIgnoresForeignAdapters(t *testing.T) {
 	}
 }
 
-func TestNetReactRebuildsOnlyOnRealChangeOrDownChannel(t *testing.T) {
+func TestNetReactRebuildsOnlyOnRealChange(t *testing.T) {
 	sig, up := "wifi|1", true
 	var sb, ch int
 	n := &netReact{log: &fake.Logger{}, sig: func() string { return sig }, chUp: func() bool { return up },
@@ -61,9 +61,9 @@ func TestNetReactRebuildsOnlyOnRealChangeOrDownChannel(t *testing.T) {
 	if !n.onChange(context.Background()) || sb != 1 || ch != 1 {
 		t.Fatalf("смена сети не обработана sb=%d ch=%d", sb, ch)
 	}
-	up = false // канал лежит — любое событие сети перестраивает
-	if !n.onChange(context.Background()) || sb != 2 || ch != 2 {
-		t.Fatalf("sb=%d ch=%d", sb, ch)
+	up = false // канал лежит, но сеть та же — событие без реальной смены не перестраивает (сбой 27.11)
+	if n.onChange(context.Background()) || sb != 1 || ch != 1 {
+		t.Fatalf("перестройка без смены сети sb=%d ch=%d", sb, ch)
 	}
 }
 
