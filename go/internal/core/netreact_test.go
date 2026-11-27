@@ -176,6 +176,8 @@ func (s *fellBackSb) Apply(context.Context, api.Effective) error { return nil }
 
 // Интерфейс выхода пробы не наш — проба неудачна, HTTP не нужен.
 func TestProbeFailsWhenExitIfaceNotOurs(t *testing.T) {
+	defer func(f func() (int, string)) { foreignRoutes = f }(foreignRoutes)
+	foreignRoutes = func() (int, string) { return 0, "" }
 	c, _ := newVerifyCore(&fvPlat{exit: "Ethernet"})
 	c.tun.vpnState = "up"
 	c.tun.probe(context.Background())

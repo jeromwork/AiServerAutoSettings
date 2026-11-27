@@ -38,6 +38,31 @@ var vpnDirectProcs = []string{
 	"Happ.exe", "happ.exe", "xray.exe", "v2rayN.exe", "tailscaled.exe", "Tailscale.exe",
 }
 
+// MaxVPNSplit — предел нарезки: 2^12 = 4096 блоков IPv4. /16 (65536 маршрутов) ОС добавляла бы минутами и сама стала бы помехой.
+const MaxVPNSplit = 12
+
+// SplitRoutes — route_address VPN. n<=1 — как раньше (0/1, 128/1, ::/1, 8000::/1); иначе 0.0.0.0/0 нарезан блоками /n
+// (мельче маршрутов чужого VPN длиной n-1), IPv6 — глобальная 2000::/3 блоками /max(n,3).
+func SplitRoutes(n int) []string {
+	if n <= 1 {
+		return []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"}
+	}
+	n = min(n, MaxVPNSplit)
+	out := make([]string, 0, 1<<n+1<<(n-3+1))
+	step := uint32(1) << (32 - n)
+	for i := uint32(0); i < 1<<n; i++ {
+		a := i * step
+		out = append(out, fmt.Sprintf("%d.%d.%d.%d/%d", a>>24, a>>16&255, a>>8&255, a&255, n))
+	}
+	n6 := max(n, 3)
+	for i := uint32(0); i < 1<<(n6-3); i++ {
+		// 2000::/3 → первые n6 бит: 001 + (n6-3) бит счётчика; n6 <= 12, значит всё помещается в первые 16 бит
+		hi := uint32(0x2000)>>(16-n6)<<(16-n6) | i<<(16-n6)
+		out = append(out, fmt.Sprintf("%x::/%d", hi, n6))
+	}
+	return out
+}
+
 // VPNProbeURL — адрес проверки туннеля (не РФ → всегда через vpn-out).
 // VPNProbeAddr — адрес для проверки интерфейса выхода (не РФ, не в исключениях vpnExclude → по маршрутам идёт в наш TUN).
 const VPNProbeAddr = "8.8.8.8:53"
@@ -251,7 +276,7 @@ func RenderVPN(rc api.RenderContext) ([]byte, error) {
 	tun := m{"type": "tun", "tag": "vpn-in", "interface_name": name,
 		"address": []string{"172.19.8.1/30", "fdfe:dcba:9877::1/126"}, "mtu": 1400,
 		"auto_route": true, "strict_route": false,
-		"route_address":         []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"},
+		"route_address":         SplitRoutes(rc.VPNSplit),
 		"route_exclude_address": excludeSet(rc, sel.hosts)}
 	outs := append([]m(nil), sel.outs...)
 	outs = append(outs,
