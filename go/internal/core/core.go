@@ -98,11 +98,12 @@ type core struct {
 	netCancel context.CancelFunc
 	runCtx    context.Context
 
-	onStop   []func()
-	outMu    sync.Mutex
-	goodOnce sync.Once
-	quitOnce sync.Once
-	quit     chan quitReq
+	onStop    []func()
+	outMu     sync.Mutex
+	goodOnce  sync.Once
+	freshFrom string // версия, с которой только что обновились (испытание версии), "" — не обновление
+	quitOnce  sync.Once
+	quit      chan quitReq
 }
 
 // Run — ядро целиком. Код выхода: 0 — выход, 3 — перезапуск/новый слот (api.Exit*).
@@ -172,16 +173,16 @@ func Run(ctx context.Context, f Flags) int {
 	c.control.Store(true)
 	c.runCtx = runCtx
 	c.startComponents(runCtx)
+	// Версия хороша, когда ядро стартовало, конфиг прочитан (или отвергнут проверкой) и страница отвечает;
+	// связь с сервером и правильность конфига на это не влияют (см. probation.go).
+	c.sendGood()
+	c.startProbation(runCtx)
 
 	// 11. health, 12. сигналы сторожу.
 	bg := sync.WaitGroup{}
 	bg.Add(2)
 	go func() { defer bg.Done(); c.healthLoop(runCtx) }()
 	go func() { defer bg.Done(); c.aliveLoop(runCtx) }()
-	if c.netDone == nil {
-		// Нет сети (нет конфига / сбой procs): ждать «up» нечего, версия жива, когда страница поднята.
-		c.sendGood()
-	}
 	go c.pathsLoop(runCtx)
 	if f.Pprof != "" {
 		c.startPprof(f.Pprof)
@@ -333,9 +334,6 @@ func (c *core) startNet(ctx context.Context) {
 	go func() {
 		defer close(done)
 		c.startNetwork(nctx)
-		if isNil(c.getCh()) && !c.failed.Load() {
-			c.sendGood() // канала нет (--no-channel / сбой, не требующий отката)
-		}
 		c.publishStatus()
 	}()
 }
@@ -542,7 +540,7 @@ func (c *core) watchChannel(ctx context.Context, ch <-chan api.ChannelState, uns
 			}
 			c.onChannelState(st) // channel/attempts/paths + свежий status — после commit и очистки ошибки
 			if st.State == "up" {
-				c.sendGood()
+				c.recordChannelOK()
 			}
 		}
 	}

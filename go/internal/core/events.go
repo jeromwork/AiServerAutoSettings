@@ -146,7 +146,8 @@ func (c *core) loadUpdating() {
 		return
 	}
 	if m.Version == c.f.Version {
-		c.publishUpdate("restarting", "Запущена версия "+m.Version+", жду подтверждения работы (связь с сервером)...")
+		c.freshFrom = m.From
+		c.publishUpdate("restarting", "Запущена версия "+m.Version+", проверяю запуск...")
 		return
 	}
 	_ = os.Remove(filepath.Join(c.p.State, updatingFile))
