@@ -76,7 +76,10 @@ func dispatch(ctx context.Context, args []string) int {
 	case "open", "status", "config", "update", "leftovers", "rollback", "pause", "resume":
 		return runCLI(ctx, args[0], args[1:])
 
-	case "install", "enable", "uninstall", "singbox":
+	case "install", "uninstall":
+		return runInstall(args[0], args[1:])
+
+	case "enable", "singbox":
 		fmt.Fprintf(os.Stderr, "%s: not-implemented\n", args[0])
 		return 1
 	default:

@@ -21,6 +21,8 @@ const (
 const (
 	SupExitDone    = 0
 	SupExitRunning = 10
+	// SupExitHandover — хорошая версия стала текущей и записана на постоянный путь: сторож вышел, запускающий код стартует новый сторож с этого пути.
+	SupExitHandover = 11
 )
 
 const (

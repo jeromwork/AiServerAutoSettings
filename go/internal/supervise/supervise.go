@@ -234,6 +234,10 @@ func rotateSelfUpdate(ctx context.Context, p api.Paths) error {
 	} else if err != nil {
 		return err
 	}
+	if _, err := os.Lstat(source); errors.Is(err, os.ErrNotExist) {
+		// Постоянного exe ещё нет (первый запуск со старого пути): просто ставим кандидата.
+		return replaceFile(candidate, target)
+	}
 	version, err := binaryVersion(ctx, source)
 	if err != nil {
 		return fmt.Errorf("supervise: archive-version: %w", err)
@@ -463,6 +467,39 @@ var OnUI func(url string)
 // OnLocked вызывается один раз, когда сторож взял блокировку единственного экземпляра (значок в трее и т. п.).
 var OnLocked func()
 
+// OnStart вызывается после взятия блокировки, когда журнал сторожа открыт (установка на постоянный путь, ярлык).
+var OnStart func(log api.Logger)
+
+// Handover включает самообновление сторожа: когда новая версия признана хорошей, сторож записывает её на постоянный
+// путь (bin/remoteagents) и выходит с кодом SupExitHandover; запускающий код стартует новый сторож с этого пути.
+var Handover bool
+
+// BinaryVersion — версия исполняемого файла (`<exe> version`).
+func BinaryVersion(ctx context.Context, exe string) (string, error) { return binaryVersion(ctx, exe) }
+
+// InstalledPath — постоянный путь сторожа.
+func InstalledPath(p api.Paths) string { return filepath.Join(p.Bin, executableName()) }
+
+// prepareHandover переносит staged-копию хорошей версии на постоянный путь и проверяет, что там именно она.
+func prepareHandover(ctx context.Context, p api.Paths, want string) error {
+	unlock, err := lockOperation(ctx, p)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := rotateSelfUpdate(ctx, p); err != nil {
+		return err
+	}
+	got, err := binaryVersion(ctx, InstalledPath(p))
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("на постоянном пути версия %s, ожидалась %s", got, want)
+	}
+	return nil
+}
+
 func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self string, mode api.Mode, args []string) (code int) {
 	if log == nil {
 		j, err := journal.New(p, api.StreamSup, journal.Options{MaxBytes: 5 << 20, Keep: 4})
@@ -497,6 +534,9 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 	if OnLocked != nil {
 		OnLocked()
 	}
+	if OnStart != nil {
+		OnStart(log)
+	}
 	_ = os.Remove(filepath.Join(p.State, api.PauseFile)) // новый запуск программы: пауза снята
 
 	// Любой выход сторожа (в том числе остановка по boot-failures и паника) —
@@ -508,7 +548,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 			log.Error(fmt.Sprintf("supervise: panic: %v", r), "stack", string(debug.Stack()))
 			code = 1
 		}
-		if code != 0 || (sl != nil && sl.Stopped != "") {
+		if (code != 0 && code != api.SupExitHandover) || (sl != nil && sl.Stopped != "") {
 			reason = "crash"
 		}
 		runCleanup(ctx, p, log, reason)
@@ -661,6 +701,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		rollbackReasonStr := ""
 		ranLong := false
 		configRestart := false
+		handoverReq := false
 
 		type message struct {
 			T       string `json:"t"`
@@ -725,6 +766,14 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 					protocolErr = s.confirmGood(ctx)
 					log.Info("supervise: good", "version", msg.Version)
 					lastSignalTime = time.Now()
+					if protocolErr == nil && Handover && s.Current != s.embedded {
+						if err := prepareHandover(ctx, p, s.Current); err != nil {
+							log.Warn("supervise: handover отложен", "err", err)
+						} else {
+							log.Info("supervise: handover: сторож переходит на версию "+s.Current, "version", s.Current)
+							handoverReq = true
+						}
+					}
 				}
 			case api.MsgAlive:
 				lastSignalTime = time.Now()
@@ -803,7 +852,7 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 			case msg, ok := <-messages:
 				if ok {
 					handle(msg)
-					if protocolErr != nil {
+					if protocolErr != nil || handoverReq {
 						stop()
 						break processLoop
 					}
@@ -884,6 +933,10 @@ func Run(ctx context.Context, p api.Paths, log api.Logger, pr api.Procs, self st
 		if ctx.Err() != nil {
 			runCleanup(ctx, p, log, "exit")
 			return api.SupExitDone
+		}
+		if handoverReq && protocolErr == nil {
+			runCleanup(ctx, p, log, "exit")
+			return api.SupExitHandover
 		}
 		if goodSeen && !ranLong && time.Since(startTime) >= time.Duration(api.LongRunSec)*time.Second && protocolErr == nil {
 			protocolErr = s.clearFailures(ctx)
