@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,7 +33,8 @@ var vpnAlwaysDirect = []string{"109.199.110.63/32"}
 
 // vpnDirectProcs — процессы, трафик которых идёт мимо нашего VPN: v2 Лаборатория (ra-lab, её sing-box) и чужие VPN.
 var vpnDirectProcs = []string{
-	"ra-lab.exe", "ra-lab", "ralab-core.exe", "ralab-core", "ralab.exe", "sing-box.exe", "sing-box",
+	"ra-lab.exe", "ra-lab", "ralab-core.exe", "ralab-core", "ralab.exe", "sing-box.exe", "sing-box", "ra-core.exe", "ra-core",
+	"RemoteAgents-VPN.exe", "ra-vpn",
 	"Happ.exe", "happ.exe", "xray.exe", "v2rayN.exe", "tailscaled.exe", "Tailscale.exe",
 }
 
@@ -55,32 +58,100 @@ func resolveHost(host string) []string {
 	return addrs
 }
 
-// vpnBridges — финальные теги путей-мостов: из vpn.bridges (пусто — все), без ssh и прямых выходов.
-func vpnBridges(cfg *api.Config, paths []chanPath) []string {
+// vpnSel — мосты VPN: outbounds процесса, теги для urltest и хосты, которые не должны идти в наш TUN.
+type vpnSel struct {
+	outs   []m
+	finals []string
+	hosts  []string
+}
+
+// vpnSelect — мосты из vpn.nodes (узлы целиком) и из путей paths (если есть сервер) по vpn.bridges (пусто — все),
+// без ssh/direct/socks и без путей «через чужой VPN». Узел с тем же именем, что и путь, главнее.
+func vpnSelect(cfg *api.Config) (vpnSel, error) {
+	var sel vpnSel
 	want := map[string]bool{}
 	for _, b := range cfg.VPN.Bridges {
 		want[b] = true
 	}
-	var finals []string
-	seen := map[string]bool{}
-	for _, p := range paths {
-		bad := false
-		for _, o := range p.outs {
-			if t, _ := o["type"].(string); t == "ssh" || t == "direct" {
-				bad = true
-			}
+	hosts := map[string]bool{}
+	seenTag := map[string]bool{}
+	seenFinal := map[string]bool{}
+	keep := func(o m) m {
+		o = cloneM(o)
+		if t, _ := o["type"].(string); tcpTypes[t] && o["detour"] == nil {
+			o["tcp_keep_alive"], o["tcp_keep_alive_interval"] = "15s", "5s"
 		}
-		if bad || (len(want) > 0 && !want[p.name]) || seen[p.final] {
+		return o
+	}
+	names := make([]string, 0, len(cfg.VPN.Nodes))
+	for n := range cfg.VPN.Nodes {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		o, err := decodeObj(cfg.VPN.Nodes[n])
+		if err != nil {
+			return sel, fmt.Errorf("singbox: vpn: узел %s: %w", n, err)
+		}
+		t, _ := o["type"].(string)
+		if t == "" || t == "direct" || t == "block" || t == "dns" || t == "selector" || t == "urltest" {
+			return sel, fmt.Errorf("singbox: vpn: узел %s: тип %q не подходит", n, t)
+		}
+		o["tag"] = n
+		if s, _ := o["server"].(string); s != "" {
+			hosts[s] = true
+		}
+		seenTag[n] = true
+		if len(want) > 0 && !want[n] {
 			continue
 		}
-		seen[p.final] = true
-		finals = append(finals, p.final)
+		seenFinal[n] = true
+		sel.outs = append(sel.outs, keep(o))
+		sel.finals = append(sel.finals, n)
 	}
-	return finals
+	if cfg.HasChannel() {
+		paths, _, err := buildPaths(cfg, cfg.Servers[0].Host)
+		if err != nil {
+			return sel, err
+		}
+		hosts[cfg.Servers[0].Host] = true
+		for _, p := range paths {
+			hosts[p.node] = true
+			bad := strings.HasSuffix(p.final, "-vpn") || seenFinal[p.final] || seenTag[p.final]
+			for _, o := range p.outs {
+				if s, _ := o["server"].(string); s != "" {
+					hosts[s] = true
+				}
+				if t, _ := o["type"].(string); t == "ssh" || t == "direct" || t == "socks" {
+					bad = true
+				}
+			}
+			if bad || (len(want) > 0 && !want[p.name]) {
+				continue
+			}
+			seenFinal[p.final] = true
+			for _, o := range p.outs {
+				tag, _ := o["tag"].(string)
+				if seenTag[tag] && tag != p.final {
+					continue // общий узел цепочки уже добавлен
+				}
+				seenTag[tag] = true
+				sel.outs = append(sel.outs, keep(o))
+			}
+			sel.finals = append(sel.finals, p.final)
+		}
+	}
+	for h := range hosts {
+		if h != "" {
+			sel.hosts = append(sel.hosts, h)
+		}
+	}
+	sort.Strings(sel.hosts)
+	return sel, nil
 }
 
-// excludeSet — route_exclude_address: приватные сети, серверы путей из конфига, always-direct, rc.ExcludeIPs.
-func excludeSet(rc api.RenderContext, paths []chanPath) []string {
+// excludeSet — route_exclude_address: приватные сети, серверы/узлы из конфига, always-direct, rc.ExcludeIPs.
+func excludeSet(rc api.RenderContext, hosts []string) []string {
 	out := append([]string(nil), vpnExclude...)
 	seen := map[string]bool{}
 	for _, v := range out {
@@ -101,22 +172,7 @@ func excludeSet(rc api.RenderContext, paths []chanPath) []string {
 	for _, v := range rc.ExcludeIPs {
 		add(v)
 	}
-	hosts := map[string]bool{}
-	if len(rc.Cfg.Servers) > 0 {
-		hosts[rc.Cfg.Servers[0].Host] = true
-	}
-	for _, p := range paths {
-		hosts[p.node] = true
-		for _, o := range p.outs {
-			if s, _ := o["server"].(string); s != "" {
-				hosts[s] = true
-			}
-		}
-	}
-	for h := range hosts {
-		if h == "" {
-			continue
-		}
+	for _, h := range hosts {
 		for _, a := range resolveHost(h) {
 			add(a)
 		}
@@ -124,23 +180,26 @@ func excludeSet(rc api.RenderContext, paths []chanPath) []string {
 	return out
 }
 
-// renderVPN — часть VPN (N1a, повтор lab/ralab/vpn.py _config): tun-in RA3-VPN, urltest по мостам, РФ напрямую:
-// sniff → процессы v2/чужих VPN → приватные → domain_suffix → rule_set geoip-ru. Режимы off/auto/only различаются в сторожe (core).
-func renderVPN(rc api.RenderContext) (api.Part, error) {
-	if rc.Cfg == nil || len(rc.Cfg.Servers) == 0 {
-		return api.Part{}, errors.New("singbox: vpn: no server in config")
+// RenderVPN — конфиг ОТДЕЛЬНОГО процесса sing-box VPN (tun-in ra3-<id>-vpn, urltest по мостам, РФ напрямую):
+// sniff → процессы v2/чужих VPN → приватные → domain_suffix → rule_set geoip-ru. Выход к мостам — напрямую через физический
+// интерфейс (default_interface / auto_detect_interface), не через sing-box канала. Режимы off/auto/only различаются в сторожe (core).
+func RenderVPN(rc api.RenderContext) ([]byte, error) {
+	if rc.Cfg == nil {
+		return nil, errors.New("singbox: vpn: no config")
 	}
-	paths, _, err := buildPaths(rc.Cfg, rc.Cfg.Servers[0].Host)
+	if rc.ClashPort <= 0 {
+		return nil, errors.New("singbox: vpn: ports are not set")
+	}
+	sel, err := vpnSelect(rc.Cfg)
 	if err != nil {
-		return api.Part{}, err
+		return nil, err
 	}
-	finals := vpnBridges(rc.Cfg, paths)
-	if len(finals) == 0 {
-		return api.Part{}, errors.New("singbox: vpn: нет мостов без SSH и прямых выходов")
+	if len(sel.finals) == 0 {
+		return nil, errors.New("singbox: vpn: нет мостов без SSH и прямых выходов")
 	}
 	name := AdapterName(rc.Instance, "vpn")
 	if name == "" {
-		return api.Part{}, errors.New("singbox: vpn: instance")
+		return nil, errors.New("singbox: vpn: instance")
 	}
 	rules := []m{
 		{"process_name": vpnDirectProcs, "outbound": "vpn-direct"},
@@ -156,26 +215,30 @@ func renderVPN(rc api.RenderContext) (api.Part, error) {
 	if len(suffixes) > 0 {
 		rules = append(rules, m{"domain_suffix": suffixes, "outbound": "vpn-direct"})
 	}
-	var sets []m
+	route := m{"auto_detect_interface": true, "find_process": true, "final": "vpn-out"}
+	if rc.DefaultIface != "" {
+		delete(route, "auto_detect_interface")
+		route["default_interface"] = rc.DefaultIface
+	}
 	if rc.GeoIPPath != "" && vpnGeoIP(rc.Cfg.VPN.Direct.GeoIP) {
 		if st, err := os.Stat(rc.GeoIPPath); err == nil && st.Mode().IsRegular() {
 			rules = append(rules, m{"rule_set": []string{"geoip-ru"}, "outbound": "vpn-direct"})
-			sets = append(sets, m{"type": "local", "tag": "geoip-ru", "format": "binary", "path": rc.GeoIPPath})
+			route["rule_set"] = []m{{"type": "local", "tag": "geoip-ru", "format": "binary", "path": rc.GeoIPPath}}
 		}
 	}
+	route["rules"] = rules
 	tun := m{"type": "tun", "tag": "vpn-in", "interface_name": name,
 		"address": []string{"172.19.8.1/30", "fdfe:dcba:9877::1/126"}, "mtu": 1400,
 		"auto_route": true, "strict_route": false,
 		"route_address":         []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"},
-		"route_exclude_address": excludeSet(rc, paths)}
-	return api.Part{
-		Inbounds: []m{tun},
-		Outbounds: []m{
-			{"type": "urltest", "tag": "vpn-out", "outbounds": finals, "url": VPNProbeURL, "interval": "3m", "tolerance": 100, "interrupt_exist_connections": false},
-			{"type": "direct", "tag": "vpn-direct"},
-		},
-		Rules: rules, RuleSets: sets, Final: "vpn-out", FindProcess: true,
-	}, nil
+		"route_exclude_address": excludeSet(rc, sel.hosts)}
+	outs := append([]m(nil), sel.outs...)
+	outs = append(outs,
+		m{"type": "urltest", "tag": "vpn-out", "outbounds": sel.finals, "url": VPNProbeURL, "interval": "3m", "tolerance": 100, "interrupt_exist_connections": false},
+		m{"type": "direct", "tag": "vpn-direct"})
+	// Журнал sing-box VPN — только предупреждения: в info попадают адреса сайтов.
+	return json.Marshal(m{"log": m{"level": "warn"}, "inbounds": []m{tun}, "outbounds": outs, "route": route,
+		"experimental": m{"clash_api": m{"external_controller": fmt.Sprintf("127.0.0.1:%d", rc.ClashPort), "secret": rc.ClashSecret}}})
 }
 
 // vpnGeoIP: нет поля — включено; явно пусто/ложь — выключено (_geoip_cfg v2).

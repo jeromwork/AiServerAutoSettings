@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -18,7 +19,12 @@ import (
 	"remoteagents/internal/config"
 )
 
+// RoleVPN — отдельный экземпляр sing-box только для VPN (свой процесс, конфиг, clash-порт и адаптер ra3-<id>-vpn).
+// Включить = Apply(VPN:true) запускает процесс, выключить = Apply(VPN:false) останавливает; канал и ЛВС не затрагиваются.
+const RoleVPN = "vpn"
+
 type Options struct {
+	Role               string // "" — основной (канал + ЛВС); RoleVPN — только VPN
 	Mode               api.Mode
 	Instance, LockJSON string
 	LANSocks           func() string
@@ -63,6 +69,7 @@ type box struct {
 	crashes   int                                        // подряд упавших запусков без длительной работы (для задержки перезапуска)
 	restart   func(context.Context, api.Effective) error // тесты: замена apply при автоперезапуске
 	sleep     func(context.Context, time.Duration) bool  // тесты: ожидание задержки (false — отменено)
+	vpnExe    string                                     // копия sing-box для VPN (RoleVPN)
 	vChan     int                                        // порты входов: меняются при повторном выборе, читаются без s.mu
 	vClash    int
 }
@@ -96,7 +103,13 @@ func New(cfg *api.Config, p api.Paths, log api.Logger, tr api.Traces, pr api.Pro
 	ready := make(chan struct{})
 	return &box{cfg: cfg, p: p, log: log, tr: tr, pr: pr, o: o, ready: ready, vReady: ready, vChan: ports[0], vClash: ports[1], rc: api.RenderContext{Cfg: cfg, Mode: o.Mode, Instance: o.Instance, ChanPort: ports[0], ClashPort: ports[1], ClashSecret: token}}, nil
 }
-func (s *box) Name() string           { return "singbox" }
+func (s *box) isVPN() bool { return s.o.Role == RoleVPN }
+func (s *box) Name() string {
+	if s.isVPN() {
+		return "singbox-vpn"
+	}
+	return "singbox"
+}
 func (s *box) Ready() <-chan struct{} { s.vmu.Lock(); defer s.vmu.Unlock(); return s.vReady }
 func (s *box) ChanAddr() string {
 	s.vmu.Lock()
@@ -160,6 +173,9 @@ func (s *box) Start(ctx context.Context) error {
 	s.binErr, s.binSource = "", source
 	s.view(func() { s.vErr, s.vSource = "", source })
 	s.binary = binary
+	if s.isVPN() {
+		return nil // процесс VPN запускает только Apply(VPN:true)
+	}
 	return s.startWithPorts(ctx)
 }
 func (s *box) Apply(ctx context.Context, e api.Effective) error {
@@ -185,6 +201,9 @@ func (s *box) render(e api.Effective) ([]byte, error) {
 	rc.GeoIPPath = filepath.Join(s.p.State, "geoip-ru.srs")
 	if s.o.LANSocks != nil {
 		rc.LANSocks = s.o.LANSocks()
+	}
+	if s.isVPN() {
+		return RenderVPN(rc)
 	}
 	if s.o.RawConfig == "" {
 		return Render(rc)
@@ -217,6 +236,14 @@ func (s *box) apply(ctx context.Context, e api.Effective) error {
 	if !s.o.Mode.AllowsTun() {
 		e = api.Effective{}
 	}
+	if s.isVPN() {
+		if !e.VPN {
+			return s.stopVPN(ctx)
+		}
+		if err := s.prepareVPN(ctx); err != nil {
+			return err
+		}
+	}
 	data, err := s.render(e)
 	if err != nil {
 		return err
@@ -234,7 +261,7 @@ func (s *box) apply(ctx context.Context, e api.Effective) error {
 	if err = os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("singbox: config: %w", err)
 	}
-	check, err := s.pr.Start(ctx, api.ProcSpec{Name: "singbox-check", Path: s.binary, Args: []string{"check", "-c", path}, Stream: api.StreamSB})
+	check, err := s.pr.Start(ctx, api.ProcSpec{Name: s.Name() + "-check", Path: s.binary, Args: []string{"check", "-c", path}, Stream: api.StreamSB})
 	if err != nil {
 		return fmt.Errorf("singbox: check: %w", err)
 	}
@@ -288,10 +315,10 @@ func (s *box) adapters(e api.Effective) (names []string) {
 	if !s.o.Mode.AllowsTun() {
 		return nil
 	}
-	if e.VPN {
+	if e.VPN && s.isVPN() {
 		names = append(names, AdapterName(s.o.Instance, "vpn"))
 	}
-	if e.LAN {
+	if e.LAN && !s.isVPN() {
 		names = append(names, AdapterName(s.o.Instance, "lan"))
 	}
 	return names
@@ -321,7 +348,7 @@ func (s *box) launch(ctx context.Context, e api.Effective) error {
 	}
 	s.liveCancel = cancel
 	s.control.Unlock()
-	proc, err := s.pr.Start(life, api.ProcSpec{Name: "singbox", Path: s.binary, Args: []string{"run", "-c", s.config}, Stream: api.StreamSB})
+	proc, err := s.pr.Start(life, api.ProcSpec{Name: s.Name(), Path: s.exe(), Args: []string{"run", "-c", s.config}, Stream: api.StreamSB})
 	s.control.Lock()
 	s.live = proc
 	s.control.Unlock()
@@ -651,6 +678,64 @@ func (s *box) startWithPorts(ctx context.Context) error {
 		}
 		s.log.Warn("singbox.port-retry", "attempt", attempt+1)
 	}
+}
+
+// exe — исполняемый файл процесса: для VPN своя копия RemoteAgents-VPN.exe (процесс VPN отличим от канала по имени).
+func (s *box) exe() string {
+	if s.isVPN() && s.vpnExe != "" {
+		return s.vpnExe
+	}
+	return s.binary
+}
+
+// vpnBinaryName — имя копии sing-box для процесса VPN (без «lab»).
+func vpnBinaryName() string {
+	if runtime.GOOS == "windows" {
+		return "RemoteAgents-VPN.exe"
+	}
+	return "ra-vpn"
+}
+
+// prepareVPN — перед запуском процесса VPN: свободный clash-порт и своя копия исполняемого файла.
+func (s *box) prepareVPN(ctx context.Context) error {
+	if bindCheck(s.rc.ClashPort) != nil {
+		if err := s.reallocPorts(); err != nil {
+			return err
+		}
+	}
+	if s.vpnExe != "" {
+		return nil
+	}
+	dst := filepath.Join(s.p.Bin, vpnBinaryName())
+	want := fileSHA(s.binary)
+	if want == "" {
+		return fmt.Errorf("singbox: vpn: binary unreadable")
+	}
+	if fileSHA(dst) != want {
+		if err := copyVerified(s.p, s.tr, s.binary, dst, want); err != nil {
+			// файл занят остатком прежнего процесса VPN — идём по общему exe (уборка снимет процесс по записи)
+			s.log.Warn("singbox.vpn-binary-copy", "err", err.Error())
+			return nil
+		}
+	}
+	s.vpnExe = dst
+	return nil
+}
+
+// stopVPN — выключить VPN: остановить процесс, убрать конфиг; следы адаптера снимет уборка (адаптер исчезает с процессом).
+func (s *box) stopVPN(ctx context.Context) error {
+	if err := s.stop(ctx); err != nil {
+		return err
+	}
+	if s.config != "" {
+		if err := s.remove(s.config); err != nil {
+			return err
+		}
+		s.config = ""
+	}
+	s.rc.Effective = api.Effective{}
+	s.view(func() { s.vRunning, s.vEff = false, api.Effective{} })
+	return nil
 }
 
 func (s *box) reallocPorts() error {

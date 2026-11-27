@@ -37,18 +37,19 @@ func (c *core) lockOp() (func(), error) {
 
 func (c *core) Status() map[string]any {
 	m := map[string]any{
-		"version":     c.f.Version,
-		"build":       c.f.Build,
-		"pc":          c.pcName(),
-		"name":        c.cfgName(),
-		"connect":     c.connectInfo(),
-		"uptime":      int(time.Since(c.start).Seconds()),
-		"mode":        map[string]bool{"safe": c.f.Mode.Safe, "noTun": c.f.Mode.NoTun, "noChannel": c.f.Mode.NoChannel, "noSingbox": c.f.Mode.NoSingbox},
-		"control":     c.control.Load(),
-		"paused":      c.paused.Load(),
-		"config":      c.cfg != nil,
-		"gen":         c.gen,
-		"prevVersion": supervise.ReadInfo(c.p).Previous,
+		"version":           c.f.Version,
+		"build":             c.f.Build,
+		"pc":                c.pcName(),
+		"name":              c.cfgName(),
+		"connect":           c.connectInfo(),
+		"uptime":            int(time.Since(c.start).Seconds()),
+		"mode":              map[string]bool{"safe": c.f.Mode.Safe, "noTun": c.f.Mode.NoTun, "noChannel": c.f.Mode.NoChannel, "noSingbox": c.f.Mode.NoSingbox},
+		"control":           c.control.Load(),
+		"paused":            c.paused.Load(),
+		"config":            c.cfg != nil,
+		"channelConfigured": c.cfg == nil || c.cfg.HasChannel(),
+		"gen":               c.gen,
+		"prevVersion":       supervise.ReadInfo(c.p).Previous,
 	}
 	if ch := c.getCh(); ch != nil {
 		st := ch.State()
@@ -271,7 +272,7 @@ func (c *core) VPN(mode string) error {
 	if c.f.Mode.Safe {
 		return api.ErrSafe
 	}
-	if c.tun == nil || c.cfg == nil || isNil(c.getSb()) {
+	if c.tun == nil || c.cfg == nil || (isNil(c.getSb()) && isNil(c.getVpnSb())) {
 		return api.ErrNotSupported
 	}
 	c.tun.setMode(context.Background(), mode)

@@ -52,7 +52,13 @@ type VPNCfg struct {
 	Mode    string // off | auto | only
 	Bridges []string
 	Direct  VPNDirect
+	// Nodes — собственные узлы VPN (vpn.nodes): имя → расшифрованный outbound sing-box (JSON с полем type). Работают без paths/server.
+	Nodes map[string]json.RawMessage
 }
+
+// HasChannel — в конфиге есть сервер каналов. Нет — режим «только VPN»: канал, ЛВС, Диск и forward не запускаются.
+func (c *Config) HasChannel() bool { return c != nil && len(c.Servers) > 0 }
+
 type VPNDirect struct {
 	Domains []string        // нет поля → RU_DOMAINS v2 (vpn.py 29–31)
 	GeoIP   json.RawMessage // как v2 _geoip_cfg

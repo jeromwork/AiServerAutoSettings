@@ -12,7 +12,7 @@ import (
 	"remoteagents/internal/singbox"
 )
 
-// tunGuard — сторож VPN (N1b) и ЛВС (N2) в общем sing-box. Только события: старт сети, смена сети, падение sing-box с TUN,
+// tunGuard — сторож VPN (N1b, отдельный процесс sing-box) и ЛВС (N2, общий sing-box с каналом). Только события: старт сети, смена сети, падение sing-box с TUN,
 // команда /vpn, итог apply. Fail-open VPN: 1-я неудача — один повтор, 2-я — перезапуск без TUN (канал важнее), 3-я — off.
 // ЛВС: упала с TUN — выключается до смены сети/настроек. Всё, что поднято, снимается выходом/падением ядра (cleanup по трейсам).
 type tunGuard struct {
@@ -71,20 +71,23 @@ func hasIface(ifs []api.Iface, name string) bool {
 	return false
 }
 
-// reconcile приводит sing-box к желаемому состоянию; reason — событие-причина (в журнал).
+// reconcile приводит процессы sing-box к желаемому состоянию; reason — событие-причина (в журнал).
+// VPN — отдельный процесс (vsb): включение/выключение/падение не трогает sing-box канала и ЛВС (sb).
 func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	c := g.c
-	sb := c.getSb()
-	if isNil(sb) || c.cfg == nil || !c.f.Mode.AllowsTun() {
+	sb, vsb := c.getSb(), c.getVpnSb()
+	if (isNil(sb) && isNil(vsb)) || c.cfg == nil || !c.f.Mode.AllowsTun() {
 		return
 	}
 	ifs, _ := c.plat.Interfaces()
-	var want api.Effective
+	wantVPN := false
 
 	// VPN
 	switch {
+	case isNil(vsb):
+		g.vpnState, g.vpnWhy = "off", ""
 	case g.mode == "off":
 		g.vpnState, g.vpnWhy = "off", ""
 	case g.fails >= 3:
@@ -103,16 +106,16 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 			g.lastForeign = fv
 		} else {
 			g.lastForeign = ""
-			want.VPN = true
+			wantVPN = true
 		}
 	}
 
-	// ЛВС
-	if len(c.cfg.LAN) > 0 {
+	// ЛВС (в общем sing-box вместе с каналом)
+	wantLAN := false
+	if !isNil(sb) && len(c.cfg.LAN) > 0 {
 		nets, _ := singbox.LANSubnets(c.cfg)
 		switch {
 		case g.lanOff && reason != "net-changed" && reason != "vpn-cmd":
-			want.LAN = false
 		case hasIface(ifs, "RA2-LAN"):
 			g.lanState, g.lanWhy = "skipped-v2", "ЛВС уже держит Лаборатория v2 (RA2-LAN)"
 			g.event("lan.skipped-v2")
@@ -122,48 +125,78 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 		case c.getFw() == nil || c.getFw().InternalSocks() == "":
 			g.lanState, g.lanWhy = "off", "нет внутреннего SOCKS"
 		default:
-			want.LAN = true
+			wantLAN = true
 			g.lanOff = false
 		}
 	}
 
-	if want == sb.Effective() {
-		g.finish(want)
-		return
+	var got api.Effective
+	if !isNil(sb) {
+		got.LAN = g.applyLAN(ctx, sb, reason, wantLAN)
 	}
-	actx, cancel := context.WithTimeout(ctx, 40*time.Second)
-	err := sb.Apply(actx, want)
-	cancel()
-	if err != nil {
-		c.log.Error("vpn.apply-failed", "reason", reason, "err", err.Error())
-		g.lanOff = g.lanOff || want.LAN
-		g.lanState, g.lanWhy = "error", sanitize(err.Error())
-		if want.VPN {
-			g.failLocked(ctx, "apply: "+sanitize(err.Error()))
-		}
-		return
-	}
-	// Факт, а не запрошенное: Apply мог молча откатиться без TUN (запуск с TUN не удался → apply без TUN → nil).
-	got := sb.Effective()
-	ifs, _ = c.plat.Interfaces()
-	var bad []string
-	if want.LAN && (!got.LAN || !hasIface(ifs, g.adapter("lan"))) {
-		g.lanOff, g.lanState, g.lanWhy = true, "error", "TUN ЛВС не поднялся (адаптера "+g.adapter("lan")+" нет)"
-		got.LAN = false
-		c.log.Error("lan.tun-missing", "reason", reason)
-	}
-	if want.VPN && (!got.VPN || !hasIface(ifs, g.adapter("vpn"))) {
-		bad = append(bad, "TUN VPN не поднялся (адаптера "+g.adapter("vpn")+" нет)")
-		got.VPN = false
+	vpnBad := ""
+	if !isNil(vsb) {
+		got.VPN, vpnBad = g.applyVPN(ctx, vsb, reason, wantVPN)
 	}
 	g.finish(got)
-	if len(bad) > 0 {
-		g.failLocked(ctx, bad[0])
+	if vpnBad != "" {
+		g.failLocked(ctx, vpnBad)
 		return
 	}
-	if want.VPN {
+	if wantVPN && got.VPN {
 		go g.probe(ctx)
 	}
+}
+
+// applyLAN — состояние ЛВС в общем sing-box; возвращает факт (поднят ли TUN ЛВС).
+func (g *tunGuard) applyLAN(ctx context.Context, sb api.Singbox, reason string, want bool) bool {
+	c := g.c
+	if want != sb.Effective().LAN {
+		actx, cancel := context.WithTimeout(ctx, 40*time.Second)
+		err := sb.Apply(actx, api.Effective{LAN: want})
+		cancel()
+		if err != nil {
+			c.log.Error("lan.apply-failed", "reason", reason, "err", err.Error())
+			g.lanOff = g.lanOff || want
+			g.lanState, g.lanWhy = "error", sanitize(err.Error())
+			return sb.Effective().LAN
+		}
+	}
+	got := sb.Effective().LAN
+	if want {
+		ifs, _ := c.plat.Interfaces()
+		if !got || !hasIface(ifs, g.adapter("lan")) {
+			g.lanOff, g.lanState, g.lanWhy = true, "error", "TUN ЛВС не поднялся (адаптера "+g.adapter("lan")+" нет)"
+			c.log.Error("lan.tun-missing", "reason", reason)
+			return false
+		}
+	}
+	return got
+}
+
+// applyVPN — запуск/остановка процесса VPN; возвращает факт и причину неудачи ("" — нет).
+func (g *tunGuard) applyVPN(ctx context.Context, vsb api.Singbox, reason string, want bool) (bool, string) {
+	c := g.c
+	if want != vsb.Effective().VPN {
+		actx, cancel := context.WithTimeout(ctx, 40*time.Second)
+		err := vsb.Apply(actx, api.Effective{VPN: want})
+		cancel()
+		if err != nil {
+			c.log.Error("vpn.apply-failed", "reason", reason, "err", err.Error())
+			if want {
+				return vsb.Effective().VPN, "apply: " + sanitize(err.Error())
+			}
+			return vsb.Effective().VPN, ""
+		}
+	}
+	got := vsb.Effective().VPN
+	if want {
+		ifs, _ := c.plat.Interfaces()
+		if !got || !hasIface(ifs, g.adapter("vpn")) {
+			return false, "TUN VPN не поднялся (адаптера " + g.adapter("vpn") + " нет)"
+		}
+	}
+	return got, ""
 }
 
 // finish — статусы по факту применённого состояния.
@@ -246,18 +279,16 @@ func (g *tunGuard) failLocked(ctx context.Context, why string) {
 	}
 }
 
-// dropVPN — перезапуск sing-box без TUN VPN (ЛВС, если была, остаётся). Горутина: под mu Apply не вызываем повторно.
+// dropVPN — остановка процесса VPN (канал и ЛВС не трогаем). Горутина: под mu Apply не вызываем повторно.
 func (g *tunGuard) dropVPN(ctx context.Context) {
-	sb := g.c.getSb()
-	if isNil(sb) {
+	vsb := g.c.getVpnSb()
+	if isNil(vsb) {
 		return
 	}
-	e := sb.Effective()
-	e.VPN = false
 	go func() {
 		actx, cancel := context.WithTimeout(ctx, 40*time.Second)
 		defer cancel()
-		if err := sb.Apply(actx, e); err != nil {
+		if err := vsb.Apply(actx, api.Effective{}); err != nil {
 			g.c.log.Error("vpn.drop-failed", "err", err.Error())
 		}
 	}()
@@ -300,7 +331,7 @@ func (c *core) startTunGuard(ctx context.Context) {
 		return
 	}
 	g := c.tun
-	if g == nil || isNil(c.getSb()) {
+	if g == nil || (isNil(c.getSb()) && isNil(c.getVpnSb())) {
 		return
 	}
 	go g.reconcile(ctx, "start") // по конфигу; по умолчанию (vpn off, lan пуст) ничего не включается

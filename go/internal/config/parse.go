@@ -150,9 +150,12 @@ func (c *checker) validate(root obj) {
 	if s, ok := text(root["name"]); !ok || utf8.RuneCountInString(s) > 80 {
 		c.add("schema", "name", "name", "name is required (1..80 chars)")
 	}
-	// server
+	// server (в конфиге «только VPN» — есть раздел vpn и нет server — не нужен)
+	vpnOnly := isVPNOnly(root)
 	if srv, ok := root["server"].(obj); !ok {
-		c.add("schema", "server", "server", "server section is required")
+		if !vpnOnly {
+			c.add("schema", "server", "server", "server section is required")
+		}
 	} else {
 		for _, k := range []string{"host", "user", "hostKey"} {
 			if _, ok := text(srv[k]); !ok {
@@ -178,6 +181,25 @@ func (c *checker) validate(root obj) {
 			}
 			if b, has := vpn["bridges"]; has {
 				c.names(b, "vpn.bridges")
+			}
+			if nd, has := vpn["nodes"]; has {
+				if nm, ok := c.object(nd, "vpn.nodes"); ok {
+					for _, n := range sortedKeys(nm) {
+						if !nameRe.MatchString(n) {
+							c.add("schema", "names", "vpn.nodes", "invalid node name")
+							break
+						}
+					}
+					for _, n := range sortedKeys(nm) {
+						c.enc("vpn.nodes."+n, nm[n])
+					}
+				}
+			}
+			if vpnOnly {
+				nm, _ := vpn["nodes"].(obj)
+				if _, hasPaths := root["paths"]; len(nm) == 0 && !hasPaths {
+					c.add("semantic", "vpn-nodes", "vpn.nodes", "vpn-only config needs vpn.nodes (or paths)")
+				}
 			}
 			if d, has := vpn["direct"]; has {
 				if dm, ok := c.object(d, "vpn.direct"); ok {
@@ -224,8 +246,15 @@ func (c *checker) validate(root obj) {
 			c.schema("controlRunAs", "must be a string")
 		}
 	}
-	c.validatePaths(root)
+	c.validatePaths(root, vpnOnly)
 	c.validateRest(root)
+}
+
+// isVPNOnly — конфиг «только VPN»: есть раздел vpn (объект) и нет раздела server.
+func isVPNOnly(root obj) bool {
+	_, hasServer := root["server"]
+	_, isObj := root["vpn"].(obj)
+	return !hasServer && isObj
 }
 
 func (c *checker) names(v any, field string) {
@@ -242,10 +271,12 @@ func (c *checker) names(v any, field string) {
 	}
 }
 
-func (c *checker) validatePaths(root obj) {
+func (c *checker) validatePaths(root obj, vpnOnly bool) {
 	paths, ok := root["paths"].(obj)
 	if !ok {
-		c.add("schema", "paths", "paths", "paths section is required")
+		if _, has := root["paths"]; has || !vpnOnly {
+			c.add("schema", "paths", "paths", "paths section is required")
+		}
 		return
 	}
 	secrets, _ := paths["secrets"].(obj)
@@ -338,7 +369,7 @@ func (c *checker) validatePaths(root obj) {
 			}
 		}
 	}
-	if !working {
+	if !working && !vpnOnly {
 		c.add("semantic", "paths", "paths", "no working path (enabled entry with secret, channel, relay, hop, cdn or ws)")
 	}
 }
@@ -550,8 +581,9 @@ func maps(v any) []map[string]any {
 // normalize maps validated JSON to the model (api C2). Secrets stay empty until Open.
 func normalize(root obj, data []byte) *api.Config {
 	c := &api.Config{Format: "remoteagents-2", Name: strOf(root["name"]), Raw: append(json.RawMessage(nil), data...)}
-	srv, _ := root["server"].(obj)
-	c.Servers = []api.Server{{Host: strOf(srv["host"]), Port: intOf(srv["port"], 22), User: strOf(srv["user"]), HostKey: strings.TrimSpace(strOf(srv["hostKey"]))}}
+	if srv, ok := root["server"].(obj); ok {
+		c.Servers = []api.Server{{Host: strOf(srv["host"]), Port: intOf(srv["port"], 22), User: strOf(srv["user"]), HostKey: strings.TrimSpace(strOf(srv["hostKey"]))}}
+	}
 	paths, _ := root["paths"].(obj)
 	for _, e := range func() []any { a, _ := paths["entries"].([]any); return a }() {
 		switch t := e.(type) {
@@ -580,8 +612,17 @@ func normalize(root obj, data []byte) *api.Config {
 	}
 	vpn, _ := root["vpn"].(obj)
 	c.VPN = api.VPNCfg{Mode: "off", Bridges: strList(vpn["bridges"]), Direct: api.VPNDirect{Domains: ruDomains}}
+	if len(c.Servers) == 0 {
+		c.VPN.Mode = "auto" // «только VPN»: без режима в конфиге VPN включён сам
+	}
 	if m, ok := vpn["mode"].(string); ok {
 		c.VPN.Mode = m
+	}
+	if nm, ok := vpn["nodes"].(obj); ok && len(nm) > 0 {
+		c.VPN.Nodes = map[string]json.RawMessage{}
+		for k := range nm {
+			c.VPN.Nodes[k] = nil
+		}
 	}
 	if d, ok := vpn["direct"].(obj); ok {
 		if _, has := d["domains"]; has {

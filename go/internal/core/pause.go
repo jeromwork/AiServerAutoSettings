@@ -66,7 +66,7 @@ func (c *core) Pause(ctx context.Context) error {
 		}
 	})
 	c.compMu.Lock()
-	c.ch, c.sb, c.fw, c.ag = nil, nil, nil, nil
+	c.ch, c.sb, c.vsb, c.fw, c.ag = nil, nil, nil, nil, nil
 	c.compMu.Unlock()
 	if g := c.tun; g != nil {
 		g.mu.Lock()
