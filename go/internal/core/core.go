@@ -397,6 +397,12 @@ func (c *core) startNetwork(ctx context.Context) {
 	if c.cfg != nil && !f.Mode.NoSingbox && f.Mode.AllowsTun() {
 		vsb, e := singbox.New(c.cfg, c.p, log, c.clean, c.pr, singbox.Options{
 			Role: singbox.RoleVPN, Mode: f.Mode, Instance: c.clean.Instance(), DefaultIface: c.vpnUnderlay,
+			VPNSplit: func() int {
+				if c.tun == nil {
+					return 0
+				}
+				return int(c.tun.split.Load())
+			},
 			OnTunCrash: func(e api.Effective) { c.tun.onTunCrash(ctx, e) },
 		})
 		if e != nil {

@@ -32,6 +32,7 @@ type Options struct {
 	OnTunCrash         func(api.Effective) // sing-box с TUN упал (откат без TUN уже запущен)
 	OnEvent            func(kind string)   // события из журнала канального sing-box (EvNetworkChanged, EvOutboundError)
 	DefaultIface       func() string       // физический внешний интерфейс сейчас ("" — не определён)
+	VPNSplit           func() int          // длина нарезки маршрутов VPN (этап 1b); nil/0 — без нарезки
 }
 
 type box struct {
@@ -201,6 +202,9 @@ func (s *box) render(e api.Effective) ([]byte, error) {
 	}
 	rc := s.rc
 	rc.Effective = e
+	if s.o.VPNSplit != nil {
+		rc.VPNSplit = s.o.VPNSplit()
+	}
 	rc.GeoIPPath = filepath.Join(s.p.State, "geoip-ru.srs")
 	if s.o.LANSocks != nil {
 		rc.LANSocks = s.o.LANSocks()

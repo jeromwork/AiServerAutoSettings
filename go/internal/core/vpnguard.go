@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,9 +27,11 @@ type tunGuard struct {
 	vpnWhy      string
 	lanState    string // off | up | skipped-v2 | no-subnets | error
 	lanWhy      string
-	lastForeign string // последний чужой VPN, о котором писали в журнал
-	underlay    string // адаптер, через который реально идёт трафик к нашему серверу (поверх чего работает VPN)
-	lanOff      bool   // ЛВС выключена после падения до смены сети
+	lastForeign string       // последний чужой VPN, о котором писали в журнал
+	underlay    string       // адаптер, через который реально идёт трафик к нашему серверу (поверх чего работает VPN)
+	split       atomic.Int32 // длина нарезки route_address VPN (этап 1b), 0 — стандартные 0/1
+	bypass      string       // адаптер, куда уходят пробы мимо нашего TUN после нарезки ("" — нет)
+	lanOff      bool         // ЛВС выключена после падения до смены сети
 	retry       *time.Timer
 	exitBusy    atomic.Bool  // проверка выхода уже идёт
 	exit        atomic.Value // exitResult, последний итог проверки выхода
@@ -58,6 +61,12 @@ func (g *tunGuard) statusLocked() map[string]any {
 		"lan": map[string]any{"state": g.lanState, "reason": g.lanWhy}}
 	if g.underlay != "" {
 		st["underlay"] = g.underlay
+	}
+	if n := g.split.Load(); n > 0 {
+		st["split"] = "/" + strconv.Itoa(int(n))
+	}
+	if g.bypass != "" {
+		st["bypass"] = g.bypass
 	}
 	if r, ok := g.exit.Load().(exitResult); ok {
 		st["exit"] = r
@@ -124,11 +133,19 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 		// остаёмся без TUN до смены сети или команды
 	default:
 		// чужой VPN не мешает: наш работает поверх него (трафик к серверу идёт по маршрутам ОС, см. vpnUnderlay)
-		if fv := c.plat.ForeignVPN(); fv != g.lastForeign {
+		fv := c.plat.ForeignVPN()
+		if fv != g.lastForeign {
 			g.event("vpn.over-foreign", "iface", fv, "mode", g.mode)
 			g.lastForeign = fv
 		}
+		if fv == "" {
+			g.resetSplit(ctx) // чужих маршрутов нет — нарезка не нужна (этап 1b)
+		}
 		wantVPN = true
+	}
+	if !wantVPN {
+		g.split.Store(0)
+		g.bypass = ""
 	}
 
 	// ЛВС (в общем sing-box вместе с каналом)
@@ -255,7 +272,12 @@ func (g *tunGuard) tunExitOK() (string, bool) {
 // probe — одна проверка туннеля (после включения): запрос к адресу не из РФ идёт через TUN → vpn-out.
 func (g *tunGuard) probe(ctx context.Context) {
 	// Сначала факт маршрута: HTTP-проба мимо туннеля (провайдерский IP) ничего не доказывает.
-	if out, ok := g.tunExitOK(); !ok {
+	// Этап 1b: 14 проб по /4; мимо TUN часть — нарезка маршрутов; все мимо — сбой; часть мимо после нарезки — предупреждение.
+	bad, out, handled := g.checkRoutes(ctx)
+	if handled {
+		return
+	}
+	if bad == len(probeAddrs) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		if g.vpnState == "foreign" || g.vpnState == "off" || g.mode == "off" {
@@ -266,6 +288,9 @@ func (g *tunGuard) probe(ctx context.Context) {
 		}
 		g.failLocked(ctx, "трафик к пробе идёт не через наш TUN (выход: "+out+")")
 		return
+	}
+	if bad > 0 {
+		g.setBypass(out)
 	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
