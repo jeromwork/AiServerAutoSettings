@@ -3,6 +3,7 @@ package platform
 import (
 	"net"
 	"strings"
+	"sync"
 
 	"remoteagents/internal/api"
 )
@@ -49,7 +50,7 @@ func usableV4(addrs []string) bool {
 func PickPhysical(ifs []api.Iface) string {
 	best, bm := "", 0
 	for _, f := range ifs {
-		if !f.Up || !f.DefaultRoute || IsVirtualIface(f.Name, f.Desc) || !usableV4(f.Addrs) {
+		if !f.Up || !f.DefaultRoute || isOurIface(f.Name) || IsVirtualIface(f.Name, f.Desc) || !usableV4(f.Addrs) {
 			continue
 		}
 		if best == "" || f.Metric < bm {
@@ -65,8 +66,27 @@ func PhysicalInterface() string {
 	if err != nil {
 		return ""
 	}
-	return PickPhysical(ifs)
+	cur := PickPhysical(ifs)
+	physMu.Lock()
+	defer physMu.Unlock()
+	if cur != "" {
+		lastPhys = cur
+		return cur
+	}
+	// Физический не найден (например, при появлении нашего TUN с 0/1): остаёмся на прежнем, пока он поднят с IPv4,
+	// а не уходим в auto_detect_interface — иначе исходящие канала перепривяжутся на наш TUN.
+	for _, f := range ifs {
+		if lastPhys != "" && f.Name == lastPhys && f.Up && usableV4(f.Addrs) && !isOurIface(f.Name) {
+			return lastPhys
+		}
+	}
+	return ""
 }
+
+var (
+	physMu   sync.Mutex
+	lastPhys string
+)
 
 // Interfaces — снимок адаптеров ПК.
 func (p *stubPlatform) Interfaces() ([]api.Iface, error) { return listIfaces() }
