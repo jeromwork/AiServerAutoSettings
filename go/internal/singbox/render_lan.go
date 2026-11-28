@@ -54,9 +54,6 @@ func LANSubnets(cfg *api.Config) (nets, skipped []string) {
 	return nets, skipped
 }
 
-// LANTunDNS — адрес, который sing-box регистрирует как DNS на интерфейсе ЛВС (второй адрес /30).
-const LANTunDNS = "172.19.9.2"
-
 // renderLAN — часть ЛВС (N2, повтор tun.py): tun-in RA3-LAN только на подсети клиники → socks во внутренний
 // SOCKS forward (lan-out). DNS/NRPT/hosts не трогаем.
 func renderLAN(rc api.RenderContext) (api.Part, error) {
@@ -78,19 +75,11 @@ func renderLAN(rc api.RenderContext) (api.Part, error) {
 	}
 	return api.Part{
 		Inbounds: []m{{"type": "tun", "tag": "lan-in", "interface_name": name, "address": []string{"172.19.9.1/30"}, "mtu": 1400,
-			"auto_route": true, "strict_route": false, "route_address": nets}},
+			// dns_mode=disabled (sing-box 1.14): не вешать 172.19.9.2 DNS-сервером на адаптер и не перехватывать порт 53.
+			// Чужой TUN со strict_route (Happ) блокирует любой порт 53 мимо себя (WFP "block ipv4 dns") — DNS на нашем
+			// адаптере никогда не отвечал бы, а системный резолвер ждал бы его. DNS ПК идёт как раньше, мимо нас.
+			"dns_mode": "disabled", "auto_route": true, "strict_route": false, "route_address": nets}},
 		Outbounds: []m{{"type": "socks", "tag": "lan-out", "server": host, "server_port": pn, "version": "5"}},
-		// Только запросы к DNS самого TUN (172.19.9.2:53) из lan-in; всё остальное (чужой VPN, свои подсети) не трогаем.
-		Rules: []m{
-			{"inbound": "lan-in", "ip_cidr": []string{LANTunDNS + "/32"}, "port": 53, "action": "hijack-dns"},
-			{"ip_cidr": nets, "outbound": "lan-out"},
-		},
-		DNS: m{
-			"servers": []m{
-				{"type": "udp", "tag": "dns-up", "server": "1.1.1.1"},
-				{"type": "local", "tag": "dns-sys"},
-			},
-			"final": "dns-up",
-		},
+		Rules:     []m{{"ip_cidr": nets, "outbound": "lan-out"}},
 	}, nil
 }

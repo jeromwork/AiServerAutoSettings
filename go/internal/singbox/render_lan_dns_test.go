@@ -21,37 +21,38 @@ func lanRC() api.RenderContext {
 	}
 }
 
-// DNS-запросы к адресу TUN ЛВС перехватываются первым правилом и уходят на внешний DNS; прочее не затрагивается.
-func TestRenderLANHijackDNS(t *testing.T) {
+// TUN ЛВС не регистрирует DNS на адаптере и не перехватывает порт 53 (иначе чужой strict-TUN глушит запросы).
+func TestRenderLANNoDNS(t *testing.T) {
 	b, err := Render(lanRC())
 	if err != nil {
 		t.Fatal(err)
 	}
 	var v struct {
-		Route struct {
+		Inbounds []map[string]any `json:"inbounds"`
+		Route    struct {
 			Rules []map[string]any `json:"rules"`
-			Res   string           `json:"default_domain_resolver"`
 		} `json:"route"`
-		DNS struct {
-			Final   string           `json:"final"`
-			Servers []map[string]any `json:"servers"`
-		} `json:"dns"`
+		DNS map[string]any `json:"dns"`
 	}
 	if err := json.Unmarshal(b, &v); err != nil {
 		t.Fatal(err)
 	}
-	var h map[string]any
-	for _, r := range v.Route.Rules {
-		if r["action"] == "hijack-dns" {
-			h = r
-			break
+	var lan map[string]any
+	for _, in := range v.Inbounds {
+		if in["tag"] == "lan-in" {
+			lan = in
 		}
 	}
-	if h == nil || h["inbound"] != "lan-in" || h["port"] != float64(53) || h["ip_cidr"].([]any)[0] != "172.19.9.2/32" {
-		t.Fatalf("нет узкого hijack-dns: %s", b)
+	if lan == nil || lan["dns_mode"] != "disabled" {
+		t.Fatalf("lan-in без dns_mode=disabled: %s", b)
 	}
-	if v.DNS.Final != "dns-up" || v.Route.Res != "dns-sys" || len(v.DNS.Servers) != 2 {
-		t.Fatalf("dns: %s", b)
+	for _, r := range v.Route.Rules {
+		if r["action"] == "hijack-dns" {
+			t.Fatalf("hijack-dns не нужен: %s", b)
+		}
+	}
+	if v.DNS != nil {
+		t.Fatalf("секция dns не нужна: %s", b)
 	}
 	if p, err := exec.LookPath("sing-box"); err == nil {
 		f := filepath.Join(t.TempDir(), "c.json")
