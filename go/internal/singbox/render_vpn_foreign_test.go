@@ -98,3 +98,28 @@ func TestDiagRedactHidesSecrets(t *testing.T) {
 		t.Fatalf("секреты скрыты, адрес виден: %s", got)
 	}
 }
+
+func TestRenderVPNForeignBindsDirectOnly(t *testing.T) {
+	rc := foreignRC(true, "happ-tun")
+	rc.LogFile = "/tmp/vpn-singbox.log"
+	_, raw := renderVPNOut(t, rc)
+	var v struct {
+		Log       map[string]any   `json:"log"`
+		Outbounds []map[string]any `json:"outbounds"`
+	}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range v.Outbounds {
+		b, has := o["bind_interface"]
+		if o["tag"] == "vpn-direct" && b != "happ-tun" {
+			t.Fatalf("vpn-direct без bind_interface: %v", o)
+		}
+		if o["tag"] != "vpn-direct" && has {
+			t.Fatalf("мосты без привязки: %v", o)
+		}
+	}
+	if v.Log["level"] != "info" || v.Log["output"] != "/tmp/vpn-singbox.log" {
+		t.Fatalf("log: %v", v.Log)
+	}
+}

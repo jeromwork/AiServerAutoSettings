@@ -24,6 +24,7 @@ type RenderContext struct {
 	Effective    Effective
 	VPNBlock     bool     // VPN перекрывает интернет (этап 3a, vpn.lockExit): всё, что не исключено, отклоняется; свой процесс программы идёт через vpn-out для проверок
 	ForeignVPN   bool     // наш VPN идёт поверх чужого (Happ): только TCP/TLS мосты
+	LogFile      string   // файл журнала VPN sing-box уровня info (только под чужим VPN, для разбора); "" — warn в stderr
 	PathRank     []string // пути канала, прошедшие свежий замер/гонку, победитель первым (nil — нет данных)
 	VPNSplit     int      // нарезка route_address VPN блоками /N (этап 1b); 0/1 — стандартные 0/1+128/1
 }

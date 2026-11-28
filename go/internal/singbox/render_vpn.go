@@ -363,11 +363,21 @@ func RenderVPN(rc api.RenderContext) ([]byte, error) {
 		tun["auto_redirect"] = true
 	}
 	outs := append([]m(nil), sel.outs...)
+	direct := m{"type": "direct", "tag": "vpn-direct"}
+	if rc.ForeignVPN && rc.DefaultIface != "" {
+		// Без привязки vpn-direct ушёл бы по маршрутам ОС в наш TUN (0/1) — петля; привязываем к интерфейсу чужого VPN.
+		// Мосты остаются без привязки (их серверы в route_exclude_address).
+		direct["bind_interface"] = rc.DefaultIface
+	}
 	outs = append(outs,
 		m{"type": "urltest", "tag": "vpn-out", "outbounds": sel.finals, "url": VPNProbeURL, "interval": "3m", "tolerance": 100, "interrupt_exist_connections": false},
-		m{"type": "direct", "tag": "vpn-direct"})
-	// Журнал sing-box VPN — только предупреждения: в info попадают адреса сайтов.
-	return json.Marshal(m{"log": m{"level": "warn"}, "inbounds": []m{tun}, "outbounds": outs, "route": route,
+		direct)
+	// Журнал sing-box VPN — только предупреждения: в info попадают адреса сайтов. Под чужим VPN для разбора — info в файл.
+	logCfg := m{"level": "warn"}
+	if rc.ForeignVPN && rc.LogFile != "" {
+		logCfg = m{"level": "info", "output": rc.LogFile, "timestamp": true}
+	}
+	return json.Marshal(m{"log": logCfg, "inbounds": []m{tun}, "outbounds": outs, "route": route,
 		"experimental": m{"clash_api": m{"external_controller": fmt.Sprintf("127.0.0.1:%d", rc.ClashPort), "secret": rc.ClashSecret}}})
 }
 

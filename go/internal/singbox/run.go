@@ -274,6 +274,11 @@ func (s *box) render(e api.Effective) ([]byte, error) {
 		rc.VPNSplit = s.o.VPNSplit()
 	}
 	rc.ForeignVPN = s.o.ForeignVPN != nil && s.o.ForeignVPN()
+	if s.isVPN() && rc.ForeignVPN && s.p.Logs != "" {
+		rc.LogFile = filepath.Join(s.p.Logs, "vpn-singbox.log")
+		_ = os.MkdirAll(s.p.Logs, 0o755)
+		_ = os.Remove(rc.LogFile) // перезапись при каждом старте — размер ограничен одной сессией
+	}
 	s.rc.ForeignVPN = rc.ForeignVPN // для NetChanged: смена foreign перерисовывает конфиг
 	if s.o.PathRank != nil {
 		rc.PathRank = s.o.PathRank()
