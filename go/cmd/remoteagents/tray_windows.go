@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"fyne.io/systray"
@@ -35,7 +37,9 @@ type tray struct {
 	state   string
 	path    string
 
-	pause *systray.MenuItem
+	pause    *systray.MenuItem
+	diskItem *systray.MenuItem
+	disk     string // последнее состояние Диска (для всплывающего сообщения при переходе в error)
 }
 
 var theTray *tray
@@ -71,6 +75,8 @@ func (t *tray) onReady() {
 	systray.SetTooltip("RemoteAgents: запускается")
 	open := systray.AddMenuItem("Открыть страницу", "")
 	t.pause = systray.AddMenuItem("Пауза", "")
+	t.diskItem = systray.AddMenuItem("Диск", "Открыть папку Диска")
+	t.diskItem.Hide()
 	vpnOff := systray.AddMenuItem("Выключить VPN", "")
 	systray.AddSeparator()
 	quit := systray.AddMenuItem("Выход", "")
@@ -82,6 +88,8 @@ func (t *tray) onReady() {
 				t.open()
 			case <-t.pause.ClickedCh:
 				t.togglePause()
+			case <-t.diskItem.ClickedCh:
+				go func() { _ = t.call("/api/disk/open", url.Values{}) }()
 			case <-vpnOff.ClickedCh:
 				go t.vpnOff()
 			case <-quit.ClickedCh:
@@ -235,6 +243,11 @@ func (t *tray) event(kind string, data []byte) {
 		if json.Unmarshal(data, &m) == nil {
 			t.update(func() { t.state, t.path = strings.ToLower(m.State), m.Path })
 		}
+	case "disk":
+		var m struct{ State, Text, Why string }
+		if json.Unmarshal(data, &m) == nil {
+			t.diskEvent(m.State, m.Text, m.Why)
+		}
 	case "pause":
 		var m struct {
 			Action, Stage string
@@ -327,4 +340,38 @@ func icon(c rgb) []byte {
 	out = append(out, make([]byte, 24)...)
 	out = append(out, pix...)
 	return append(out, mask...)
+}
+
+// diskEvent обновляет пункт «Диск: <состояние>» и при переходе в error показывает всплывающее сообщение.
+func (t *tray) diskEvent(state, text, why string) {
+	t.mu.Lock()
+	prev := t.disk
+	t.disk = state
+	t.mu.Unlock()
+	if t.diskItem == nil || state == "" {
+		return
+	}
+	title := "Диск: " + text
+	if why != "" {
+		title += " — " + why
+	}
+	t.diskItem.SetTitle(title)
+	t.diskItem.Show()
+	if state == "error" && prev != "error" {
+		go balloon("Диск RemoteAgents", title)
+	}
+}
+
+// balloon — всплывающее сообщение у значка: одноразовый скрытый PowerShell с NotifyIcon (текст идёт через переменные окружения).
+func balloon(title, text string) {
+	const script = `Add-Type -AssemblyName System.Windows.Forms,System.Drawing;` +
+		`$n=New-Object System.Windows.Forms.NotifyIcon;$n.Icon=[System.Drawing.SystemIcons]::Warning;$n.Visible=$true;` +
+		`$n.ShowBalloonTip(10000,$env:RA_T,$env:RA_X,[System.Windows.Forms.ToolTipIcon]::Warning);` +
+		`Start-Sleep -Seconds 11;$n.Dispose()`
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	cmd.Env = append(os.Environ(), "RA_T="+title, "RA_X="+text)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	if cmd.Start() == nil {
+		_ = cmd.Wait()
+	}
 }

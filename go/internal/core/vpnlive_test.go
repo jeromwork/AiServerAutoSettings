@@ -199,4 +199,5 @@ func TestTunCrashPersistsOff(t *testing.T) {
 		c.tun.onTunCrash(context.Background(), api.Effective{VPN: true})
 	}
 	waitFor(t, func() bool { return savedVPN(t, c).VPN.Mode == "off" })
+	c.persistWG.Wait() // запись закончена до очистки TempDir
 }

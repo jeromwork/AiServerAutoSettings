@@ -29,6 +29,7 @@ type Actions interface {
 	SwitchPath(name string) error // → Channel.ForcePath
 	VPN(mode string) error        // до N1b → ErrNotSupported; в Safe → ErrSafe
 	HappierURL() (string, error)
+	DiskOpen() error // открыть папку Диска (Base, иначе Home) в Проводнике
 	LogTail(n int) []string
 	LogZip(w io.Writer) error
 	LogSend(ctx context.Context) error

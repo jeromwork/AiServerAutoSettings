@@ -3,8 +3,11 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
 	"runtime"
 
+	"remoteagents/internal/api"
 	"remoteagents/internal/disk"
 	"remoteagents/internal/singbox"
 )
@@ -58,10 +61,41 @@ func (c *core) launchDisk(ctx context.Context, dcfg disk.Config, bin string, arg
 		Bin: bin, BinArgs: args, BinWhy: why,
 		OnState: func(s disk.Snapshot) { c.publish("disk", s.Map()); c.publishStatus() },
 	})
+	dir := dcfg.Base
+	if dir == "" {
+		dir = dcfg.Home
+	}
 	c.compMu.Lock()
-	c.dsk = eng
+	c.dsk, c.diskDir = eng, dir
 	c.compMu.Unlock()
 	if err := eng.Start(ctx); err != nil {
 		c.log.Error("core: disk-start", "err", err.Error())
 	}
+}
+
+// DiskOpen открывает папку Диска в Проводнике (создаёт, если ещё нет).
+func (c *core) DiskOpen() error {
+	c.compMu.RLock()
+	dir := c.diskDir
+	c.compMu.RUnlock()
+	if dir == "" {
+		return api.ErrNotSupported
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("explorer.exe", dir)
+	case "darwin":
+		cmd = exec.Command("open", dir)
+	default:
+		cmd = exec.Command("xdg-open", dir)
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }() // Проводник не наш процесс; explorer.exe часто выходит с кодом 1 — это норма
+	return nil
 }

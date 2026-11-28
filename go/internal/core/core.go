@@ -74,16 +74,17 @@ type core struct {
 	cfg *api.Config
 	gen string
 
-	pr  api.Procs
-	sh  api.Shell
-	sb  api.Singbox
-	vsb api.Singbox // отдельный процесс sing-box только для VPN (singbox.RoleVPN)
-	ag  *agent.Agent
-	ch  api.Channel
-	fw  api.Forwarder
-	dsk *disk.Engine
-	ui  *webui.UI
-	upd api.Updater
+	pr      api.Procs
+	sh      api.Shell
+	sb      api.Singbox
+	vsb     api.Singbox // отдельный процесс sing-box только для VPN (singbox.RoleVPN)
+	ag      *agent.Agent
+	ch      api.Channel
+	fw      api.Forwarder
+	dsk     *disk.Engine
+	diskDir string // папка Диска для «Открыть Диск» (Base, иначе Home)
+	ui      *webui.UI
+	upd     api.Updater
 
 	control atomic.Bool
 

@@ -77,6 +77,7 @@ func (a *Actions) SwitchPath(name string) error {
 	return nil
 }
 func (a *Actions) VPN(mode string) error                           { return api.ErrNotSupported }
+func (a *Actions) DiskOpen() error                                 { return api.ErrNotSupported }
 func (a *Actions) HappierURL() (string, error)                     { return "http://localhost:47831", nil }
 func (a *Actions) LogTail(n int) []string                          { return nil }
 func (a *Actions) LogZip(w io.Writer) error                        { return errors.New("fake: LogZip") }

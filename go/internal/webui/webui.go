@@ -242,6 +242,7 @@ func (u *UI) registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/vpn/check", u.handleVPNCheck)
 	mux.HandleFunc("/api/vpn/lock", u.handleVPNLock)
 	mux.HandleFunc("/api/vpn/off", u.handleVPNOff)
+	mux.HandleFunc("/api/disk/open", u.handleDiskOpen)
 	mux.HandleFunc("/revert", u.handleConfigRevert)
 	mux.HandleFunc("/api/events", u.handleEvents)
 	mux.HandleFunc("/api/restart", u.handleRestart)
@@ -578,6 +579,22 @@ func (u *UI) handleVPNOff(w http.ResponseWriter, req *http.Request) {
 	}
 	if err := callTimeout(10*time.Second, "выключение VPN", func() error { return u.act.VPN("off") }); err != nil {
 		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "problems": []string{err.Error()}})
+		return
+	}
+	replyJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleDiskOpen — POST /api/disk/open: открыть папку Диска в Проводнике (кнопка страницы и пункт трея).
+func (u *UI) handleDiskOpen(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !u.checkAuth(w, req) {
+		return
+	}
+	if err := u.act.DiskOpen(); err != nil {
+		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 	replyJSON(w, http.StatusOK, map[string]any{"ok": true})

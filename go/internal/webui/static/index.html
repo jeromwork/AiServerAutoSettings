@@ -91,6 +91,11 @@ pre { background: #f4f4f4; padding: 8px; white-space: pre-wrap; word-break: brea
   <div id="vpn-msg"></div>
 </div>
 
+<div class="box" id="disk-box" style="display:none">
+  <b id="disk-st">Диск</b> <button id="disk-open" type="button">Открыть Диск</button>
+  <div id="disk-msg"></div>
+</div>
+
 <div class="box">
   <b>Экспорт конфига</b>
   <button id="btn-cfg-copy" type="button">Скопировать конфиг</button>
@@ -176,6 +181,7 @@ function show(s) {
   if (pcl) pcl.textContent = s.pc ? (s.name || "Компьютер") + " (" + s.pc + " на сервере)" : "";
 
   if (s.vpn) onVPN(s.vpn);
+  onDisk(s.disk);
   onSysProxy(s.sysproxy);
   if (s.channelConfigured === false) document.getElementById("net-st").innerHTML = "Канал: <b>не настроен</b> (конфиг только для VPN)";
 
@@ -668,6 +674,23 @@ function onAttempts(list) {
   }).join("\n") || "Пока не было.";
 }
 
+function onDisk(d) {
+  var box = document.getElementById("disk-box");
+  if (!d || !d.state) { box.style.display = "none"; return; }
+  box.style.display = "";
+  var t = "Диск: " + (d.text || d.state) + (d.why ? " \u2014 " + d.why : "");
+  var el = document.getElementById("disk-st");
+  el.textContent = t;
+  el.className = d.state === "error" ? "err" : "";
+}
+document.getElementById("disk-open").onclick = function() {
+  var m = document.getElementById("disk-msg");
+  m.textContent = "";
+  post("/api/disk/open", {}).then(function(x) {
+    if (!x.ok) { m.className = "err"; m.textContent = x.error || "Не удалось открыть"; }
+  });
+};
+
 function listen(kind, fn) {
   es.addEventListener(kind, function(e) { try { fn(JSON.parse(e.data)); } catch (x) {} });
 }
@@ -681,6 +704,7 @@ listen("pause", onPause);
 listen("update", onUpdate);
 listen("channel", onChannel);
 listen("vpn", onVPN);
+listen("disk", onDisk);
 listen("sysproxy", onSysProxy);
 listen("singbox", onSingbox);
 listen("paths", onPaths);
