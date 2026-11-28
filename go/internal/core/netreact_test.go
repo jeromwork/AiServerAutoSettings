@@ -185,3 +185,44 @@ func TestProbeFailsWhenExitIfaceNotOurs(t *testing.T) {
 		t.Fatalf("state=%s fails=%d why=%q", c.tun.vpnState, c.tun.fails, c.tun.vpnWhy)
 	}
 }
+
+func TestOnForeignResetsSingboxAndUnderlay(t *testing.T) {
+	var sb, ul int
+	n := &netReact{log: &fake.Logger{}, sbReset: func(context.Context) { sb++ }}
+	n.onForeign(context.Background(), func() { ul++ })
+	if sb != 1 || ul != 1 {
+		t.Fatalf("sbReset=%d underlay=%d, ждали по 1", sb, ul)
+	}
+}
+
+func TestResilientWatchReopensAfterClose(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opens := 0
+	open := func(context.Context) <-chan struct{} {
+		opens++
+		ch := make(chan struct{}, 1)
+		if opens == 1 {
+			close(ch) // первый сокет умер сразу
+		}
+		return ch
+	}
+	out := resilientWatch(ctx, &fake.Logger{}, open, 10*time.Millisecond)
+	select {
+	case <-out: // событие после переоткрытия
+	case <-time.After(2 * time.Second):
+		t.Fatal("WatchNet не переоткрыт")
+	}
+	if opens != 2 {
+		t.Fatalf("opens=%d, ждали 2", opens)
+	}
+	cancel()
+	select {
+	case _, ok := <-out:
+		if ok {
+			<-out
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("канал не закрылся по ctx")
+	}
+}

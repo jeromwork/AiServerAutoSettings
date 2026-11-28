@@ -10,7 +10,69 @@ import (
 	"remoteagents/internal/platform"
 )
 
-const netDebounce = 700 * time.Millisecond
+const (
+	netDebounce       = 700 * time.Millisecond
+	netWatchReopenGap = 5 * time.Second // минимум между переоткрытиями WatchNet
+)
+
+// resilientWatch — источник событий сети, переживающий закрытие канала WatchNet (ошибка netlink/сокета):
+// логирует, ждёт gap (одноразовый таймер, не опрос) и открывает заново; после переоткрытия шлёт событие,
+// т.к. изменения за время простоя могли пропасть. Закрывается только по ctx.
+func resilientWatch(ctx context.Context, log api.Logger, open func(context.Context) <-chan struct{}, gap time.Duration) <-chan struct{} {
+	out := make(chan struct{}, 1)
+	emit := func() {
+		select {
+		case out <- struct{}{}:
+		default:
+		}
+	}
+	go func() {
+		defer close(out)
+		for first := true; ; first = false {
+			wctx, cancel := context.WithCancel(ctx)
+			in := open(wctx)
+			if !first {
+				emit()
+			}
+		loop:
+			for {
+				select {
+				case <-ctx.Done():
+					cancel()
+					return
+				case _, ok := <-in:
+					if !ok {
+						break loop
+					}
+					emit()
+				}
+			}
+			cancel()
+			if ctx.Err() != nil {
+				return
+			}
+			log.Warn("core: net-watch закрыт, переоткрываю", "gap", gap.String())
+			t := time.NewTimer(gap)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return out
+}
+
+// onForeign — появился/исчез чужой VPN: VPN-процесс перепривязывает default_interface (NetChanged), канал — underlay.
+func (n *netReact) onForeign(ctx context.Context, underlay func()) {
+	if n.sbReset != nil {
+		n.sbReset(ctx)
+	}
+	if underlay != nil {
+		underlay()
+	}
+}
 
 // debounce сливает пачку событий (сеть при смене шлёт их десятки) в одно после тишины d. Таймер одноразовый, без опроса.
 func debounce(ctx context.Context, in <-chan struct{}, d time.Duration) <-chan struct{} {
@@ -153,7 +215,7 @@ func (c *core) watchNet(ctx context.Context) {
 	}
 	n.last, n.inited = n.sig(), true
 	n.lastFV, n.fvInit = n.foreign(), true
-	for range debounce(ctx, platform.WatchNet(ctx), netDebounce) {
+	for range debounce(ctx, resilientWatch(ctx, c.log, platform.WatchNet, netWatchReopenGap), netDebounce) {
 		go c.checkSysProxy(ctx, "net-changed") // macOS: прокси без своего события — по смене сети; на Windows дубль гасится сравнением
 		rebuilt := n.onChange(ctx)
 		fc := n.foreignChanged()
@@ -162,7 +224,7 @@ func (c *core) watchNet(ctx context.Context) {
 		case rebuilt:
 			c.tun.reconcile(ctx, "net-changed")
 		case fc:
-			c.underlay()
+			n.onForeign(ctx, c.underlay)
 			c.tun.reconcile(ctx, "foreign-changed")
 		}
 	}
