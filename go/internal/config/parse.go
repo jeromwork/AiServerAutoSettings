@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"remoteagents/internal/api"
+	"remoteagents/internal/disk"
 	"remoteagents/internal/secret"
 )
 
@@ -477,12 +478,21 @@ func (c *checker) validateRest(root obj) {
 			c.optPort(m, "port", "lanProxy.port")
 		}
 	}
-	if v, ok := root["disk"]; ok {
-		c.object(v, "disk")
-	}
+	syncPort := 0
 	if v, ok := root["syncPort"]; ok {
-		if _, isI := asInt(v); !isI {
+		if n, isI := asInt(v); !isI {
 			c.schema("syncPort", "must be an integer")
+		} else {
+			syncPort = n
+		}
+	}
+	if v, ok := root["disk"]; ok {
+		if _, isObj := c.object(v, "disk"); isObj {
+			if b, err := json.Marshal(v); err == nil {
+				if _, err := disk.ParseConfig(b, syncPort); err != nil {
+					c.schema("disk", err.Error())
+				}
+			}
 		}
 	}
 	if v, ok := root["update"]; ok {

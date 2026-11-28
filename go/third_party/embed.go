@@ -7,3 +7,8 @@ import _ "embed"
 //
 //go:embed singbox.lock.json
 var SingboxLock []byte
+
+// DiskLock is disk.lock.json: pinned Syncthing(tray) build for the Disk (url, sha256, binSha256).
+//
+//go:embed disk.lock.json
+var DiskLock []byte

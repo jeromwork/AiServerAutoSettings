@@ -1,0 +1,17 @@
+{
+  "comment": "Syncthing для Диска: берётся из syncthingtray (как в Лаборатории), запуск: syncthingtray.exe syncthing serve ...",
+  "assets": [
+    {
+      "name": "syncthingtray",
+      "os": "windows",
+      "arch": "amd64",
+      "version": "2.1.9",
+      "url": "https://github.com/Martchus/syncthingtray/releases/download/v2.1.9/syncthingtray-2.1.9-x86_64-w64-mingw32.exe.zip",
+      "sha256": "c20d74998cb84980b07cb00eca4c38d26643eaa69b8bef94f6841ded6c752cc5",
+      "binPath": "syncthingtray.exe",
+      "binSha256": "6d0010a4b5233a1c393614546d9bcdbd1c4f1f425502bea22d163314c2ad7da7",
+      "target": "syncthingtray/syncthingtray.exe",
+      "license": "syncthingtray-2.1.9-x86_64-w64-mingw32-LICENSES.md"
+    }
+  ]
+}
