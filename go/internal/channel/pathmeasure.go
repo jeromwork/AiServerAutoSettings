@@ -14,8 +14,11 @@ import (
 // смена чужого VPN, обрыв сессии), периодических опросов нет.
 const (
 	measureTimeout = 3 * time.Second
-	// MeasureURL — лёгкая цель, запрос идёт через выбранный путь до нашего сервера и дальше.
-	measureURL = "http://www.gstatic.com/generate_204"
+	// Цели замера. Первая — mixed-in сервера (127.0.0.1:1080 у выхода пути): любой HTTP-ответ (400) приходит с самого
+	// сервера, без выхода в интернет и без 104. Серверный sing-box при этом пропускает и интернет (route.final), поэтому
+	// запасная цель — gstatic, если на сервере mixed-in нет.
+	measureURL  = "http://127.0.0.1:1080/"
+	measureURL2 = "http://www.gstatic.com/generate_204"
 	// Гистерезис: с живого пути уходим, только если новый быстрее и на долю, и на абсолют.
 	hystRatio = 0.7
 	hystMinMs = 30
@@ -26,6 +29,14 @@ func (c *chn) measurePaths(names []string) map[string]int {
 	if c.measureFn != nil {
 		return c.measureFn(names)
 	}
+	out := c.measureVia(names, measureURL)
+	if len(out) == 0 { // на сервере нет локальной цели — пробуем интернет-цель
+		out = c.measureVia(names, measureURL2)
+	}
+	return out
+}
+
+func (c *chn) measureVia(names []string, target string) map[string]int {
 	var mu sync.Mutex
 	out := map[string]int{}
 	var wg sync.WaitGroup
@@ -38,7 +49,7 @@ func (c *chn) measurePaths(names []string) map[string]int {
 			var r struct {
 				Delay int `json:"delay"`
 			}
-			q := url.Values{"url": {measureURL}, "timeout": {"3000"}}
+			q := url.Values{"url": {target}, "timeout": {"3000"}}
 			if err := c.sb.Clash(ctx, "GET", "/proxies/"+url.PathEscape(n)+"/delay?"+q.Encode(), nil, &r); err != nil || r.Delay <= 0 {
 				return
 			}
