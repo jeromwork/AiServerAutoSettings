@@ -152,10 +152,8 @@ type vpnSel struct {
 // без ssh/direct/socks и без путей «через чужой VPN». Узел с тем же именем, что и путь, главнее.
 func vpnSelect(cfg *api.Config) (vpnSel, error) { return vpnSelectOpt(cfg, false, nil) }
 
-// udpBridgeTypes — мосты по UDP/QUIC: под чужим VPN (Happ) не проходят.
-var udpBridgeTypes = map[string]bool{"hysteria2": true, "hysteria": true, "tuic": true}
-
-// vpnSelectOpt — vpnSelect с учётом чужого VPN: foreign — только TCP/TLS мосты; rank — пути канала, прошедшие свежий замер
+// vpnSelectOpt — vpnSelect с учётом чужого VPN: тип моста не отсекается (под Happ на ПК владельца UDP-мосты hy2/tuic проходят,
+// TCP — нет; решает замер, а не тип; foreign оставлен для сигнатуры); rank — пути канала, прошедшие свежий замер
 // (победитель первым): остальные пути отбрасываются, если остался хоть один пригодный (иначе порядок конфига).
 func vpnSelectOpt(cfg *api.Config, foreign bool, rank []string) (vpnSel, error) {
 	var sel vpnSel
@@ -195,9 +193,6 @@ func vpnSelectOpt(cfg *api.Config, foreign bool, rank []string) (vpnSel, error) 
 		if len(want) > 0 && !want[n] {
 			continue
 		}
-		if foreign && udpBridgeTypes[t] {
-			continue
-		}
 		seenFinal[n] = true
 		sel.outs = append(sel.outs, keep(o))
 		sel.finals = append(sel.finals, n)
@@ -219,13 +214,6 @@ func vpnSelectOpt(cfg *api.Config, foreign bool, rank []string) (vpnSel, error) 
 			for _, o := range p.outs {
 				if t, _ := o["type"].(string); t == "ssh" || t == "direct" || t == "socks" {
 					bad = true
-				}
-			}
-			if foreign {
-				for _, o := range p.outs {
-					if t, _ := o["type"].(string); udpBridgeTypes[t] {
-						bad = true
-					}
 				}
 			}
 			if bad || (len(want) > 0 && !want[p.name]) {
@@ -253,6 +241,16 @@ func vpnSelectOpt(cfg *api.Config, foreign bool, rank []string) (vpnSel, error) 
 			sort.SliceStable(pass, func(i, j int) bool { return ranked[pass[i]] < ranked[pass[j]] })
 			sel.finals = append(sel.finals[:nodeFinals:nodeFinals], pass...)
 		}
+	}
+	// Серверы ВСЕХ выбранных мостов (в т.ч. путей канала) и сервер канала не должны идти в наш TUN: иначе после его подъёма
+	// маршрут ОС к ним ведёт в наш адаптер и «нижний» адаптер (vpnUnderlay) ошибочно становится физическим.
+	for _, o := range sel.outs {
+		if s, _ := o["server"].(string); s != "" && s != "127.0.0.1" && s != "localhost" {
+			hosts[s] = true
+		}
+	}
+	if cfg.HasChannel() {
+		hosts[cfg.Servers[0].Host] = true
 	}
 	for h := range hosts {
 		if h != "" {

@@ -120,7 +120,22 @@ func hasIface(ifs []api.Iface, name string) bool {
 // vpnUnderlay — «нижний» адаптер VPN сейчас: куда ОС ведёт трафик к серверу (чужой VPN или физический адаптер).
 // Адрес сервера запоминается: DNS недоступен — берём прошлый. Узлов нет — прежнее поведение (PhysicalInterface).
 func (c *core) vpnUnderlay() string {
-	return platform.UnderlayInterface(c.vpnAddr())
+	addr := c.vpnAddr()
+	if n := platform.RouteUnderlay(addr); n != "" {
+		c.underMu.Lock()
+		c.underIface = n
+		c.underMu.Unlock()
+		return n
+	}
+	// Маршрут к серверу ведёт в наш TUN (адрес не исключён) — прежний «нижний» адаптер, а не физический: иначе под Happ
+	// VPN перепривяжется с happ-tun на Wi-Fi.
+	c.underMu.Lock()
+	last := c.underIface
+	c.underMu.Unlock()
+	if last != "" && addr != "" {
+		return last
+	}
+	return platform.PhysicalInterface()
 }
 
 // vpnForeign — наш VPN идёт поверх чужого: маршрут ОС к серверу ведёт в чужой VPN-интерфейс (при нашем TUN ForeignVPN() пуст).

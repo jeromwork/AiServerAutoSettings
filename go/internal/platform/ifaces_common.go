@@ -86,12 +86,21 @@ func PhysicalInterface() string {
 // UnderlayInterface — «нижний» адаптер нашего VPN: через него ОС реально ведёт трафик к серверу addr ("ip:port",
 // адрес исключён из нашего TUN, значит это чужой VPN или физический адаптер). Не определён/наш — PhysicalInterface.
 func UnderlayInterface(addr string) string {
-	if addr != "" {
-		if n := ExitIface(addr); n != "" && !isOurIface(n) {
-			return n
-		}
+	if n := RouteUnderlay(addr); n != "" {
+		return n
 	}
 	return PhysicalInterface()
+}
+
+// RouteUnderlay — интерфейс маршрута ОС к addr, если он не наш; "" — не определён или маршрут ведёт в наш TUN.
+func RouteUnderlay(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	if n := ExitIface(addr); n != "" && !isOurIface(n) {
+		return n
+	}
+	return ""
 }
 
 var (

@@ -58,16 +58,17 @@ type quitReq struct {
 }
 
 type core struct {
-	persistWG sync.WaitGroup // фоновые записи режима VPN (тесты ждут завершения до очистки TempDir)
-	underMu   sync.Mutex     // underAddr: последний разрешённый адрес сервера VPN для определения нижнего адаптера
-	underAddr string
-	f         Flags
-	p         api.Paths
-	log       api.Logger
-	jr        *journal.Journal
-	plat      api.Platform
-	clean     *cleanup.Cleaner
-	start     time.Time
+	persistWG  sync.WaitGroup // фоновые записи режима VPN (тесты ждут завершения до очистки TempDir)
+	underMu    sync.Mutex     // underAddr: последний разрешённый адрес сервера VPN для определения нижнего адаптера
+	underAddr  string
+	underIface string // последний «нижний» адаптер, определённый по маршруту ОС к серверу VPN
+	f          Flags
+	p          api.Paths
+	log        api.Logger
+	jr         *journal.Journal
+	plat       api.Platform
+	clean      *cleanup.Cleaner
+	start      time.Time
 
 	cfg *api.Config
 	gen string
