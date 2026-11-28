@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -65,5 +66,13 @@ func TestSelectBestAppliesMeasure(t *testing.T) {
 	sb.now = "a"
 	if c.selectBest("") != "" || sb.now != "a" {
 		t.Fatal("закреплённый путь тронут")
+	}
+}
+
+func TestSetRankWinnerFirstOnlyPassed(t *testing.T) {
+	c := &chn{}
+	c.setRank([]string{"a", "b", "c"}, map[string]int{"a": 300, "b": 60}, "a")
+	if got := strings.Join(c.PathRank(), ","); got != "a,b" {
+		t.Fatalf("победитель первым, без упавших: %s", got)
 	}
 }

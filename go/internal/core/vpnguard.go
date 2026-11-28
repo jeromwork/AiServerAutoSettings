@@ -120,6 +120,23 @@ func hasIface(ifs []api.Iface, name string) bool {
 // vpnUnderlay — «нижний» адаптер VPN сейчас: куда ОС ведёт трафик к серверу (чужой VPN или физический адаптер).
 // Адрес сервера запоминается: DNS недоступен — берём прошлый. Узлов нет — прежнее поведение (PhysicalInterface).
 func (c *core) vpnUnderlay() string {
+	return platform.UnderlayInterface(c.vpnAddr())
+}
+
+// vpnForeign — наш VPN идёт поверх чужого: маршрут ОС к серверу ведёт в чужой VPN-интерфейс (при нашем TUN ForeignVPN() пуст).
+func (c *core) vpnForeign() bool {
+	return platform.ForeignUnderlay(c.vpnAddr()) != "" || c.plat.ForeignVPN() != ""
+}
+
+// vpnPathRank — пути канала, прошедшие свежий замер, победитель первым (событие замера, без опросов).
+func (c *core) vpnPathRank() []string {
+	if ch, ok := c.getCh().(interface{ PathRank() []string }); ok {
+		return ch.PathRank()
+	}
+	return nil
+}
+
+func (c *core) vpnAddr() string {
 	addr := singbox.VPNServerAddr(c.cfg)
 	c.underMu.Lock()
 	if addr == "" {
@@ -128,7 +145,7 @@ func (c *core) vpnUnderlay() string {
 		c.underAddr = addr
 	}
 	c.underMu.Unlock()
-	return platform.UnderlayInterface(addr)
+	return addr
 }
 
 // reconcile приводит процессы sing-box к желаемому состоянию; reason — событие-причина (в журнал).

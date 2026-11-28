@@ -47,3 +47,16 @@ func outIfaceTo(addr string) *net.Interface {
 	}
 	return nil
 }
+
+// ForeignUnderlay — чужой VPN-интерфейс на маршруте ОС к серверу addr ("ip:port", исключён из нашего TUN): не наш, не железный;
+// "" — маршрут идёт через физический адаптер или не определён.
+func ForeignUnderlay(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	ni := outIfaceTo(addr)
+	if ni == nil || ni.Flags&net.FlagLoopback != 0 || isOurIface(ni.Name) || isHardwareIface(*ni) {
+		return ""
+	}
+	return ni.Name
+}

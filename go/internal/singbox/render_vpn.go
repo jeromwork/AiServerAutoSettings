@@ -107,7 +107,38 @@ func VPNServerAddr(cfg *api.Config) string {
 			}
 		}
 	}
+	// Узлов нет: адрес сервера из путей канала (входные узлы по порядку, затем сам сервер) — по реальному маршруту ОС к нему
+	// определяется, через какой интерфейс (при Happ — happ-tun) мы выходим.
+	for _, h := range channelHosts(cfg) {
+		for _, a := range resolveHost(h) {
+			if ip, err := netip.ParseAddr(a); err == nil && ip.Is4() {
+				return net.JoinHostPort(a, "443")
+			}
+		}
+	}
 	return ""
+}
+
+// channelHosts — хосты путей канала (узел каждого пути, порядок путей), затем хост сервера; без повторов.
+func channelHosts(cfg *api.Config) []string {
+	if cfg == nil || !cfg.HasChannel() {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	add := func(h string) {
+		if h != "" && !seen[h] {
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	if paths, _, err := buildPaths(cfg, cfg.Servers[0].Host); err == nil {
+		for _, p := range paths {
+			add(p.node)
+		}
+	}
+	add(cfg.Servers[0].Host)
+	return out
 }
 
 // vpnSel — мосты VPN: outbounds процесса, теги для urltest и хосты, которые не должны идти в наш TUN.
@@ -119,7 +150,14 @@ type vpnSel struct {
 
 // vpnSelect — мосты из vpn.nodes (узлы целиком) и из путей paths (если есть сервер) по vpn.bridges (пусто — все),
 // без ssh/direct/socks и без путей «через чужой VPN». Узел с тем же именем, что и путь, главнее.
-func vpnSelect(cfg *api.Config) (vpnSel, error) {
+func vpnSelect(cfg *api.Config) (vpnSel, error) { return vpnSelectOpt(cfg, false, nil) }
+
+// udpBridgeTypes — мосты по UDP/QUIC: под чужим VPN (Happ) не проходят.
+var udpBridgeTypes = map[string]bool{"hysteria2": true, "hysteria": true, "tuic": true}
+
+// vpnSelectOpt — vpnSelect с учётом чужого VPN: foreign — только TCP/TLS мосты; rank — пути канала, прошедшие свежий замер
+// (победитель первым): остальные пути отбрасываются, если остался хоть один пригодный (иначе порядок конфига).
+func vpnSelectOpt(cfg *api.Config, foreign bool, rank []string) (vpnSel, error) {
 	var sel vpnSel
 	want := map[string]bool{}
 	for _, b := range cfg.VPN.Bridges {
@@ -157,10 +195,20 @@ func vpnSelect(cfg *api.Config) (vpnSel, error) {
 		if len(want) > 0 && !want[n] {
 			continue
 		}
+		if foreign && udpBridgeTypes[t] {
+			continue
+		}
 		seenFinal[n] = true
 		sel.outs = append(sel.outs, keep(o))
 		sel.finals = append(sel.finals, n)
 	}
+	ranked := map[string]int{}
+	for i, n := range rank {
+		if _, ok := ranked[n]; !ok {
+			ranked[n] = i
+		}
+	}
+	nodeFinals := len(sel.finals)
 	if cfg.HasChannel() {
 		paths, _, err := buildPaths(cfg, cfg.Servers[0].Host)
 		if err != nil {
@@ -171,6 +219,13 @@ func vpnSelect(cfg *api.Config) (vpnSel, error) {
 			for _, o := range p.outs {
 				if t, _ := o["type"].(string); t == "ssh" || t == "direct" || t == "socks" {
 					bad = true
+				}
+			}
+			if foreign {
+				for _, o := range p.outs {
+					if t, _ := o["type"].(string); udpBridgeTypes[t] {
+						bad = true
+					}
 				}
 			}
 			if bad || (len(want) > 0 && !want[p.name]) {
@@ -186,6 +241,17 @@ func vpnSelect(cfg *api.Config) (vpnSel, error) {
 				sel.outs = append(sel.outs, keep(o))
 			}
 			sel.finals = append(sel.finals, p.final)
+		}
+		// Свежий замер/гонка канала: только прошедшие, победитель первым; прошедших нет — порядок конфига.
+		var pass []string
+		for _, f := range sel.finals[nodeFinals:] {
+			if _, ok := ranked[f]; ok {
+				pass = append(pass, f)
+			}
+		}
+		if len(pass) > 0 {
+			sort.SliceStable(pass, func(i, j int) bool { return ranked[pass[i]] < ranked[pass[j]] })
+			sel.finals = append(sel.finals[:nodeFinals:nodeFinals], pass...)
 		}
 	}
 	for h := range hosts {
@@ -237,7 +303,7 @@ func RenderVPN(rc api.RenderContext) ([]byte, error) {
 	if rc.ClashPort <= 0 {
 		return nil, errors.New("singbox: vpn: ports are not set")
 	}
-	sel, err := vpnSelect(rc.Cfg)
+	sel, err := vpnSelectOpt(rc.Cfg, rc.ForeignVPN, rc.PathRank)
 	if err != nil {
 		return nil, err
 	}

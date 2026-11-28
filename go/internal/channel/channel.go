@@ -77,6 +77,7 @@ type chn struct {
 	subs     map[int]chan api.ChannelState
 	subSeq   int
 	pinned   time.Time
+	rank     []string // итог последнего замера путей (победитель первым)
 	cancel   context.CancelFunc
 	done     chan struct{}
 	started  bool

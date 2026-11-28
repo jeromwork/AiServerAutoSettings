@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -108,6 +109,7 @@ func (c *chn) choosePath(names []string, cur string) string {
 	if !ok {
 		pick, why = c.firstGood(names, now), " (замер не удался, порядок по рангу)"
 	}
+	c.setRank(names, ms, pick)
 	c.log.Info("path-measure", "msg", "замер путей: "+strings.Join(parts, " ")+", выбран "+pick+why)
 	return pick
 }
@@ -156,4 +158,36 @@ func (c *chn) remeasureLive() {
 		default:
 		}
 	}()
+}
+
+// setRank запоминает итог замера: прошедшие пути по возрастанию задержки, выбранный — первым.
+func (c *chn) setRank(names []string, ms map[string]int, pick string) {
+	var ok []string
+	for _, n := range names {
+		if ms[n] > 0 {
+			ok = append(ok, n)
+		}
+	}
+	sort.SliceStable(ok, func(i, j int) bool { return ms[ok[i]] < ms[ok[j]] })
+	if pick != "" {
+		out := []string{pick}
+		for _, n := range ok {
+			if n != pick {
+				out = append(out, n)
+			}
+		}
+		if ms[pick] > 0 {
+			ok = out
+		}
+	}
+	c.mu.Lock()
+	c.rank = ok
+	c.mu.Unlock()
+}
+
+// PathRank — пути, прошедшие последний замер (победитель первым); nil — замера не было.
+func (c *chn) PathRank() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.rank...)
 }
