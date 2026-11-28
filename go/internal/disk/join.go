@@ -30,8 +30,9 @@ type ServerInfo struct {
 
 // JoinEnv — окружение Join. SSH, Sleep и Generate подменяются в тестах.
 type JoinEnv struct {
-	Home    string // каталог Диска; state — Home/state
-	Bin     string // syncthing
+	Home    string   // каталог Диска; state — Home/state
+	Bin     string   // syncthing (или syncthingtray)
+	BinArgs []string // аргументы перед командой (для syncthingtray: "syncthing")
 	SSH     func(ctx context.Context, cmd string, stdin []byte) ([]byte, error)
 	Log     api.Logger
 	Folders []Folder
@@ -157,7 +158,7 @@ func makeIdentity(ctx context.Context, env *JoinEnv, state string) (string, erro
 	}
 	gen := env.Generate
 	if gen == nil {
-		gen = generate
+		gen = func(ctx context.Context, bin, state string) error { return generate(ctx, bin, env.BinArgs, state) }
 	}
 	if err := gen(ctx, env.Bin, state); err != nil {
 		return "", fmt.Errorf("не удалось создать личность Диска: %w", err)
@@ -171,11 +172,11 @@ func makeIdentity(ctx context.Context, env *JoinEnv, state string) (string, erro
 	return deviceID(filepath.Join(state, "cert.pem"))
 }
 
-func generate(ctx context.Context, bin, state string) error {
+func generate(ctx context.Context, bin string, pre []string, state string) error {
 	run := func(args ...string) ([]byte, error) {
 		c, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(c, bin, args...)
+		cmd := exec.CommandContext(c, bin, append(append([]string{}, pre...), args...)...)
 		return cmd.CombinedOutput()
 	}
 	out, err := run("generate", "--home", state, "--no-port-probing")

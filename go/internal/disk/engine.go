@@ -44,6 +44,7 @@ type Deps struct {
 	Paths       api.Paths
 	Bin         string   // исполняемый файл syncthing (или syncthingtray); пусто → Диск «не установлен»
 	BinArgs     []string // аргументы перед "serve" (для syncthingtray: "syncthing")
+	BinWhy      string   // почему Bin пуст (для статуса)
 	OnState     func(Snapshot)
 }
 
@@ -123,7 +124,7 @@ func (e *Engine) home() string {
 	if h := e.d.Cfg.Home; h != "" {
 		return h
 	}
-	return filepath.Join(e.d.Paths.Home, "disk")
+	return DefaultHome(e.d.Paths.Home)
 }
 
 func (e *Engine) syncPort() int {
@@ -286,7 +287,11 @@ func (e *Engine) eval(ctx context.Context) {
 		return
 	}
 	if e.d.Bin == "" {
-		e.set(StateAbsent, "нет syncthing")
+		why := e.d.BinWhy
+		if why == "" {
+			why = "нет syncthing"
+		}
+		e.set(StateAbsent, why)
 		return
 	}
 	home := e.home()
@@ -365,7 +370,7 @@ func (e *Engine) evalJoin(ctx context.Context, home string) {
 	e.joining = true
 	jctx, cancel := context.WithCancel(ctx)
 	e.joinCancel = cancel
-	env := JoinEnv{Home: home, Bin: e.d.Bin, SSH: e.ssh, Log: e.log, Folders: e.d.Cfg.Folders, Base: e.d.Cfg.Base}
+	env := JoinEnv{Home: home, Bin: e.d.Bin, BinArgs: e.d.BinArgs, SSH: e.ssh, Log: e.log, Folders: e.d.Cfg.Folders, Base: e.d.Cfg.Base}
 	go func() {
 		info, err := Join(jctx, env)
 		select {

@@ -5,7 +5,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 )
 
 // Folder — папка, которую нужно сразу скачать. Path пуст — каталог по умолчанию (Base/ID).
@@ -26,6 +29,16 @@ type Config struct {
 // On сообщает, включено ли автоподключение (по умолчанию да).
 func (c Config) On() bool { return c.Enabled == nil || *c.Enabled }
 
+// DefaultHome — каталог Диска по умолчанию: Windows %LOCALAPPDATA%\RemoteDisk, иначе <home программы>/disk.
+func DefaultHome(programHome string) string {
+	if runtime.GOOS == "windows" {
+		if b := os.Getenv("LOCALAPPDATA"); b != "" {
+			return filepath.Join(b, "RemoteDisk")
+		}
+	}
+	return filepath.Join(programHome, "disk")
+}
+
 const maxFolders = 256
 
 var folderIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -36,6 +49,9 @@ func ParseConfig(raw json.RawMessage, topSyncPort int) (Config, error) {
 	c := Config{SyncPort: topSyncPort}
 	if topSyncPort != 0 && (topSyncPort < 1 || topSyncPort > 65535) {
 		return c, fmt.Errorf("syncPort: порт должен быть 1..65535")
+	}
+	if runtime.GOOS == "windows" {
+		c.Home = DefaultHome("")
 	}
 	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
 		return c, nil

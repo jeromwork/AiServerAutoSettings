@@ -3,33 +3,11 @@ package core
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"runtime"
 
-	"remoteagents/internal/api"
 	"remoteagents/internal/disk"
+	"remoteagents/internal/singbox"
 )
-
-// diskBinary — syncthing рядом с программой: bin/syncthing(.exe), иначе bin/syncthingtray(.exe) с аргументом "syncthing".
-func diskBinary(p api.Paths) (string, []string) {
-	ext := ""
-	if runtime.GOOS == "windows" {
-		ext = ".exe"
-	}
-	if b := filepath.Join(p.Bin, "syncthing"+ext); fileExists(b) {
-		return b, nil
-	}
-	if b := filepath.Join(p.Bin, "syncthingtray"+ext); fileExists(b) {
-		return b, []string{"syncthing"}
-	}
-	return "", nil
-}
-
-func fileExists(p string) bool {
-	st, err := os.Stat(p)
-	return err == nil && !st.IsDir()
-}
 
 func (c *core) getDisk() *disk.Engine {
 	c.compMu.RLock()
@@ -55,10 +33,29 @@ func (c *core) startDisk(ctx context.Context) {
 		c.log.Error("core: disk-config", "err", err.Error())
 		return
 	}
-	bin, args := diskBinary(c.p)
+	if runtime.GOOS != "windows" {
+		c.launchDisk(ctx, dcfg, "", nil, "Диск работает только на Windows")
+		return
+	}
+	go func() {
+		bin, err := singbox.InstallSyncthing(ctx, c.p, c.log, c.clean)
+		if err != nil {
+			c.log.Warn("core: disk-binary", "err", err.Error())
+			c.launchDisk(ctx, dcfg, "", nil, err.Error())
+			return
+		}
+		c.launchDisk(ctx, dcfg, bin, []string{"syncthing"}, "")
+	}()
+}
+
+func (c *core) launchDisk(ctx context.Context, dcfg disk.Config, bin string, args []string, why string) {
+	ch := c.getCh()
+	if ch == nil {
+		return
+	}
 	eng := disk.New(disk.Deps{
 		Cfg: dcfg, Channel: ch, ChannelJSON: c.cfg.Paths.Channel, Procs: c.pr, Log: c.log, Paths: c.p,
-		Bin: bin, BinArgs: args,
+		Bin: bin, BinArgs: args, BinWhy: why,
 		OnState: func(s disk.Snapshot) { c.publish("disk", s.Map()); c.publishStatus() },
 	})
 	c.compMu.Lock()
