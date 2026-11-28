@@ -23,6 +23,7 @@ import (
 	"remoteagents/internal/channel"
 	"remoteagents/internal/cleanup"
 	"remoteagents/internal/config"
+	"remoteagents/internal/disk"
 	"remoteagents/internal/forward"
 	"remoteagents/internal/journal"
 	"remoteagents/internal/platform"
@@ -80,6 +81,7 @@ type core struct {
 	ag  *agent.Agent
 	ch  api.Channel
 	fw  api.Forwarder
+	dsk *disk.Engine
 	ui  *webui.UI
 	upd api.Updater
 
@@ -491,6 +493,7 @@ func (c *core) startNetwork(ctx context.Context) {
 			}
 		}
 	}
+	c.startDisk(ctx)
 	c.startTunGuard(ctx)
 	if c.cfg != nil && !hasChannel && !isNil(c.getVpnSb()) {
 		c.vpnOnlyReady()
@@ -681,6 +684,11 @@ func (c *core) stopNetwork(step func(name string, err error)) {
 		if step != nil {
 			step(name, err)
 		}
+	}
+	if d := c.getDisk(); d != nil {
+		ctx, cancel := stopCtx()
+		done(d.Name(), d.Stop(ctx))
+		cancel()
 	}
 	for _, comp := range []api.Component{c.getFw(), c.getCh()} {
 		if isNil(comp) {

@@ -222,6 +222,9 @@ func (c *core) watchNet(ctx context.Context) {
 		switch {
 		case c.tun == nil:
 		case rebuilt:
+			if d := c.getDisk(); d != nil {
+				d.NetChanged()
+			}
 			c.tun.reconcile(ctx, "net-changed")
 		case fc:
 			n.onForeign(ctx, c.underlay)

@@ -73,6 +73,9 @@ func (c *core) Status() map[string]any {
 	if fw := c.getFw(); !isNil(fw) {
 		m["forwards"] = fw.List()
 	}
+	if d := c.getDisk(); d != nil {
+		m["disk"] = d.Status()
+	}
 	if c.ui != nil {
 		m["webui"] = c.ui.Status()
 	}
