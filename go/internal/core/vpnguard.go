@@ -246,7 +246,8 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 	g.syncPF(ctx, wantVPN, got.VPN)
 	if vpnBad != "" {
 		if g.lock() {
-			g.blockLocked(ctx, "защита не действует: процесс VPN не запускается ("+vpnBad+")", false)
+			// Процесс VPN не запускается: перекрывать нечем (блок без туннеля — просто отрезанный интернет). С галочкой — сразу fail-open.
+			g.failOpenLocked(ctx, "защита не действует: процесс VPN не запускается ("+vpnBad+")")
 			return
 		}
 		g.failLocked(ctx, vpnBad)
@@ -396,14 +397,7 @@ func (g *tunGuard) probe(ctx context.Context) {
 func (g *tunGuard) failLocked(ctx context.Context, why string) {
 	if g.lastForeign != "" && g.mode != "off" {
 		// Поверх чужого VPN неудача пробы — сразу fail-open (даже с галочкой): не держим сеть ПК перекрытой, канал не страдает.
-		g.fails = 0
-		g.vpnState, g.vpnWhy = "failopen", why
-		g.blocked.Store(false)
-		if g.retry != nil {
-			g.retry.Stop()
-		}
-		g.event("vpn.failopen", "why", why, "foreign", g.lastForeign)
-		g.dropVPN(ctx)
+		g.failOpenLocked(ctx, why)
 		return
 	}
 	if g.lock() {
@@ -433,6 +427,23 @@ func (g *tunGuard) failLocked(ctx context.Context, why string) {
 		g.c.persistWG.Add(1)
 		go func() { defer g.c.persistWG.Done(); _ = g.c.persistVPNMode("off", false) }() // выключение переживает перезапуск (вне mu: замок записи)
 	}
+}
+
+// failOpenLocked — немедленный fail-open: снять перекрытие и якорь, остановить процесс VPN. Под mu.
+func (g *tunGuard) failOpenLocked(ctx context.Context, why string) {
+	g.fails = 0
+	g.vpnState, g.vpnWhy = "failopen", why
+	g.blocked.Store(false)
+	if g.retry != nil {
+		g.retry.Stop()
+	}
+	if g.lastForeign != "" {
+		g.event("vpn.failopen", "why", why, "foreign", g.lastForeign)
+	} else {
+		g.event("vpn.failopen", "why", why)
+	}
+	g.releasePF(ctx, "failopen")
+	g.dropVPN(ctx)
 }
 
 // blockLocked — состояние «перекрыт» (галочка vpn.lockExit). Процесс VPN не останавливаем; если он жив — один раз перерисовываем

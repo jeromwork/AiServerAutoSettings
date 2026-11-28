@@ -141,7 +141,7 @@ func (g *tunGuard) checkExit(ctx context.Context, reason string) {
 	g.event("vpn.exit", "ip", res.IP, "via", res.Via, "ok", res.OK, "known", res.Known, "reason", reason)
 	g.exitVerdictLocked(ctx, res)
 	g.mu.Unlock()
-	if res.Err == "" && (!res.Known || res.OK) {
+	if g.exitConfirmed(res) {
 		c.confirmLiveTrial() // выход подтверждён — пробное окно изменения vpn закрывается
 	}
 }
@@ -154,4 +154,24 @@ func (c *core) CheckExit(ctx context.Context) (map[string]any, error) {
 	c.tun.checkExit(ctx, "button")
 	c.checkSysProxy(ctx, "button")
 	return c.tun.status(), nil
+}
+
+// exitConfirmed — выход подтверждён только когда наш VPN реально поднят и состояние «up»: адрес из ожидаемых;
+// если ожидаемые не заданы — трафик пробы идёт через наш TUN (проба туннеля прошла). Чужой выход/неподнятый VPN не подтверждает.
+func (g *tunGuard) exitConfirmed(res exitResult) bool {
+	if res.Err != "" {
+		return false
+	}
+	vsb := g.c.getVpnSb()
+	g.mu.Lock()
+	st, mode := g.vpnState, g.mode
+	g.mu.Unlock()
+	if isNil(vsb) || !vsb.Effective().VPN || mode == "off" || st != "up" {
+		return false
+	}
+	if res.Known {
+		return res.OK
+	}
+	_, ok := g.tunExitOK()
+	return ok
 }

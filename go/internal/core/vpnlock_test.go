@@ -163,3 +163,46 @@ func TestForeignProbeFailFailsOpenImmediately(t *testing.T) {
 	}
 	_ = sb
 }
+
+// Процесс VPN не запускается (TUN не поднялся): с галочкой не перекрываем — fail-open, перекрытие снято.
+func TestLockTunMissingFailsOpen(t *testing.T) {
+	c, sb := newLockCore(true)
+	g := c.tun
+	c.plat = &fvPlat{noAdapter: true}
+	sb.eff.VPN = false
+	g.vpnState = "off"
+	g.reconcile(context.Background(), "start")
+	if g.vpnState != "failopen" || g.blocked.Load() {
+		t.Fatalf("state=%s blocked=%v", g.vpnState, g.blocked.Load())
+	}
+}
+
+// Выход подтверждается только при поднятом нашем VPN (состояние up) и нашем адресе; чужой адрес/blocked/неизвестные ожидаемые без нашего TUN — нет.
+func TestExitConfirmedOnlyWhenOurs(t *testing.T) {
+	c, _ := newLockCore(true)
+	g := c.tun
+	ours := exitResult{Known: true, OK: true, IP: "104.0.0.1"}
+	if !g.exitConfirmed(ours) {
+		t.Fatal("наш выход при up должен подтверждаться")
+	}
+	if g.exitConfirmed(exitResult{Known: true, OK: false, IP: "130.12.242.46"}) {
+		t.Fatal("чужой адрес не подтверждает")
+	}
+	if g.exitConfirmed(exitResult{Known: false, IP: "130.12.242.46", Err: "x"}) {
+		t.Fatal("ошибка не подтверждает")
+	}
+	g.vpnState = "blocked"
+	if g.exitConfirmed(ours) {
+		t.Fatal("в состоянии blocked подтверждения нет")
+	}
+	g.vpnState = "up"
+	c.vsb.(*fvSb).eff.VPN = false
+	if g.exitConfirmed(ours) {
+		t.Fatal("без поднятого VPN подтверждения нет")
+	}
+	c.vsb.(*fvSb).eff.VPN = true
+	c.plat = &fvPlat{exit: "happ-tun"}
+	if g.exitConfirmed(exitResult{Known: false, IP: "130.12.242.46"}) {
+		t.Fatal("ожидаемые не заданы, выход не через наш TUN — подтверждения нет")
+	}
+}
