@@ -327,10 +327,16 @@ func RenderVPN(rc api.RenderContext) ([]byte, error) {
 	if len(suffixes) > 0 {
 		rules = append(rules, m{"domain_suffix": suffixes, "outbound": "vpn-direct"})
 	}
-	route := m{"auto_detect_interface": true, "find_process": true, "final": "vpn-out"}
-	if rc.DefaultIface != "" {
-		delete(route, "auto_detect_interface")
+	route := m{"find_process": true, "final": "vpn-out"}
+	switch {
+	case rc.ForeignVPN:
+		// Под чужим VPN (Happ) сокеты к мостам НЕ привязываем ни к интерфейсу, ни авто-определением: привязка к happ-tun ломает выход
+		// (проба туннеля — таймаут), а процесс sing-box.exe чужой VPN пускает мимо себя по маршрутам ОС (так работает канал).
+		// Петли нет: серверы мостов исключены из нашего TUN (route_exclude_address).
+	case rc.DefaultIface != "":
 		route["default_interface"] = rc.DefaultIface
+	default:
+		route["auto_detect_interface"] = true
 	}
 	if !lock && rc.GeoIPPath != "" && vpnGeoIP(rc.Cfg.VPN.Direct.GeoIP) {
 		if st, err := os.Stat(rc.GeoIPPath); err == nil && st.Mode().IsRegular() {

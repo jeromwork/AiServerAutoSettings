@@ -148,3 +148,18 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// Под чужим VPN неудача пробы — сразу failopen, даже с галочкой: перекрытие снимается, процесс VPN останавливается.
+func TestForeignProbeFailFailsOpenImmediately(t *testing.T) {
+	c, sb := newLockCore(true)
+	g := c.tun
+	g.lastForeign = "happ-tun"
+	g.blocked.Store(true)
+	g.mu.Lock()
+	g.failLocked(context.Background(), "проверка туннеля не прошла")
+	g.mu.Unlock()
+	if g.vpnState != "failopen" || g.blocked.Load() {
+		t.Fatalf("state=%s blocked=%v", g.vpnState, g.blocked.Load())
+	}
+	_ = sb
+}

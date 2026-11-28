@@ -394,6 +394,18 @@ func (g *tunGuard) probe(ctx context.Context) {
 
 // failLocked — шаг лестницы fail-open. Под mu.
 func (g *tunGuard) failLocked(ctx context.Context, why string) {
+	if g.lastForeign != "" && g.mode != "off" {
+		// Поверх чужого VPN неудача пробы — сразу fail-open (даже с галочкой): не держим сеть ПК перекрытой, канал не страдает.
+		g.fails = 0
+		g.vpnState, g.vpnWhy = "failopen", why
+		g.blocked.Store(false)
+		if g.retry != nil {
+			g.retry.Stop()
+		}
+		g.event("vpn.failopen", "why", why, "foreign", g.lastForeign)
+		g.dropVPN(ctx)
+		return
+	}
 	if g.lock() {
 		// С галочкой не отпускаем: процесс VPN остаётся, интернет перекрыт до восстановления (событиями) или до выключения владельцем.
 		g.blockLocked(ctx, "Интернет перекрыт: "+why, true)

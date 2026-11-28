@@ -274,6 +274,7 @@ func (s *box) render(e api.Effective) ([]byte, error) {
 		rc.VPNSplit = s.o.VPNSplit()
 	}
 	rc.ForeignVPN = s.o.ForeignVPN != nil && s.o.ForeignVPN()
+	s.rc.ForeignVPN = rc.ForeignVPN // для NetChanged: смена foreign перерисовывает конфиг
 	if s.o.PathRank != nil {
 		rc.PathRank = s.o.PathRank()
 	}
@@ -331,6 +332,9 @@ func (s *box) apply(ctx context.Context, e api.Effective) error {
 	var values any
 	if err = json.Unmarshal(data, &values); err != nil {
 		return fmt.Errorf("singbox: config: invalid JSON")
+	}
+	if s.isVPN() {
+		s.saveDiag(values)
 	}
 	s.secrets(values)
 	path, release, err := tempFile(s.p, s.tr, "config-*.new")
@@ -861,6 +865,13 @@ func (s *box) NetChanged(ctx context.Context) (restarted bool, err error) {
 		return false, nil
 	}
 	cur, next := s.rc.DefaultIface, s.o.DefaultIface()
+	curF, nextF := s.rc.ForeignVPN, s.o.ForeignVPN != nil && s.o.ForeignVPN()
+	if nextF { // под чужим VPN интерфейс в конфиг не попадает — его смена перезапуск не требует
+		cur, next = "", ""
+	}
+	if curF != nextF {
+		next = next + "|foreign-changed" // чужой VPN появился/исчез — конфиг другой
+	}
 	if cur == next {
 		cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
@@ -874,4 +885,47 @@ func (s *box) NetChanged(ctx context.Context) (restarted bool, err error) {
 	}
 	s.log.Info("singbox.default-iface", "from", cur, "to", next)
 	return true, nil
+}
+
+// diagSafeKeys — строковые поля, которые остаются в диагностической копии конфига VPN (кроме config.PlainKeys).
+var diagSafeKeys = map[string]bool{
+	"server": true, "default_interface": true, "interface_name": true, "process_name": true, "domain_suffix": true,
+	"route_exclude_address": true, "address": true, "inet4_address": true, "stack": true, "url": true, "interval": true,
+}
+
+func diagRedact(v any, key string) any {
+	switch t := v.(type) {
+	case string:
+		if config.PlainKeys[key] || diagSafeKeys[key] {
+			return t
+		}
+		return "***"
+	case []any:
+		out := make([]any, len(t))
+		for i, x := range t {
+			out[i] = diagRedact(x, key)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, x := range t {
+			out[k] = diagRedact(x, k)
+		}
+		return out
+	}
+	return v
+}
+
+// saveDiag — копия отрендеренного конфига VPN без секретов: logs/vpn-config.last.json (один файл, перезаписывается при каждом
+// применении), чтобы разбор vpn.blocked / неудачной пробы шёл по факту. Ошибки записи не мешают запуску.
+func (s *box) saveDiag(values any) {
+	if s.p.Logs == "" {
+		return
+	}
+	b, err := json.MarshalIndent(diagRedact(values, ""), "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(s.p.Logs, 0o755)
+	_ = os.WriteFile(filepath.Join(s.p.Logs, "vpn-config.last.json"), b, 0o600)
 }

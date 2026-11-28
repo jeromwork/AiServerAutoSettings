@@ -41,8 +41,11 @@ func TestRenderVPNForeignKeepsUDPAndIface(t *testing.T) {
 	if got := urltestOuts(t, raw); len(got) != 3 {
 		t.Fatalf("под чужим VPN UDP-мосты остаются (на ПК под Happ проходят hy2/tuic, TCP — нет), получили %v", got)
 	}
-	if !strings.Contains(raw, `"default_interface":"happ-tun"`) || strings.Contains(raw, "auto_detect_interface") {
-		t.Fatalf("default_interface должен быть happ-tun: %s", raw)
+	if strings.Contains(raw, "default_interface") || strings.Contains(raw, "auto_detect_interface") {
+		t.Fatalf("под чужим VPN сокеты не привязываются к интерфейсу: %s", raw)
+	}
+	if !strings.Contains(raw, "route_exclude_address") {
+		t.Fatalf("исключения серверов мостов из TUN должны остаться: %s", raw)
 	}
 	_ = v
 	_, raw = renderVPNOut(t, foreignRC(false, "Wi-Fi"))
@@ -71,5 +74,27 @@ func TestRenderVPNExcludesChannelBridgeServers(t *testing.T) {
 	_, raw := renderVPNOut(t, rc)
 	if !strings.Contains(raw, `"203.0.113.5/32"`) {
 		t.Fatalf("сервер моста канала должен быть в route_exclude_address: %s", raw)
+	}
+}
+
+func TestRenderVPNNoForeignKeepsDefaultIface(t *testing.T) {
+	_, raw := renderVPNOut(t, foreignRC(false, "Wi-Fi"))
+	if !strings.Contains(raw, `"default_interface":"Wi-Fi"`) {
+		t.Fatalf("без чужого VPN привязка к интерфейсу прежняя: %s", raw)
+	}
+	rc := foreignRC(false, "")
+	_, raw = renderVPNOut(t, rc)
+	if !strings.Contains(raw, `"auto_detect_interface":true`) {
+		t.Fatalf("без интерфейса — auto_detect_interface: %s", raw)
+	}
+}
+
+func TestDiagRedactHidesSecrets(t *testing.T) {
+	var v any
+	_ = json.Unmarshal([]byte(`{"outbounds":[{"type":"hysteria2","tag":"n","server":"203.0.113.8","password":"SECRET","uuid":"U"}]}`), &v)
+	b, _ := json.Marshal(diagRedact(v, ""))
+	got := string(b)
+	if strings.Contains(got, "SECRET") || strings.Contains(got, `"U"`) || !strings.Contains(got, "203.0.113.8") {
+		t.Fatalf("секреты скрыты, адрес виден: %s", got)
 	}
 }
