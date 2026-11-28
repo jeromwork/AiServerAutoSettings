@@ -447,9 +447,11 @@ func (c *core) startNetwork(ctx context.Context) {
 
 	// 7. Канал.
 	if hasChannel && !f.Mode.NoChannel && c.ag != nil {
-		ch, e := channel.New(c.cfg, c.getSb(), c.ag, log, c.clean, channel.Options{
-			PC: c.pcName(), Version: f.Version, Rollback: f.RollbackReason, Mode: f.Mode,
-		})
+		chOpts := channel.Options{PC: c.pcName(), Version: f.Version, Rollback: f.RollbackReason, Mode: f.Mode}
+		if !isNil(c.plat) {
+			chOpts.ForeignVPN = c.plat.ForeignVPN // чужой VPN: прямые пути идут первыми в гонке
+		}
+		ch, e := channel.New(c.cfg, c.getSb(), c.ag, log, c.clean, chOpts)
 		if e != nil {
 			log.Error("core: channel", "err", e.Error())
 			c.failStart(e)

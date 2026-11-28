@@ -57,6 +57,7 @@ type Options struct {
 	PC, Version, Rollback  string
 	Mode                   api.Mode
 	DialTimeout, Keepalive time.Duration
+	ForeignVPN             func() string // имя чужого VPN-интерфейса ("" — нет): при нём прямые пути идут первыми в гонке
 }
 
 type chn struct {
@@ -96,6 +97,9 @@ type chn struct {
 	measureFn   func(names []string) map[string]int // подмена замера в тестах
 	wantMeasure bool                                // следующая сессия на chan начинается с замера путей
 	pendingPick string                              // путь, выбранный замером под живой сессией (для handover)
+
+	pinName string         // закреплённый ForcePath путь (действует, пока pinned)
+	lastMs  map[string]int // последний замер путей: подсказка порядка гонки; сбрасывается сменой сети
 
 	badUntil map[string]time.Time   // путь → до какого момента считается нестабильным
 	losses   map[string][]time.Time // путь → моменты недавних keepalive-потерь
@@ -369,6 +373,7 @@ func (c *chn) NetChanged() {
 		return
 	}
 	c.netPending = true
+	c.lastMs = nil // замер прежней сети не подсказка для новой
 	st := c.st
 	c.mu.Unlock()
 	c.log.Info("net-changed", "session", st.Session, "state", st.State)
@@ -387,6 +392,7 @@ func (c *chn) NetChanged() {
 // сразу новый круг путей.
 func (c *chn) Underlay() {
 	c.mu.Lock()
+	c.lastMs = nil
 	st := c.st
 	started := c.started && c.cancel != nil
 	if started && st.State == "up" {
@@ -668,8 +674,17 @@ func (c *chn) dial(ctx context.Context, addr string) (*ssh.Client, *activityConn
 	d := net.Dialer{Timeout: c.o.DialTimeout}
 	raw, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("dial: %w", err)
+		return nil, nil, &tcpError{err}
 	}
+	done := make(chan struct{})
+	defer close(done)
+	go func() { // отмена (проигравший гонки, смена сети) обрывает рукопожатие сразу, а не по таймауту
+		select {
+		case <-ctx.Done():
+			_ = raw.Close()
+		case <-done:
+		}
+	}()
 	ac := &activityConn{Conn: raw}
 	ac.touch()
 	conf := &ssh.ClientConfig{
@@ -690,6 +705,12 @@ func (c *chn) dial(ctx context.Context, addr string) (*ssh.Client, *activityConn
 	_ = raw.SetDeadline(time.Time{})
 	return ssh.NewClient(cc, chans, reqs), ac, nil
 }
+
+// tcpError — не удалось даже открыть TCP до входа sing-box/сервера (до SSH).
+type tcpError struct{ err error }
+
+func (e *tcpError) Error() string { return "dial: " + e.err.Error() }
+func (e *tcpError) Unwrap() error { return e.err }
 
 func (c *chn) checkHostKey(_ string, _ net.Addr, key ssh.PublicKey) error {
 	if !bytes.Equal(key.Marshal(), c.hkey.Marshal()) {
@@ -830,6 +851,12 @@ func (c *chn) connect(ctx context.Context, path, addr string) (*conn, error) {
 		c.log.Warn("dial-fail", "via", path, "addr", addr, "err", err.Error())
 		return nil, err
 	}
+	return c.establish(ctx, path, cl, ac)
+}
+
+// establish — продолжение после SSH-рукопожатия: сессия, обратный порт, проба/claim до RALAB-CHANNEL-UP.
+func (c *chn) establish(ctx context.Context, path string, cl *ssh.Client, ac *activityConn) (*conn, error) {
+	var err error
 	sctx, stop := context.WithCancel(ctx)
 	k := &conn{cl: cl, stop: stop, connLost: make(chan struct{}), dead: make(chan struct{})}
 	c.register(k)
@@ -909,18 +936,11 @@ func (c *chn) setClient(cl *ssh.Client) {
 // session runs one connection until it is lost. Returns the path and the reason.
 // Пока сессия up, по запросу handover (сеть устоялась, а сессия мертва) сначала поднимается новая, затем закрывается старая.
 func (c *chn) session(ctx context.Context, first bool) (string, error) {
-	path, addr := c.pickPath(ctx, first)
-	if path == "" {
-		return "", ctx.Err()
-	}
-	if path == "chan" && c.takeWantMeasure(first) {
-		c.selectBest("")
-	}
-	path = c.pathLabel(path)
-	c.set("connecting", path, "", false)
-	c.log.Info("dial", "via", path, "addr", addr)
-	k, err := c.connect(ctx, path, addr)
-	if err != nil {
+	k, path, err := c.acquire(ctx, first, false, "")
+	if err != nil || k == nil {
+		if err == nil {
+			err = ctx.Err()
+		}
 		return path, err
 	}
 	defer func() {
@@ -948,19 +968,19 @@ func (c *chn) session(ctx context.Context, first bool) (string, error) {
 			c.retPref <- struct{}{} // consumeReturn в цикле увидит признак
 			return path, fmt.Errorf("%w: возврат на предпочтительный путь", errWasUp)
 		case <-c.handover:
-			if pp := c.takePending(); pp != "" {
-				_ = c.selectPath(pp)
-			} else if c.selectBest(path) == "" {
-				c.selectFirst()
+			pend := c.takePending()
+			if c.racer() == nil { // без входов по путям — прежний порядок: выбор в селекторе chan
+				if pend != "" {
+					_ = c.selectPath(pend)
+				} else if c.selectBest(path) == "" {
+					c.selectFirst()
+				}
 			}
-			np, na := c.pickPath(ctx, false)
-			if np == "" {
-				return path, ctx.Err()
-			}
-			np = c.pathLabel(np)
-			c.log.Info("handover-dial", "from", path, "via", np, "addr", na)
-			nk, err := c.connect(ctx, np, na)
-			if err != nil {
+			nk, np, err := c.acquire(ctx, false, true, pend)
+			if err != nil || nk == nil {
+				if err == nil {
+					return path, ctx.Err()
+				}
 				c.log.Warn("handover-fail", "via", np, "err", err.Error())
 				continue // старая сессия остаётся; если она мертва — её закроет keepalive/connLost
 			}
@@ -1126,6 +1146,7 @@ func (c *chn) ForcePath(name string) error {
 	}
 	c.mu.Lock()
 	c.pinned = time.Now().Add(pinFor)
+	c.pinName = name
 	c.mu.Unlock()
 	c.log.Info("force", "via", name, "pin_s", int(pinFor.Seconds()))
 	select {

@@ -14,6 +14,7 @@ type RenderContext struct {
 	Mode         Mode
 	Instance     string // 32 hex; адаптеры: "ra3-"+Instance[:8]+"-vpn" / "-lan"
 	ChanPort     int
+	PathPort     func(name string) int // локальный порт входа, ведущего прямо в путь name (0 — входы по путям не нужны/нет порта)
 	ClashPort    int
 	ClashSecret  string
 	GeoIPPath    string   // State/geoip-ru.srs ("" — нет файла)

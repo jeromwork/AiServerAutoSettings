@@ -92,6 +92,15 @@ func Render(rc api.RenderContext) ([]byte, error) {
 		ins = append(ins, m{"type": "direct", "tag": "in-chan", "listen": "127.0.0.1", "listen_port": rc.ChanPort, "override_address": srv.Host, "override_port": srv.Port})
 		outs = append(outs, m{"type": "selector", "tag": "chan", "outbounds": names, "default": names[0], "interrupt_exist_connections": false})
 		rules = append(rules, m{"inbound": "in-chan", "outbound": "chan"})
+		if rc.PathPort != nil { // по входу на каждый путь: канал пробует пути параллельно, не переключая общий селектор
+			for _, n := range names {
+				if port := rc.PathPort(n); port > 0 {
+					tag := "in-p-" + n
+					ins = append(ins, m{"type": "direct", "tag": tag, "listen": "127.0.0.1", "listen_port": port, "override_address": srv.Host, "override_port": srv.Port})
+					rules = append(rules, m{"inbound": tag, "outbound": n})
+				}
+			}
+		}
 	}
 	// Канал — обычное приложение поверх сети: без привязки к интерфейсу, сокеты идут по маршрутам ОС.
 	route := m{}

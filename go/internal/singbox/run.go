@@ -78,6 +78,60 @@ type box struct {
 	vpnExe    string                                     // копия sing-box для VPN (RoleVPN)
 	vChan     int                                        // порты входов: меняются при повторном выборе, читаются без s.mu
 	vClash    int
+	pp        pathPorts // входы по одному на путь: параллельная «гонка» путей канала (см. channel/race.go)
+}
+
+// pathPorts — стабильные локальные порты входов по путям (имя пути → порт). Порт выбирается при первом рендере и живёт
+// до смены/перезапуска коробки; при занятости портом — сбрасывается и выбирается заново.
+type pathPorts struct {
+	mu sync.Mutex
+	m  map[string]int
+}
+
+func (pp *pathPorts) port(name string) int {
+	pp.mu.Lock()
+	defer pp.mu.Unlock()
+	if v, ok := pp.m[name]; ok {
+		return v
+	}
+	ports, err := allocPorts(1)
+	if err != nil {
+		return 0
+	}
+	for _, v := range pp.m {
+		if v == ports[0] {
+			return 0
+		}
+	}
+	if pp.m == nil {
+		pp.m = map[string]int{}
+	}
+	pp.m[name] = ports[0]
+	return ports[0]
+}
+
+func (pp *pathPorts) get(name string) int {
+	pp.mu.Lock()
+	defer pp.mu.Unlock()
+	return pp.m[name]
+}
+
+// busy — какой-либо порт путей уже занят посторонним (bind не проходит): набор нужно выбрать заново.
+func (pp *pathPorts) busy() bool {
+	pp.mu.Lock()
+	defer pp.mu.Unlock()
+	for _, v := range pp.m {
+		if bindCheck(v) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (pp *pathPorts) reset() {
+	pp.mu.Lock()
+	pp.m = nil
+	pp.mu.Unlock()
 }
 
 func New(cfg *api.Config, p api.Paths, log api.Logger, tr api.Traces, pr api.Procs, o Options) (api.Singbox, error) {
@@ -107,7 +161,17 @@ func New(cfg *api.Config, p api.Paths, log api.Logger, tr api.Traces, pr api.Pro
 		return nil, err
 	}
 	ready := make(chan struct{})
-	return &box{cfg: cfg, p: p, log: log, tr: tr, pr: pr, o: o, ready: ready, vReady: ready, vChan: ports[0], vClash: ports[1], rc: api.RenderContext{Cfg: cfg, Mode: o.Mode, Instance: o.Instance, ChanPort: ports[0], ClashPort: ports[1], ClashSecret: token}}, nil
+	b := &box{cfg: cfg, p: p, log: log, tr: tr, pr: pr, o: o, ready: ready, vReady: ready, vChan: ports[0], vClash: ports[1], rc: api.RenderContext{Cfg: cfg, Mode: o.Mode, Instance: o.Instance, ChanPort: ports[0], ClashPort: ports[1], ClashSecret: token}}
+	b.rc.PathPort = b.pp.port
+	return b, nil
+}
+
+// PathAddr — локальный вход sing-box, ведущий прямо в путь name (минуя селектор chan); "" — входа нет.
+func (s *box) PathAddr(name string) string {
+	if p := s.pp.get(name); p > 0 {
+		return fmt.Sprintf("127.0.0.1:%d", p)
+	}
+	return ""
 }
 func (s *box) isVPN() bool { return s.o.Role == RoleVPN }
 func (s *box) Name() string {
@@ -690,6 +754,9 @@ func (s *box) startWithPorts(ctx context.Context) error {
 			if err = s.reallocPorts(); err != nil {
 				return err
 			}
+		}
+		if s.pp.busy() {
+			s.pp.reset()
 		}
 		if s.applyHook != nil {
 			err = s.applyHook(ctx)
