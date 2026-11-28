@@ -81,6 +81,7 @@ type chn struct {
 	done     chan struct{}
 	started  bool
 	kick     chan struct{} // ForcePath: drop the current ssh
+	netWake  chan struct{} // NetChanged: будит только паузу между кругами; живую сессию не рвёт (иначе устаревший сигнал обрывает up)
 	rcur     int
 	handover chan struct{} // запрос «поднять новую сессию, затем закрыть старую»
 	ulEvent  chan struct{} // событие «сеть под каналом изменилась» для проверки
@@ -135,7 +136,7 @@ func New(cfg *api.Config, sb api.Singbox, agent api.AgentHost, log api.Logger, t
 		return nil, err
 	}
 	c := &chn{cfg: cfg, sb: sb, agent: agent, log: log.With("channel"), tr: tr, o: o, sv: sv, signr: signer, hkey: hk,
-		subs: map[int]chan api.ChannelState{}, kick: make(chan struct{}, 1), retPref: make(chan struct{}, 1),
+		subs: map[int]chan api.ChannelState{}, kick: make(chan struct{}, 1), netWake: make(chan struct{}, 1), retPref: make(chan struct{}, 1),
 		handover: make(chan struct{}, 1), ulEvent: make(chan struct{}, 1), sbEvent: make(chan struct{}, 1)}
 	c.st = api.ChannelState{State: "waiting", Since: time.Now()}
 	c.log.Secret(agent.Token())
@@ -297,6 +298,10 @@ func (c *chn) loop(ctx context.Context) {
 			case <-c.kick:
 			default:
 			}
+			select {
+			case <-c.netWake:
+			default:
+			}
 			c.selectFirst()
 			c.setWantMeasure()
 			c.set("connecting", "", reasonNetChanged, false)
@@ -354,6 +359,8 @@ func (c *chn) loop(ctx context.Context) {
 		case <-ctx.Done():
 			t.Stop()
 			return
+		case <-c.netWake:
+			c.log.Info("pause-end", "by", "net-wake")
 		case <-c.kick:
 			c.log.Info("pause-end", "by", "kick")
 		case <-t.C:
@@ -382,7 +389,7 @@ func (c *chn) NetChanged() {
 		cancel()
 	}
 	select { // разбудить паузу между кругами
-	case c.kick <- struct{}{}:
+	case c.netWake <- struct{}{}:
 	default:
 	}
 }

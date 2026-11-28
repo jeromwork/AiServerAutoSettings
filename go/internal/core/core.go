@@ -58,7 +58,8 @@ type quitReq struct {
 }
 
 type core struct {
-	underMu   sync.Mutex // underAddr: последний разрешённый адрес сервера VPN для определения нижнего адаптера
+	persistWG sync.WaitGroup // фоновые записи режима VPN (тесты ждут завершения до очистки TempDir)
+	underMu   sync.Mutex     // underAddr: последний разрешённый адрес сервера VPN для определения нижнего адаптера
 	underAddr string
 	f         Flags
 	p         api.Paths

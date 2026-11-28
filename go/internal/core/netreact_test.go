@@ -226,3 +226,13 @@ func TestResilientWatchReopensAfterClose(t *testing.T) {
 		t.Fatal("канал не закрылся по ctx")
 	}
 }
+
+// Наши адаптеры (ra3-*), поднятые с маршрутом по умолчанию 0/1, не меняют отпечаток и не считаются чужим VPN.
+func TestNetSignatureIgnoresOurTun(t *testing.T) {
+	a := netSignature([]api.Iface{wifi("192.168.1.5")})
+	our := api.Iface{Name: "ra3-0123abcd-vpn", Up: true, DefaultRoute: true, Metric: 0, Addrs: []string{"172.19.0.1"}}
+	lan := api.Iface{Name: "ra3-0123abcd-lan", Up: true, DefaultRoute: true, Metric: 0, Addrs: []string{"172.19.9.1"}}
+	if b := netSignature([]api.Iface{wifi("192.168.1.5"), our, lan}); a != b || a == "" {
+		t.Fatalf("a=%q b=%q", a, b)
+	}
+}

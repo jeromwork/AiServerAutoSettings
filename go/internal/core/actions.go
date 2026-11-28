@@ -525,7 +525,8 @@ func (c *core) VPN(mode string) error {
 	}
 	c.tun.setMode(context.Background(), mode)
 	if mode == "off" {
-		go func() { _ = c.persistVPNMode("off", true) }() // выключение переживает перезапуск; быстрый путь не ждёт запись
+		c.persistWG.Add(1)
+		go func() { defer c.persistWG.Done(); _ = c.persistVPNMode("off", true) }() // выключение переживает перезапуск; быстрый путь не ждёт запись
 	}
 	return nil
 }

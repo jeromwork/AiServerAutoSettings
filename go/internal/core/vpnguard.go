@@ -386,7 +386,8 @@ func (g *tunGuard) failLocked(ctx context.Context, why string) {
 		g.vpnState, g.mode = "off", "off"
 		g.event("vpn.off", "why", why)
 		g.dropVPN(ctx)
-		go func() { _ = g.c.persistVPNMode("off", false) }() // выключение переживает перезапуск (вне mu: замок записи)
+		g.c.persistWG.Add(1)
+		go func() { defer g.c.persistWG.Done(); _ = g.c.persistVPNMode("off", false) }() // выключение переживает перезапуск (вне mu: замок записи)
 	}
 }
 
@@ -476,7 +477,8 @@ func (g *tunGuard) onTunCrash(ctx context.Context, e api.Effective) {
 		case g.fails >= 3:
 			g.vpnState, g.mode = "off", "off"
 			g.event("vpn.off", "why", g.vpnWhy)
-			go func() { _ = g.c.persistVPNMode("off", false) }() // выключение переживает перезапуск
+			g.c.persistWG.Add(1)
+			go func() { defer g.c.persistWG.Done(); _ = g.c.persistVPNMode("off", false) }() // выключение переживает перезапуск
 		default:
 			g.vpnState = "failopen"
 			g.event("vpn.failopen", "why", g.vpnWhy)

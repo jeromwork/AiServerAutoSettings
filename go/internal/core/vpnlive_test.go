@@ -144,6 +144,7 @@ func TestThirdFailPersistsOff(t *testing.T) {
 		t.Fatalf("mode=%s", g.mode)
 	}
 	waitFor(t, func() bool { return savedVPN(t, c).VPN.Mode == "off" })
+	c.persistWG.Wait() // запись закончена до очистки TempDir
 }
 
 func timeNowPlus() time.Time { return time.Now().Add(time.Minute) }
