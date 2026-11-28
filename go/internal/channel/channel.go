@@ -93,6 +93,10 @@ type chn struct {
 	retFails   int                // подряд неудачных возвратов (растит задержку)
 	retTimer   *time.Timer
 
+	measureFn   func(names []string) map[string]int // подмена замера в тестах
+	wantMeasure bool                                // следующая сессия на chan начинается с замера путей
+	pendingPick string                              // путь, выбранный замером под живой сессией (для handover)
+
 	badUntil map[string]time.Time   // путь → до какого момента считается нестабильным
 	losses   map[string][]time.Time // путь → моменты недавних keepalive-потерь
 }
@@ -290,6 +294,7 @@ func (c *chn) loop(ctx context.Context) {
 			default:
 			}
 			c.selectFirst()
+			c.setWantMeasure()
 			c.set("connecting", "", reasonNetChanged, false)
 			continue
 		}
@@ -304,6 +309,7 @@ func (c *chn) loop(ctx context.Context) {
 			if strings.Contains(reason, "keepalive") {
 				c.failoverUnstable(path, time.Since(sessStart))
 			}
+			c.setWantMeasure() // обрыв сессии — событие для замера
 			if c.consumeReturn() {
 				c.selectFirst()
 				continue
@@ -386,6 +392,7 @@ func (c *chn) Underlay() {
 	if started && st.State == "up" {
 		c.underlayAt = time.Now()
 		c.mu.Unlock()
+		c.remeasureLive()
 		c.log.Info("underlay-changed", "session", st.Session, "state", st.State)
 		select {
 		case c.ulEvent <- struct{}{}:
@@ -906,6 +913,9 @@ func (c *chn) session(ctx context.Context, first bool) (string, error) {
 	if path == "" {
 		return "", ctx.Err()
 	}
+	if path == "chan" && c.takeWantMeasure(first) {
+		c.selectBest("")
+	}
 	path = c.pathLabel(path)
 	c.set("connecting", path, "", false)
 	c.log.Info("dial", "via", path, "addr", addr)
@@ -938,7 +948,11 @@ func (c *chn) session(ctx context.Context, first bool) (string, error) {
 			c.retPref <- struct{}{} // consumeReturn в цикле увидит признак
 			return path, fmt.Errorf("%w: возврат на предпочтительный путь", errWasUp)
 		case <-c.handover:
-			c.selectFirst()
+			if pp := c.takePending(); pp != "" {
+				_ = c.selectPath(pp)
+			} else if c.selectBest(path) == "" {
+				c.selectFirst()
+			}
 			np, na := c.pickPath(ctx, false)
 			if np == "" {
 				return path, ctx.Err()
@@ -1119,4 +1133,27 @@ func (c *chn) ForcePath(name string) error {
 	default:
 	}
 	return nil
+}
+
+func (c *chn) setWantMeasure() {
+	c.mu.Lock()
+	c.wantMeasure = true
+	c.mu.Unlock()
+}
+
+// takeWantMeasure — нужен ли замер перед этой сессией: старт канала (first) или отложенное событие.
+func (c *chn) takeWantMeasure(first bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	w := c.wantMeasure || first
+	c.wantMeasure = false
+	return w
+}
+
+func (c *chn) takePending() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p := c.pendingPick
+	c.pendingPick = ""
+	return p
 }
