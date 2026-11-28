@@ -562,7 +562,7 @@ func (u *UI) handleVPNLock(w http.ResponseWriter, req *http.Request) {
 	replyJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleVPNOff — POST /api/vpn/off: выключить VPN сразу, на ходу (без записи конфига и перезапуска программы). Работает и в состоянии «перекрыт».
+// handleVPNOff — POST /api/vpn/off: выключить VPN сразу, на ходу (без перезапуска программы; режим off затем сохраняется в конфиг). Работает и в состоянии «перекрыт».
 // Быстрый путь для трея; если не ответил — трей просит сторожа убить ядро.
 func (u *UI) handleVPNOff(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {

@@ -244,8 +244,14 @@ func (c *core) ConfigSetVPN(ctx context.Context, mode string) error {
 		return fail(err)
 	}
 	c.log.Info("core: config-vpn-applied", "gen", gen, "mode", mode)
-	c.publishApply("restarting", "Конфиг записан, перезапускаю программу и проверяю связь с сервером...")
-	c.requestQuit(api.ExitRestart, nil)
+	if err := c.adoptVPNConfig(ctx); err != nil {
+		return fail(err)
+	}
+	if c.tun != nil && c.cfg != nil && !c.f.Mode.Safe {
+		c.tun.setMode(context.WithoutCancel(ctx), mode) // на ходу, без перезапуска программы
+	}
+	c.publishTrial()
+	c.publishApply("ready", "Режим VPN изменён и сохранён в конфиге.")
 	return nil
 }
 
@@ -273,8 +279,11 @@ func (c *core) ConfigSetVPNLock(ctx context.Context, on bool) error {
 		} else if cancelled {
 			c.publishTrial()
 			if cfg, _, lerr := config.Load(c.p, c.log); lerr == nil && !cfg.VPN.LockExit {
+				if err := c.adoptVPNConfig(ctx); err != nil {
+					return fail(err)
+				}
+				c.reconcileLock(ctx)
 				c.publishApply("rolledback", "Изменение отменено: "+config.ReasonUser)
-				c.requestQuit(api.ExitRestart, nil)
 				return nil
 			}
 		}
@@ -284,10 +293,78 @@ func (c *core) ConfigSetVPNLock(ctx context.Context, on bool) error {
 		return fail(err)
 	}
 	c.log.Info("core: config-vpn-lock-applied", "gen", gen, "lock", on)
-	c.publishApply("restarting", "Конфиг записан, перезапускаю программу и проверяю связь с сервером...")
+	if err := c.adoptVPNConfig(ctx); err != nil {
+		return fail(err)
+	}
+	c.reconcileLock(ctx)
 	c.publishTrial()
-	c.requestQuit(api.ExitRestart, nil)
+	c.publishApply("ready", "Галочка «выход только через наш адрес» изменена и сохранена в конфиге.")
 	return nil
+}
+
+// adoptVPNConfig: после записи нового поколения (меняется только vpn.mode/lockExit) принимает его без перезапуска:
+// поколение сразу подтверждается (связь уже работает), в памяти обновляются gen и vpn-поля конфига.
+func (c *core) adoptVPNConfig(ctx context.Context) error {
+	cfg, gen, err := config.Load(c.p, c.log)
+	if err != nil {
+		return err
+	}
+	if ptr, e := config.ReadPointers(c.p); e == nil && ptr.Switch != nil && ptr.Switch.To == gen {
+		if err := config.Commit(c.p, gen, time.Now()); err != nil {
+			c.log.Warn("core: config-commit", "gen", gen, "err", err.Error())
+		}
+	}
+	c.gen = gen
+	if c.cfg != nil {
+		if g := c.tun; g != nil {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+		}
+		c.cfg.VPN.Mode, c.cfg.VPN.LockExit = cfg.VPN.Mode, cfg.VPN.LockExit
+	}
+	return nil
+}
+
+// reconcileLock применяет новое значение lockExit: снятая галочка снимает блок, затем пересчёт (pf/перекрытие/проверка выхода).
+func (c *core) reconcileLock(ctx context.Context) {
+	g := c.tun
+	if g == nil || c.cfg == nil || c.f.Mode.Safe {
+		return
+	}
+	if !g.lock() {
+		g.blocked.Store(false)
+	}
+	g.reconcile(context.WithoutCancel(ctx), "vpn-lock")
+}
+
+// persistVPNMode сохраняет режим в конфиг (после выключения на ходу или после 3-й неудачи). Занятую запись не ждёт.
+// cancelTrial: пробное окно откатывается (ручное выключение); иначе при окне ничего не пишем — им управляет откат.
+func (c *core) persistVPNMode(mode string, cancelTrial bool) error {
+	if c.f.Mode.Safe || c.cfg == nil {
+		return nil
+	}
+	unlock, err := c.lockOp()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if ptr, e := config.ReadPointers(c.p); e == nil && ptr.Switch != nil {
+		if !cancelTrial {
+			return nil
+		}
+		if _, err := config.CancelTrial(c.p, c.log); err != nil {
+			return err
+		}
+		c.publishTrial()
+	}
+	if cfg, _, err := config.Load(c.p, c.log); err == nil && cfg.VPN.Mode == mode {
+		return nil
+	}
+	if _, err := config.SetVPNMode(c.p, mode, c.log); err != nil {
+		c.log.Warn("core: vpn-mode-persist-failed", "mode", mode, "err", err.Error())
+		return err
+	}
+	return c.adoptVPNConfig(context.Background())
 }
 
 func (c *core) ConfigRevert(ctx context.Context) error {
@@ -323,7 +400,7 @@ func (c *core) SwitchPath(name string) error {
 	return sb.Clash(ctx, "PUT", "/proxies/chan", map[string]string{"name": name}, nil)
 }
 
-// VPN: сменить режим на время работы (в конфиг не пишется); в --safe — ErrSafe.
+// VPN: сменить режим на время работы (в конфиг пишется только off); в --safe — ErrSafe.
 func (c *core) VPN(mode string) error {
 	if c.f.Mode.Safe {
 		return api.ErrSafe
@@ -332,6 +409,9 @@ func (c *core) VPN(mode string) error {
 		return api.ErrNotSupported
 	}
 	c.tun.setMode(context.Background(), mode)
+	if mode == "off" {
+		go func() { _ = c.persistVPNMode("off", true) }() // выключение переживает перезапуск; быстрый путь не ждёт запись
+	}
 	return nil
 }
 

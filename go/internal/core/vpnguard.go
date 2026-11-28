@@ -379,6 +379,7 @@ func (g *tunGuard) failLocked(ctx context.Context, why string) {
 		g.vpnState, g.mode = "off", "off"
 		g.event("vpn.off", "why", why)
 		g.dropVPN(ctx)
+		go func() { _ = g.c.persistVPNMode("off", false) }() // выключение переживает перезапуск (вне mu: замок записи)
 	}
 }
 
