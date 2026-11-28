@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -235,4 +236,8 @@ func TestNetSignatureIgnoresOurTun(t *testing.T) {
 	if b := netSignature([]api.Iface{wifi("192.168.1.5"), our, lan}); a != b || a == "" {
 		t.Fatalf("a=%q b=%q", a, b)
 	}
+}
+
+func (s *fvSb) Clash(context.Context, string, string, any, any) error {
+	return errors.New("singbox: clash-connect: request failed")
 }

@@ -30,7 +30,11 @@ func (s *box) Clash(ctx context.Context, method, path string, body, out any) err
 	}
 	req.Header.Set("Authorization", "Bearer "+s.rc.ClashSecret)
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	to := time.Second
+	if _, ok := ctx.Deadline(); ok {
+		to = 0 // срок задаёт вызывающий (например, проверка мостов группы ждёт до 20 с)
+	}
+	client := &http.Client{Timeout: to, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {

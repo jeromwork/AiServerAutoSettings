@@ -33,6 +33,7 @@ type Options struct {
 	OnTunCrash         func(api.Effective) // sing-box с TUN упал (откат без TUN уже запущен)
 	OnEvent            func(kind string)   // события из журнала канального sing-box (EvNetworkChanged, EvOutboundError)
 	DefaultIface       func() string       // физический внешний интерфейс сейчас ("" — не определён)
+	PhysIface          func() string       // физический интерфейс (не чужой VPN): к нему привязаны мосты VPN рядом с чужим VPN
 	ForeignVPN         func() bool         // наш VPN поверх чужого (underlay не физический); nil — нет
 	PathRank           func() []string     // пути канала после свежего замера, победитель первым; nil — нет
 	VPNBlock           func() bool         // VPN перекрыт (vpn.lockExit + сбой); nil — нет
@@ -274,6 +275,11 @@ func (s *box) render(e api.Effective) ([]byte, error) {
 		rc.VPNSplit = s.o.VPNSplit()
 	}
 	rc.ForeignVPN = s.o.ForeignVPN != nil && s.o.ForeignVPN()
+	if rc.ForeignVPN && s.o.PhysIface != nil {
+		rc.PhysIface = s.o.PhysIface()
+		s.rc.PhysIface = rc.PhysIface
+		rc.DefaultIface = rc.PhysIface // рядом с чужим VPN мосты привязаны к физическому интерфейсу, а не к happ-tun
+	}
 	if s.isVPN() && rc.ForeignVPN && s.p.Logs != "" {
 		rc.LogFile = filepath.Join(s.p.Logs, "vpn-singbox.log")
 		_ = os.MkdirAll(s.p.Logs, 0o755)
@@ -871,7 +877,9 @@ func (s *box) NetChanged(ctx context.Context) (restarted bool, err error) {
 	}
 	cur, next := s.rc.DefaultIface, s.o.DefaultIface()
 	curF, nextF := s.rc.ForeignVPN, s.o.ForeignVPN != nil && s.o.ForeignVPN()
-	if nextF { // под чужим VPN интерфейс в конфиг не попадает — его смена перезапуск не требует
+	if nextF && s.o.PhysIface != nil { // под чужим VPN в конфиг попадает физический интерфейс, а не нижний (чужой)
+		cur, next = s.rc.PhysIface, s.o.PhysIface()
+	} else if nextF {
 		cur, next = "", ""
 	}
 	if curF != nextF {
@@ -886,6 +894,9 @@ func (s *box) NetChanged(ctx context.Context) (restarted bool, err error) {
 	defer cancel()
 	if err = s.apply(ctx, s.rc.Effective); err != nil {
 		s.rc.DefaultIface = cur
+		if nextF && s.o.PhysIface != nil {
+			s.rc.PhysIface = cur
+		}
 		return false, err
 	}
 	s.log.Info("singbox.default-iface", "from", cur, "to", next)

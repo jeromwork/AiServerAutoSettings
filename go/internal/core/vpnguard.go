@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -334,6 +335,11 @@ func (g *tunGuard) finish(got api.Effective) {
 			g.vpnState, g.vpnWhy = "up", ""
 		}
 		g.underlay = g.c.vpnUnderlay()
+		if g.lastForeign != "" || g.c.vpnForeign() {
+			if ph := platform.PhysicalInterface(); ph != "" {
+				g.underlay = ph // мосты привязаны к физическому; чужой VPN рядом показывает st["foreign"]
+			}
+		}
 	} else {
 		g.underlay = ""
 	}
@@ -378,6 +384,14 @@ func (g *tunGuard) probe(ctx context.Context) {
 	if bad > 0 {
 		g.setBypass(out)
 	}
+	// Сначала ждём, пока urltest проверит мосты (ответ Clash API на проверку группы — событие готовности), до vpnBridgeWait;
+	// без этого проба туннеля объявляла провал раньше, чем мосты успевали ответить.
+	if why := g.waitBridges(ctx); why != "" {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		g.failLocked(ctx, why)
+		return
+	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(cctx, http.MethodGet, singbox.VPNProbeURL, nil)
@@ -399,6 +413,38 @@ func (g *tunGuard) probe(ctx context.Context) {
 		why += ": " + sanitize(err.Error())
 	}
 	g.failLocked(ctx, why)
+}
+
+// vpnBridgeWait — сколько ждать первого успешного замера мостов urltest после подъёма VPN.
+var vpnBridgeWait = 20 * time.Second
+
+// waitBridges — проверка мостов группы vpn-out через Clash API (GET /group/vpn-out/delay отвечает, когда замер закончен).
+// "" — хотя бы один мост ответил (или проверить нельзя — тогда решает HTTP-проба); иначе причина сбоя.
+func (g *tunGuard) waitBridges(ctx context.Context) string {
+	vsb := g.c.getVpnSb()
+	if isNil(vsb) {
+		return ""
+	}
+	wctx, cancel := context.WithTimeout(ctx, vpnBridgeWait)
+	defer cancel()
+	var res map[string]int
+	u := "/group/vpn-out/delay?url=" + url.QueryEscape(singbox.VPNProbeURL) + "&timeout=" + strconv.Itoa(int(vpnBridgeWait/time.Millisecond)-1000)
+	err := vsb.Clash(wctx, "GET", u, nil, &res)
+	if err != nil {
+		if wctx.Err() != nil {
+			return "ни один мост VPN не ответил за " + strconv.Itoa(int(vpnBridgeWait/time.Second)) + " с"
+		}
+		if strings.Contains(err.Error(), "clash-status") {
+			return "ни один мост VPN не ответил (urltest)"
+		}
+		return "" // Clash недоступен — решает HTTP-проба
+	}
+	for _, d := range res {
+		if d > 0 {
+			return ""
+		}
+	}
+	return "ни один мост VPN не ответил"
 }
 
 // failLocked — шаг лестницы fail-open. Под mu.

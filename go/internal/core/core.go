@@ -407,7 +407,7 @@ func (c *core) startNetwork(ctx context.Context) {
 	if c.cfg != nil && !f.Mode.NoSingbox && f.Mode.AllowsTun() {
 		vsb, e := singbox.New(c.cfg, c.p, log, c.clean, c.pr, singbox.Options{
 			Role: singbox.RoleVPN, Mode: f.Mode, Instance: c.clean.Instance(), DefaultIface: c.vpnUnderlay,
-			ForeignVPN: c.vpnForeign, PathRank: c.vpnPathRank,
+			ForeignVPN: c.vpnForeign, PhysIface: platform.PhysicalInterface, PathRank: c.vpnPathRank,
 			VPNBlock: func() bool { return c.tun != nil && c.tun.blocked.Load() },
 			VPNSplit: func() int {
 				if c.tun == nil {

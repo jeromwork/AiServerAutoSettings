@@ -20,6 +20,7 @@ type RenderContext struct {
 	GeoIPPath    string   // State/geoip-ru.srs ("" — нет файла)
 	LANSocks     string   // "127.0.0.1:port" внутреннего SOCKS (Forwarder.InternalSocks); "" — LAN недоступен
 	DefaultIface string   // физический внешний интерфейс (route.default_interface); "" — auto_detect_interface
+	PhysIface    string   // физический интерфейс (Wi-Fi/Ethernet) независимо от чужого VPN; при ForeignVPN мосты VPN привязаны к нему
 	ExcludeIPs   []string // IP сервера, входов, мостов, DNS ПК — route_exclude_address (vpn.py 273–291)
 	Effective    Effective
 	VPNBlock     bool     // VPN перекрывает интернет (этап 3a, vpn.lockExit): всё, что не исключено, отклоняется; свой процесс программы идёт через vpn-out для проверок

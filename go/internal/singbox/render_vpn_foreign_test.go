@@ -37,12 +37,12 @@ func urltestOuts(t *testing.T, raw string) []string {
 }
 
 func TestRenderVPNForeignKeepsUDPAndIface(t *testing.T) {
-	v, raw := renderVPNOut(t, foreignRC(true, "happ-tun"))
+	v, raw := renderVPNOut(t, foreignRC(true, "Wi-Fi"))
 	if got := urltestOuts(t, raw); len(got) != 3 {
 		t.Fatalf("под чужим VPN UDP-мосты остаются (на ПК под Happ проходят hy2/tuic, TCP — нет), получили %v", got)
 	}
-	if strings.Contains(raw, "default_interface") || strings.Contains(raw, "auto_detect_interface") {
-		t.Fatalf("под чужим VPN сокеты не привязываются к интерфейсу: %s", raw)
+	if !strings.Contains(raw, `"default_interface":"Wi-Fi"`) || strings.Contains(raw, "auto_detect_interface") {
+		t.Fatalf("под чужим VPN мосты привязаны к физическому интерфейсу (core подставляет его в DefaultIface): %s", raw)
 	}
 	if !strings.Contains(raw, "route_exclude_address") {
 		t.Fatalf("исключения серверов мостов из TUN должны остаться: %s", raw)
@@ -100,7 +100,7 @@ func TestDiagRedactHidesSecrets(t *testing.T) {
 }
 
 func TestRenderVPNForeignBindsDirectOnly(t *testing.T) {
-	rc := foreignRC(true, "happ-tun")
+	rc := foreignRC(true, "Wi-Fi")
 	rc.LogFile = "/tmp/vpn-singbox.log"
 	_, raw := renderVPNOut(t, rc)
 	var v struct {
@@ -112,14 +112,40 @@ func TestRenderVPNForeignBindsDirectOnly(t *testing.T) {
 	}
 	for _, o := range v.Outbounds {
 		b, has := o["bind_interface"]
-		if o["tag"] == "vpn-direct" && b != "happ-tun" {
+		if o["tag"] == "vpn-direct" && b != "Wi-Fi" {
 			t.Fatalf("vpn-direct без bind_interface: %v", o)
 		}
 		if o["tag"] != "vpn-direct" && has {
-			t.Fatalf("мосты без привязки: %v", o)
+			t.Fatalf("мосты привязаны через route.default_interface, не bind_interface: %v", o)
 		}
 	}
-	if v.Log["level"] != "info" || v.Log["output"] != "/tmp/vpn-singbox.log" {
+	if v.Log["level"] != "debug" || v.Log["output"] != "/tmp/vpn-singbox.log" {
 		t.Fatalf("log: %v", v.Log)
+	}
+}
+
+// Кириллица в имени физического интерфейса: конфиг — UTF-8 без BOM, имя не экранируется.
+func TestRenderVPNForeignCyrillicIface(t *testing.T) {
+	_, raw := renderVPNOut(t, foreignRC(true, "Беспроводная сеть"))
+	if !strings.Contains(raw, `"default_interface":"Беспроводная сеть"`) || strings.HasPrefix(raw, "\ufeff") {
+		t.Fatalf("имя интерфейса: %s", raw)
+	}
+}
+
+// Под чужим VPN ws-cdn/cdn исключены из urltest (домен резолвится мимо чужого VPN); без чужого — остаются.
+func TestRenderVPNForeignDropsCDN(t *testing.T) {
+	mk := func(foreign bool) []string {
+		rc := foreignRC(foreign, "Wi-Fi")
+		rc.Cfg.VPN.Nodes["ws-cdn-x"] = json.RawMessage(`{"type":"vless","server":"cdn.example.com","server_port":443,"uuid":"u"}`)
+		_, raw := renderVPNOut(t, rc)
+		return urltestOuts(t, raw)
+	}
+	for _, o := range mk(true) {
+		if strings.HasPrefix(o, "ws-cdn-") {
+			t.Fatalf("ws-cdn под чужим VPN: %v", o)
+		}
+	}
+	if got := mk(false); len(got) != 4 {
+		t.Fatalf("без чужого VPN ws-cdn остаётся: %v", got)
 	}
 }

@@ -242,6 +242,18 @@ func vpnSelectOpt(cfg *api.Config, foreign bool, rank []string) (vpnSel, error) 
 			sel.finals = append(sel.finals[:nodeFinals:nodeFinals], pass...)
 		}
 	}
+	// Рядом с чужим VPN мосты через CDN-домен исключаются: домен резолвится мимо чужого VPN в чужой адрес (сертификат не сходится).
+	if foreign {
+		var keep []string
+		for _, f := range sel.finals {
+			if !strings.HasPrefix(f, "ws-cdn-") && !strings.HasPrefix(f, "cdn-") {
+				keep = append(keep, f)
+			}
+		}
+		if len(keep) > 0 {
+			sel.finals = keep
+		}
+	}
 	// Серверы ВСЕХ выбранных мостов (в т.ч. путей канала) и сервер канала не должны идти в наш TUN: иначе после его подъёма
 	// маршрут ОС к ним ведёт в наш адаптер и «нижний» адаптер (vpnUnderlay) ошибочно становится физическим.
 	for _, o := range sel.outs {
@@ -329,11 +341,9 @@ func RenderVPN(rc api.RenderContext) ([]byte, error) {
 	}
 	route := m{"find_process": true, "final": "vpn-out"}
 	switch {
-	case rc.ForeignVPN:
-		// Под чужим VPN (Happ) сокеты к мостам НЕ привязываем ни к интерфейсу, ни авто-определением: привязка к happ-tun ломает выход
-		// (проба туннеля — таймаут), а процесс sing-box.exe чужой VPN пускает мимо себя по маршрутам ОС (так работает канал).
-		// Петли нет: серверы мостов исключены из нашего TUN (route_exclude_address).
 	case rc.DefaultIface != "":
+		// Под чужим VPN (Happ) rc.DefaultIface — физический интерфейс (замер на ПК: привязка к нему даёт все мосты за <1 с,
+		// привязка к happ-tun и по маршрутам ОС — только часть). Петли нет: серверы мостов исключены из нашего TUN.
 		route["default_interface"] = rc.DefaultIface
 	default:
 		route["auto_detect_interface"] = true
@@ -365,20 +375,27 @@ func RenderVPN(rc api.RenderContext) ([]byte, error) {
 	outs := append([]m(nil), sel.outs...)
 	direct := m{"type": "direct", "tag": "vpn-direct"}
 	if rc.ForeignVPN && rc.DefaultIface != "" {
-		// Без привязки vpn-direct ушёл бы по маршрутам ОС в наш TUN (0/1) — петля; привязываем к интерфейсу чужого VPN.
-		// Мосты остаются без привязки (их серверы в route_exclude_address).
+		// Без привязки vpn-direct ушёл бы по маршрутам ОС в наш TUN (0/1) — петля; привязываем к физическому интерфейсу.
 		direct["bind_interface"] = rc.DefaultIface
 	}
 	outs = append(outs,
-		m{"type": "urltest", "tag": "vpn-out", "outbounds": sel.finals, "url": VPNProbeURL, "interval": "3m", "tolerance": 100, "interrupt_exist_connections": false},
+		m{"type": "urltest", "tag": "vpn-out", "outbounds": sel.finals, "url": VPNProbeURL, "interval": vpnTestInterval(rc.ForeignVPN), "timeout": "5s", "tolerance": 100, "interrupt_exist_connections": false},
 		direct)
 	// Журнал sing-box VPN — только предупреждения: в info попадают адреса сайтов. Под чужим VPN для разбора — info в файл.
 	logCfg := m{"level": "warn"}
 	if rc.ForeignVPN && rc.LogFile != "" {
-		logCfg = m{"level": "info", "output": rc.LogFile, "timestamp": true}
+		logCfg = m{"level": "debug", "output": rc.LogFile, "timestamp": true}
 	}
 	return json.Marshal(m{"log": logCfg, "inbounds": []m{tun}, "outbounds": outs, "route": route,
 		"experimental": m{"clash_api": m{"external_controller": fmt.Sprintf("127.0.0.1:%d", rc.ClashPort), "secret": rc.ClashSecret}}})
+}
+
+// vpnTestInterval — период urltest: рядом с чужим VPN чаще, чтобы результат был быстро и после смены сети.
+func vpnTestInterval(foreign bool) string {
+	if foreign {
+		return "1m"
+	}
+	return "3m"
 }
 
 // vpnGOOS — ОС для выбора способа перекрытия (подменяется в тестах).
