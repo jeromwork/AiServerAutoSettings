@@ -32,8 +32,9 @@ type Part struct {
 	Rules        []map[string]any // вставляются ПОСЛЕ правил канала (порядок — блок C, C3)
 	RuleSets     []map[string]any
 	RouteExclude []string
-	Final        string // route.final ("" — не задавать); VPN: vpn-out
-	FindProcess  bool   // route.find_process (правила process_name)
+	Final        string         // route.final ("" — не задавать); VPN: vpn-out
+	FindProcess  bool           // route.find_process (правила process_name)
+	DNS          map[string]any // секция dns верхнего уровня (nil — не задавать); тогда route.default_domain_resolver=dns-sys
 }
 
 type Singbox interface {

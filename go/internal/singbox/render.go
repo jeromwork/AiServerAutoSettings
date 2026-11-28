@@ -96,6 +96,7 @@ func Render(rc api.RenderContext) ([]byte, error) {
 	// Канал — обычное приложение поверх сети: без привязки к интерфейсу, сокеты идут по маршрутам ОС.
 	route := m{}
 	var ruleSets []m
+	var dns map[string]any
 	if rc.Mode.AllowsTun() {
 		type part struct {
 			on bool
@@ -112,6 +113,10 @@ func Render(rc api.RenderContext) ([]byte, error) {
 			if x.Final != "" {
 				route["final"] = x.Final
 			}
+			if x.DNS != nil {
+				dns = x.DNS
+				route["default_domain_resolver"] = "dns-sys" // имена узлов канала — как раньше, системным резолвером
+			}
 			if x.FindProcess {
 				route["find_process"] = true
 			}
@@ -122,8 +127,12 @@ func Render(rc api.RenderContext) ([]byte, error) {
 	if len(ruleSets) > 0 {
 		route["rule_set"] = ruleSets
 	}
-	return json.Marshal(m{"log": m{"level": "info"}, "inbounds": ins, "outbounds": outs, "route": route,
-		"experimental": m{"clash_api": m{"external_controller": fmt.Sprintf("127.0.0.1:%d", rc.ClashPort), "secret": rc.ClashSecret}}})
+	root := m{"log": m{"level": "info"}, "inbounds": ins, "outbounds": outs, "route": route,
+		"experimental": m{"clash_api": m{"external_controller": fmt.Sprintf("127.0.0.1:%d", rc.ClashPort), "secret": rc.ClashSecret}}}
+	if dns != nil {
+		root["dns"] = dns
+	}
+	return json.Marshal(root)
 }
 
 // rd читает поля узла; первая нехватка запоминается (KeyError paths.py).

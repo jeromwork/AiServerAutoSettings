@@ -54,6 +54,9 @@ func LANSubnets(cfg *api.Config) (nets, skipped []string) {
 	return nets, skipped
 }
 
+// LANTunDNS — адрес, который sing-box регистрирует как DNS на интерфейсе ЛВС (второй адрес /30).
+const LANTunDNS = "172.19.9.2"
+
 // renderLAN — часть ЛВС (N2, повтор tun.py): tun-in RA3-LAN только на подсети клиники → socks во внутренний
 // SOCKS forward (lan-out). DNS/NRPT/hosts не трогаем.
 func renderLAN(rc api.RenderContext) (api.Part, error) {
@@ -77,6 +80,17 @@ func renderLAN(rc api.RenderContext) (api.Part, error) {
 		Inbounds: []m{{"type": "tun", "tag": "lan-in", "interface_name": name, "address": []string{"172.19.9.1/30"}, "mtu": 1400,
 			"auto_route": true, "strict_route": false, "route_address": nets}},
 		Outbounds: []m{{"type": "socks", "tag": "lan-out", "server": host, "server_port": pn, "version": "5"}},
-		Rules:     []m{{"ip_cidr": nets, "outbound": "lan-out"}},
+		// Только запросы к DNS самого TUN (172.19.9.2:53) из lan-in; всё остальное (чужой VPN, свои подсети) не трогаем.
+		Rules: []m{
+			{"inbound": "lan-in", "ip_cidr": []string{LANTunDNS + "/32"}, "port": 53, "action": "hijack-dns"},
+			{"ip_cidr": nets, "outbound": "lan-out"},
+		},
+		DNS: m{
+			"servers": []m{
+				{"type": "udp", "tag": "dns-up", "server": "1.1.1.1"},
+				{"type": "local", "tag": "dns-sys"},
+			},
+			"final": "dns-up",
+		},
 	}, nil
 }
