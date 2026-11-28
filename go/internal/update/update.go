@@ -151,11 +151,11 @@ func New(p api.Paths, log api.Logger, o Options) (api.Updater, error) {
 			}
 		}
 	}
-	dialer := &net.Dialer{Timeout: orDur(o.DialTimeout, 8*time.Second)}
+	dialCtx := newDialContext(orDur(o.DialTimeout, 8*time.Second), 15*time.Second, systemLookup, fallbackLookup)
 	u.client = &http.Client{
 		Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           dialer.DialContext,
+			DialContext:           dialCtx,
 			TLSHandshakeTimeout:   orDur(o.TLSTimeout, 8*time.Second),
 			ResponseHeaderTimeout: orDur(o.HeaderTimeout, 10*time.Second),
 			IdleConnTimeout:       30 * time.Second,
