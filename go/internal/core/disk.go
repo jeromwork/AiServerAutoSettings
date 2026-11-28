@@ -9,6 +9,7 @@ import (
 
 	"remoteagents/internal/api"
 	"remoteagents/internal/disk"
+	"remoteagents/internal/disk/explorer"
 	"remoteagents/internal/singbox"
 )
 
@@ -56,10 +57,20 @@ func (c *core) launchDisk(ctx context.Context, dcfg disk.Config, bin string, arg
 	if ch == nil {
 		return
 	}
+	var ctl *explorer.Controller
+	if bin != "" {
+		ctl = c.startExplorer(ctx, dcfg)
+	}
 	eng := disk.New(disk.Deps{
 		Cfg: dcfg, Channel: ch, ChannelJSON: c.cfg.Paths.Channel, Procs: c.pr, Log: c.log, Paths: c.p,
 		Bin: bin, BinArgs: args, BinWhy: why,
-		OnState: func(s disk.Snapshot) { c.publish("disk", s.Map()); c.publishStatus() },
+		OnState: func(s disk.Snapshot) {
+			if ctl != nil && s.State == disk.StateRunning {
+				ctl.Wake()
+			}
+			c.publish("disk", s.Map())
+			c.publishStatus()
+		},
 	})
 	dir := dcfg.Base
 	if dir == "" {

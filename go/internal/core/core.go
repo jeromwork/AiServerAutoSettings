@@ -24,6 +24,7 @@ import (
 	"remoteagents/internal/cleanup"
 	"remoteagents/internal/config"
 	"remoteagents/internal/disk"
+	"remoteagents/internal/disk/explorer"
 	"remoteagents/internal/forward"
 	"remoteagents/internal/journal"
 	"remoteagents/internal/platform"
@@ -82,7 +83,8 @@ type core struct {
 	ch      api.Channel
 	fw      api.Forwarder
 	dsk     *disk.Engine
-	diskDir string // папка Диска для «Открыть Диск» (Base, иначе Home)
+	dex     *explorer.Controller // Проводник Диска (Windows)
+	diskDir string               // папка Диска для «Открыть Диск» (Base, иначе Home)
 	ui      *webui.UI
 	upd     api.Updater
 
@@ -685,6 +687,12 @@ func (c *core) stopNetwork(step func(name string, err error)) {
 		if step != nil {
 			step(name, err)
 		}
+	}
+	if ex := c.getExplorer(); ex != nil {
+		ex.Stop()
+		c.compMu.Lock()
+		c.dex = nil
+		c.compMu.Unlock()
 	}
 	if d := c.getDisk(); d != nil {
 		ctx, cancel := stopCtx()

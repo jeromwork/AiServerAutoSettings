@@ -247,6 +247,7 @@ func (u *UI) registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/events", u.handleEvents)
 	mux.HandleFunc("/api/restart", u.handleRestart)
 	mux.HandleFunc("/api/pause", u.handlePause)
+	mux.HandleFunc("/api/disk/shell", u.handleDiskShell)
 	mux.HandleFunc("/api/exit", u.handleExit)
 	mux.HandleFunc("/exit", u.handleExit)
 }
@@ -706,4 +707,35 @@ func parseForm(w http.ResponseWriter, req *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// DiskShell — необязательная возможность действий: команды меню Проводника Диска.
+type DiskShell interface {
+	DiskShell(ctx context.Context, cmd, path string) (string, error)
+}
+
+// handleDiskShell — POST /api/disk/shell cmd=<download|sync|keep-server|add> path=<папка>; её вызывает
+// `remoteagents disk-shell`. Та же авторизация, что у остальных действий.
+func (u *UI) handleDiskShell(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !u.checkAuth(w, req) {
+		return
+	}
+	if !parseForm(w, req) {
+		return
+	}
+	ds, ok := u.act.(DiskShell)
+	if !ok {
+		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Диск не поддерживается"})
+		return
+	}
+	msg, err := ds.DiskShell(req.Context(), req.PostFormValue("cmd"), req.PostFormValue("path"))
+	if err != nil {
+		replyJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	replyJSON(w, http.StatusOK, map[string]any{"ok": true, "message": msg})
 }

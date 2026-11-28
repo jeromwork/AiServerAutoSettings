@@ -57,6 +57,9 @@ func runCLI(ctx context.Context, name string, args []string) int {
 	log := &fake.Logger{}
 
 	switch name {
+	case "disk-shell":
+		return cliDiskShell(p, fs.Args())
+
 	case "open", "status":
 		b, err := os.ReadFile(filepath.Join(p.State, core.UIURLFile))
 		if err != nil {
@@ -296,4 +299,52 @@ func printConfigErr(err error) {
 		return
 	}
 	fmt.Fprintln(os.Stderr, err)
+}
+
+// cliDiskShell — `remoteagents disk-shell <cmd> <path>`: команда меню Проводника → ядро (страница, токен из webui.url).
+// Итог показывается окном: команду запускает Проводник, консоли у неё нет.
+func cliDiskShell(p api.Paths, args []string) int {
+	if len(args) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: remoteagents disk-shell <download|sync|keep-server|add> <path>")
+		return 2
+	}
+	msg, err := diskShellCall(p, args[0], args[1])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "disk-shell:", err)
+		showError(err.Error())
+		return 1
+	}
+	fmt.Println(msg)
+	showInfo(msg)
+	return 0
+}
+
+func diskShellCall(p api.Paths, cmd, path string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(p.State, core.UIURLFile))
+	if err != nil {
+		return "", errors.New("Программа не запущена")
+	}
+	u, err := url.Parse(strings.TrimSpace(string(b)))
+	if err != nil || u.Host == "" {
+		return "", errors.New("Неверный адрес программы")
+	}
+	u.Path = "/api/disk/shell"
+	cl := &http.Client{Timeout: 5 * time.Minute, Transport: &http.Transport{Proxy: nil}}
+	resp, err := cl.PostForm(u.String(), url.Values{"cmd": {cmd}, "path": {path}})
+	if err != nil {
+		return "", errors.New("Программа не ответила")
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var r struct {
+		OK      bool   `json:"ok"`
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&r) != nil {
+		return "", errors.New("Непонятный ответ программы")
+	}
+	if !r.OK {
+		return "", errors.New(r.Error)
+	}
+	return r.Message, nil
 }
