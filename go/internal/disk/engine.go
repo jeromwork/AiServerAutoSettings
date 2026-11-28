@@ -67,21 +67,23 @@ type Engine struct {
 	done    chan struct{}
 
 	// Ниже — только горутина loop.
-	up         bool
-	fails      int
-	nextAt     time.Time
-	timer      *time.Timer
-	proc       api.Process
-	procOut    io.Closer
-	procAt     time.Time
-	unlock     func()
-	fwd        *portForward
-	joining    bool
-	joinFails  int
-	joinNextAt time.Time
-	joinDone   chan joinResult
-	joinCancel context.CancelFunc
-	stopping   bool
+	up           bool
+	fails        int
+	nextAt       time.Time
+	timer        *time.Timer
+	proc         api.Process
+	procOut      io.Closer
+	procAt       time.Time
+	unlock       func()
+	fwd          *portForward
+	joining      bool
+	joinFails    int
+	joinNextAt   time.Time
+	joinDone     chan joinResult
+	joinCancel   context.CancelFunc
+	stopping     bool
+	finishing    atomic.Bool
+	finishCancel context.CancelFunc
 }
 
 func New(d Deps) *Engine {
@@ -456,6 +458,9 @@ func (e *Engine) shutdown() {
 	if e.joinCancel != nil {
 		e.joinCancel()
 	}
+	if e.finishCancel != nil {
+		e.finishCancel()
+	}
 	if e.timer != nil {
 		e.timer.Stop()
 	}
@@ -482,3 +487,32 @@ func (e *Engine) closeOut() {
 		e.procOut = nil
 	}
 }
+
+// startFinish: после запуска syncthing принимает папки сервера (этап D), если join.json ещё не done.
+// Одна попытка на запуск процесса; не принятые (сервер ещё не предложил) повторятся при следующем запуске.
+func (e *Engine) startFinish(ctx context.Context, home string) {
+	if e.finishing.Load() || !NeedFinish(home) {
+		return
+	}
+	info, ok := loadServer(home)
+	if !ok {
+		return
+	}
+	e.finishing.Store(true)
+	fctx, cancel := context.WithCancel(ctx)
+	e.finishCancel = cancel
+	env := FoldersEnv{Home: home, ServerID: info.DeviceID, SyncPort: e.syncPort(), Folders: e.d.Cfg.Folders, Base: e.d.Cfg.Base, Log: e.log}
+	go func() {
+		defer cancel()
+		defer func() { e.finishing.Store(false) }()
+		c, err := NewClient(filepath.Join(home, "state"))
+		if err == nil {
+			_, err = Finish(fctx, withClient(env, c))
+		}
+		if err != nil && fctx.Err() == nil {
+			e.log.Warn("disk: folders-failed", "err", err.Error())
+		}
+	}()
+}
+
+func withClient(env FoldersEnv, c *Client) FoldersEnv { env.Client = c; return env }
