@@ -141,6 +141,9 @@ func (g *tunGuard) checkExit(ctx context.Context, reason string) {
 	g.event("vpn.exit", "ip", res.IP, "via", res.Via, "ok", res.OK, "known", res.Known, "reason", reason)
 	g.exitVerdictLocked(ctx, res)
 	g.mu.Unlock()
+	if res.Err == "" && (!res.Known || res.OK) {
+		c.confirmLiveTrial() // выход подтверждён — пробное окно изменения vpn закрывается
+	}
 }
 
 // CheckExit — кнопка «Проверить»: проверка выхода сейчас, возвращает итог.

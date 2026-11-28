@@ -91,8 +91,12 @@ func TestSetVPNModeLive(t *testing.T) {
 	if c.tun.mode != "auto" || c.cfg.VPN.Mode != "auto" || savedVPN(t, c).VPN.Mode != "auto" {
 		t.Fatalf("guard=%s mem=%s saved=%s", c.tun.mode, c.cfg.VPN.Mode, savedVPN(t, c).VPN.Mode)
 	}
-	if ptr, _ := config.ReadPointers(c.p); ptr.Switch != nil || ptr.Current != c.gen {
-		t.Fatalf("поколение не принято: %+v gen=%s", ptr, c.gen)
+	if ptr, _ := config.ReadPointers(c.p); ptr.Switch == nil || ptr.Current != c.gen {
+		t.Fatalf("окно должно идти: %+v gen=%s", ptr, c.gen)
+	}
+	c.confirmLiveTrial()
+	if ptr, _ := config.ReadPointers(c.p); ptr.Switch != nil || ptr.LastGood != c.gen {
+		t.Fatalf("поколение не принято: %+v", ptr)
 	}
 }
 
@@ -153,4 +157,45 @@ func waitFor(t *testing.T, ok func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("условие не выполнилось")
+}
+
+// Включение галочки открывает пробное окно (не коммитится сразу); срок окна — откат на ходу: в памяти lockExit=false, блок снят.
+func TestLockOnTrialRollsBackLive(t *testing.T) {
+	c, _ := liveCore(t, map[string]any{"mode": "auto", "lockExit": false})
+	if err := c.ConfigSetVPNLock(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if ptr, _ := config.ReadPointers(c.p); ptr.Switch == nil || !c.tun.lock() {
+		t.Fatalf("окно должно идти: %+v lock=%v", ptr.Switch, c.tun.lock())
+	}
+	c.tun.blocked.Store(true)
+	c.expireLiveTrial(time.Now().Add(10 * time.Minute))
+	noRestart(t, c)
+	if c.tun.lock() || c.tun.blocked.Load() || c.cfg.VPN.LockExit || savedVPN(t, c).VPN.LockExit {
+		t.Fatalf("откат не применён: mem=%v blocked=%v", c.tun.lock(), c.tun.blocked.Load())
+	}
+	if ptr, _ := config.ReadPointers(c.p); ptr.Switch != nil {
+		t.Fatal("окно не закрыто")
+	}
+}
+
+// Подтверждение выхода закрывает окно без отката.
+func TestLockOnTrialConfirmed(t *testing.T) {
+	c, _ := liveCore(t, map[string]any{"mode": "auto", "lockExit": false})
+	if err := c.ConfigSetVPNLock(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	c.confirmLiveTrial()
+	if ptr, _ := config.ReadPointers(c.p); ptr.Switch != nil || ptr.LastGood != c.gen || !c.tun.lock() {
+		t.Fatalf("не подтверждено: %+v", ptr)
+	}
+}
+
+// Путь tun.crashed: 3-е падение TUN тоже сохраняет off.
+func TestTunCrashPersistsOff(t *testing.T) {
+	c, _ := liveCore(t, map[string]any{"mode": "auto"})
+	for i := 0; i < 3; i++ {
+		c.tun.onTunCrash(context.Background(), api.Effective{VPN: true})
+	}
+	waitFor(t, func() bool { return savedVPN(t, c).VPN.Mode == "off" })
 }

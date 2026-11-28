@@ -89,7 +89,8 @@ type core struct {
 	errMu      sync.Mutex
 	lastErr    string
 	updCheckAt atomic.Int64
-	opMu       sync.Mutex // UpdateNow, ConfigApply и прочие записи — одна за раз (+ LockOp между процессами)
+	trialTimer *time.Timer // срок пробного окна изменения vpn на ходу; под opMu
+	opMu       sync.Mutex  // UpdateNow, ConfigApply и прочие записи — одна за раз (+ LockOp между процессами)
 
 	compMu  sync.RWMutex // ch/sb/fw/ag пишет startNetwork (в своей горутине), читают страница и агент
 	ev      events

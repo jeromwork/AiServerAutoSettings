@@ -244,14 +244,18 @@ func (c *core) ConfigSetVPN(ctx context.Context, mode string) error {
 		return fail(err)
 	}
 	c.log.Info("core: config-vpn-applied", "gen", gen, "mode", mode)
-	if err := c.adoptVPNConfig(ctx); err != nil {
+	if err := c.adoptVPNConfig(ctx, mode == "off"); err != nil {
 		return fail(err)
 	}
 	if c.tun != nil && c.cfg != nil && !c.f.Mode.Safe {
 		c.tun.setMode(context.WithoutCancel(ctx), mode) // на ходу, без перезапуска программы
 	}
 	c.publishTrial()
-	c.publishApply("ready", "Режим VPN изменён и сохранён в конфиге.")
+	if c.trialOpen() {
+		c.publishApply("checking", "Режим VPN применён; жду подтверждения выхода (потом откат).")
+	} else {
+		c.publishApply("ready", "Режим VPN изменён и сохранён в конфиге.")
+	}
 	return nil
 }
 
@@ -279,7 +283,7 @@ func (c *core) ConfigSetVPNLock(ctx context.Context, on bool) error {
 		} else if cancelled {
 			c.publishTrial()
 			if cfg, _, lerr := config.Load(c.p, c.log); lerr == nil && !cfg.VPN.LockExit {
-				if err := c.adoptVPNConfig(ctx); err != nil {
+				if err := c.adoptVPNConfig(ctx, true); err != nil {
 					return fail(err)
 				}
 				c.reconcileLock(ctx)
@@ -293,36 +297,139 @@ func (c *core) ConfigSetVPNLock(ctx context.Context, on bool) error {
 		return fail(err)
 	}
 	c.log.Info("core: config-vpn-lock-applied", "gen", gen, "lock", on)
-	if err := c.adoptVPNConfig(ctx); err != nil {
+	if err := c.adoptVPNConfig(ctx, !on); err != nil {
 		return fail(err)
 	}
 	c.reconcileLock(ctx)
 	c.publishTrial()
-	c.publishApply("ready", "Галочка «выход только через наш адрес» изменена и сохранена в конфиге.")
+	if c.trialOpen() {
+		c.publishApply("checking", "Галочка включена; жду подтверждения выхода (потом откат).")
+	} else {
+		c.publishApply("ready", "Галочка «выход только через наш адрес» изменена и сохранена в конфиге.")
+	}
 	return nil
 }
 
 // adoptVPNConfig: после записи нового поколения (меняется только vpn.mode/lockExit) принимает его без перезапуска:
-// поколение сразу подтверждается (связь уже работает), в памяти обновляются gen и vpn-поля конфига.
-func (c *core) adoptVPNConfig(ctx context.Context) error {
+// в памяти обновляются gen и vpn-поля конфига. confirm — изменение безопасное (выключение): поколение подтверждается сразу;
+// иначе пробное окно остаётся открытым: подтверждает проверка выхода (confirmLiveTrial), по сроку — откат на ходу (expireLiveTrial).
+// Вызывать под lockOp.
+func (c *core) adoptVPNConfig(ctx context.Context, confirm bool) error {
 	cfg, gen, err := config.Load(c.p, c.log)
 	if err != nil {
 		return err
-	}
-	if ptr, e := config.ReadPointers(c.p); e == nil && ptr.Switch != nil && ptr.Switch.To == gen {
-		if err := config.Commit(c.p, gen, time.Now()); err != nil {
-			c.log.Warn("core: config-commit", "gen", gen, "err", err.Error())
-		}
 	}
 	c.gen = gen
 	if c.cfg != nil {
 		if g := c.tun; g != nil {
 			g.mu.Lock()
-			defer g.mu.Unlock()
+			c.cfg.VPN.Mode, c.cfg.VPN.LockExit = cfg.VPN.Mode, cfg.VPN.LockExit
+			g.mu.Unlock()
+		} else {
+			c.cfg.VPN.Mode, c.cfg.VPN.LockExit = cfg.VPN.Mode, cfg.VPN.LockExit
 		}
-		c.cfg.VPN.Mode, c.cfg.VPN.LockExit = cfg.VPN.Mode, cfg.VPN.LockExit
+	}
+	ptr, e := config.ReadPointers(c.p)
+	if e != nil || ptr.Switch == nil || ptr.Switch.To != gen {
+		c.stopTrialTimer()
+		return nil
+	}
+	if confirm {
+		return c.commitLocked()
+	}
+	c.stopTrialTimer()
+	c.trialTimer = time.AfterFunc(max(time.Until(ptr.Switch.Deadline), 0), func() { c.expireLiveTrial(time.Now()) }) // один срок окна, не опрос
+	return nil
+}
+
+func (c *core) stopTrialTimer() {
+	if c.trialTimer != nil {
+		c.trialTimer.Stop()
+		c.trialTimer = nil
+	}
+}
+
+func (c *core) trialOpen() bool {
+	ptr, err := config.ReadPointers(c.p)
+	return err == nil && ptr.Switch != nil && ptr.Switch.To == c.gen && c.gen != ""
+}
+
+func (c *core) commitLocked() error {
+	c.stopTrialTimer()
+	if err := config.Commit(c.p, c.gen, time.Now()); err != nil {
+		c.log.Warn("core: config-commit", "gen", c.gen, "err", err.Error())
+		return nil
 	}
 	return nil
+}
+
+// lockOpWait — как lockOp, но ждёт освобождения (для событий подтверждения/отката, которые терять нельзя).
+func (c *core) lockOpWait() (func(), error) {
+	c.opMu.Lock()
+	unlock, err := lockFile(filepath.Join(c.p.State, api.LockOp))
+	if err != nil {
+		c.opMu.Unlock()
+		return nil, err
+	}
+	return func() { unlock(); c.opMu.Unlock() }, nil
+}
+
+// confirmLiveTrial — событие «выход подтверждён» (проверка выхода прошла): пробное окно изменения vpn закрывается.
+func (c *core) confirmLiveTrial() {
+	if !c.trialOpen() {
+		return
+	}
+	unlock, err := c.lockOpWait()
+	if err != nil {
+		return
+	}
+	defer unlock()
+	if !c.trialOpen() {
+		return
+	}
+	_ = c.commitLocked()
+	c.publishTrial()
+	c.publishApply("ready", "Выход подтверждён, изменение сохранено в конфиге.")
+}
+
+// expireLiveTrial — срок пробного окна: откат конфига на ходу (без перезапуска) и возврат vpn.mode/lockExit в памяти.
+func (c *core) expireLiveTrial(now time.Time) {
+	unlock, err := c.lockOpWait()
+	if err != nil {
+		return
+	}
+	defer unlock()
+	expired, err := config.Expire(c.p, now, c.log)
+	if err != nil || !expired {
+		return
+	}
+	c.trialTimer = nil
+	oldMode := ""
+	if c.cfg != nil {
+		oldMode = c.cfg.VPN.Mode
+	}
+	cfg, gen, lerr := config.Load(c.p, c.log)
+	if lerr != nil {
+		c.log.Warn("core: live-rollback-load", "err", lerr.Error())
+		c.requestQuit(api.ExitRestart, nil) // не смогли прочитать прежний конфиг — старый путь: перезапуск
+		return
+	}
+	c.gen = gen
+	if c.cfg != nil && c.tun != nil {
+		g := c.tun
+		g.mu.Lock()
+		c.cfg.VPN.Mode, c.cfg.VPN.LockExit = cfg.VPN.Mode, cfg.VPN.LockExit
+		g.mu.Unlock()
+		if oldMode != cfg.VPN.Mode {
+			g.setMode(context.Background(), cfg.VPN.Mode)
+		} else {
+			c.reconcileLock(context.Background())
+		}
+	}
+	c.publishTrial()
+	if rb, ok := config.ReadRollback(c.p); ok {
+		c.publishApply("rolledback", "Изменение отменено: "+sanitize(rb.Reason))
+	}
 }
 
 // reconcileLock применяет новое значение lockExit: снятая галочка снимает блок, затем пересчёт (pf/перекрытие/проверка выхода).
@@ -364,7 +471,7 @@ func (c *core) persistVPNMode(mode string, cancelTrial bool) error {
 		c.log.Warn("core: vpn-mode-persist-failed", "mode", mode, "err", err.Error())
 		return err
 	}
-	return c.adoptVPNConfig(context.Background())
+	return c.adoptVPNConfig(context.Background(), true)
 }
 
 func (c *core) ConfigRevert(ctx context.Context) error {

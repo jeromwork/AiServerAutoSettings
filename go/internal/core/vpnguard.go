@@ -469,6 +469,7 @@ func (g *tunGuard) onTunCrash(ctx context.Context, e api.Effective) {
 		case g.fails >= 3:
 			g.vpnState, g.mode = "off", "off"
 			g.event("vpn.off", "why", g.vpnWhy)
+			go func() { _ = g.c.persistVPNMode("off", false) }() // выключение переживает перезапуск
 		default:
 			g.vpnState = "failopen"
 			g.event("vpn.failopen", "why", g.vpnWhy)
