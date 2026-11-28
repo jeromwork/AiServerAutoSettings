@@ -451,6 +451,7 @@ function onVPN(v) {
   var h = "Режим: <b>" + esc(VPNMODE[v.mode] || v.mode || "—") + "</b>, состояние: <b>" + esc(VPNST[v.state] || v.state || "—") + "</b>";
   if (v.reason) h += " <span class=err>" + esc(v.reason) + "</span>";
   if (v.underlay) h += "<br>Работает поверх: <b>" + esc(v.underlay) + "</b>";
+  if (v.foreign) h += "<br>Обнаружен чужой VPN: <b>" + esc(v.foreign) + "</b> (наш работает поверх него)";
   if (v.split) h += "<br>Маршруты нарезаны блоками <b>" + esc(v.split) + "</b> (чужой VPN держит более мелкие маршруты)";
   if (v.bypass) h += "<br><span class=err>Часть трафика уходит мимо нашего VPN через <b>" + esc(v.bypass) + "</b></span>";
   var lk = document.getElementById("vpn-lock");

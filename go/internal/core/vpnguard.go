@@ -81,6 +81,9 @@ func (g *tunGuard) statusLocked() map[string]any {
 	if g.bypass != "" {
 		st["bypass"] = g.bypass
 	}
+	if g.lastForeign != "" {
+		st["foreign"] = g.lastForeign
+	}
 	if r, ok := g.exit.Load().(exitResult); ok {
 		st["exit"] = r
 	}
@@ -160,8 +163,8 @@ func (g *tunGuard) reconcile(ctx context.Context, reason string) {
 		// чужой VPN не мешает: наш работает поверх него (трафик к серверу идёт по маршрутам ОС, см. vpnUnderlay)
 		fv := c.plat.ForeignVPN()
 		if fv != g.lastForeign {
+			g.lastForeign = fv // до event: событие публикует статус с новым значением
 			g.event("vpn.over-foreign", "iface", fv, "mode", g.mode)
-			g.lastForeign = fv
 		}
 		if fv == "" {
 			g.resetSplit(ctx) // чужих маршрутов нет — нарезка не нужна (этап 1b)
@@ -324,7 +327,11 @@ func (g *tunGuard) probe(ctx context.Context) {
 		if out == "" {
 			out = "не определён"
 		}
-		g.failLocked(ctx, "трафик к пробе идёт не через наш TUN (выход: "+out+")")
+		why := "трафик к пробе идёт не через наш TUN (выход: " + out + ")"
+		if g.lastForeign != "" {
+			why = "чужой VPN " + g.lastForeign + " перехватывает маршруты (выход: " + out + ")"
+		}
+		g.failLocked(ctx, why)
 		return
 	}
 	if bad > 0 {
@@ -484,6 +491,9 @@ func (g *tunGuard) setMode(ctx context.Context, mode string) {
 	}
 	g.mu.Lock()
 	g.mode, g.fails, g.vpnState, g.vpnWhy = mode, 0, "off", ""
+	if g.retry != nil {
+		g.retry.Stop() // отложенная проба старого режима не должна сработать и засчитать неудачу
+	}
 	if mode == "off" {
 		g.blocked.Store(false)
 	}
