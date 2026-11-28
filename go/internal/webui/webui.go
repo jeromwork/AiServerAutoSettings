@@ -331,7 +331,11 @@ func (u *UI) handleUpdate(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	// Загрузка и проверка кандидата идут дольше запроса: работа в фоне, ход и итог приходят событиями "update" (SSE).
-	go func() { _ = u.act.UpdateNow(context.WithoutCancel(req.Context())) }()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(req.Context()), 15*time.Minute)
+		defer cancel()
+		_ = u.act.UpdateNow(ctx)
+	}()
 	replyJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 

@@ -244,10 +244,15 @@ document.getElementById("btn-rollback").onclick = function() {
 };
 
 var USTAGE = {checking: "Проверяю", downloading: "Скачиваю", verifying: "Проверяю кандидата", restarting: "Запускаю", ready: "Готово", uptodate: "Обновлений нет", available: "Доступно обновление", rolledback: "Откат", warn: "Внимание", error: "Ошибка"};
+var UJOURNAL = [];
 function onUpdate(a) {
   var el = document.getElementById("upd-st");
   el.className = (a.stage === "error" || a.stage === "rolledback") ? "err" : (a.stage === "ready" || a.stage === "uptodate" ? "ok" : "");
-  el.textContent = (a.at || "") + " " + (USTAGE[a.stage] || a.stage) + ": " + (a.text || "");
+  // Журнал шагов: новая строка на каждое событие, последние 15.
+  UJOURNAL.push((a.at || "") + " " + (USTAGE[a.stage] || a.stage) + ": " + (a.text || ""));
+  if (UJOURNAL.length > 15) UJOURNAL.shift();
+  el.style.whiteSpace = "pre-wrap";
+  el.textContent = UJOURNAL.join("\n");
 }
 
 document.getElementById("btn-pause").onclick = function() {

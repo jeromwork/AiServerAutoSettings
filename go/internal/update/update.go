@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,6 +36,43 @@ type Options struct {
 	Plat          api.Platform
 	Interval      time.Duration
 	BaseURL       string
+	// Таймауты сети (0 = по умолчанию): соединение (с DNS), TLS, ответ сервера, общий срок проверки.
+	DialTimeout, TLSTimeout, HeaderTimeout, CheckTimeout time.Duration
+}
+
+func orDur(d, def time.Duration) time.Duration {
+	if d > 0 {
+		return d
+	}
+	return def
+}
+
+type progressKey struct{}
+
+// WithProgress: ход обновления по шагам (stage — как у событий "update": checking | downloading ...).
+func WithProgress(ctx context.Context, fn func(stage, text string)) context.Context {
+	return context.WithValue(ctx, progressKey{}, fn)
+}
+
+func step(ctx context.Context, stage, text string) {
+	if fn, ok := ctx.Value(progressKey{}).(func(stage, text string)); ok && fn != nil {
+		fn(stage, text)
+	}
+}
+
+// netErr: понятный текст сетевой ошибки с именем узла.
+func netErr(host string, err error) string {
+	var dns *net.DNSError
+	var ne net.Error
+	switch {
+	case errors.As(err, &dns):
+		return "DNS не отвечает: " + host
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) || strings.Contains(err.Error(), "awaiting headers"):
+		return "нет ответа за отведённое время: " + host
+	case strings.Contains(err.Error(), "connection refused"):
+		return "соединение отклонено: " + host
+	}
+	return host + ": " + err.Error()
 }
 
 type updater struct {
@@ -113,8 +151,15 @@ func New(p api.Paths, log api.Logger, o Options) (api.Updater, error) {
 			}
 		}
 	}
+	dialer := &net.Dialer{Timeout: orDur(o.DialTimeout, 8*time.Second)}
 	u.client = &http.Client{
-		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           dialer.DialContext,
+			TLSHandshakeTimeout:   orDur(o.TLSTimeout, 8*time.Second),
+			ResponseHeaderTimeout: orDur(o.HeaderTimeout, 10*time.Second),
+			IdleConnTimeout:       30 * time.Second,
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return fail("http", "too many redirects")
@@ -144,11 +189,11 @@ func (u *updater) get(ctx context.Context, address string) (*http.Response, erro
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := u.client.Do(req)
 	if err != nil {
-		return nil, fail("http", "request failed: "+err.Error())
+		return nil, fail("http", netErr(parsed.Host, err))
 	}
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
-		return nil, fail("http", fmt.Sprintf("status %d", resp.StatusCode))
+		return nil, fail("http", fmt.Sprintf("%s ответил статусом %d", parsed.Host, resp.StatusCode))
 	}
 	return resp, nil
 }

@@ -126,6 +126,9 @@ func (c *core) updateNow(ctx context.Context, manual bool) (err error) {
 	} else if manual {
 		c.publishUpdate("checking", "Проверяю наличие новой версии и подпись выпуска...")
 	}
+	if manual {
+		ctx = update.WithProgress(ctx, c.publishUpdate) // шаги проверки/скачивания/установки — в журнал страницы
+	}
 	r, err := c.UpdateCheck(ctx)
 	if err != nil {
 		return err
@@ -140,7 +143,7 @@ func (c *core) updateNow(ctx context.Context, manual bool) (err error) {
 		c.log.Info("core: auto-update-skip-bad", "version", r.Version)
 		return nil
 	}
-	c.publishUpdate("downloading", "Скачиваю версию "+r.Version+" и проверяю контрольную сумму...")
+	c.publishUpdate("available", "Найдена версия "+r.Version+" (у вас "+c.f.Version+").")
 	cand, err := c.upd.Fetch(ctx, *r)
 	if err != nil {
 		return err

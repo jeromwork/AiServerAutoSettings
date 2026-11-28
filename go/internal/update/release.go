@@ -1,6 +1,7 @@
 package update
 
 import (
+	"fmt"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hiddeco/sshsig"
 
@@ -25,6 +27,13 @@ type asset struct {
 
 type manifest struct {
 	release api.Release
+}
+
+func hostOf(address string) string {
+	if p, err := url.Parse(address); err == nil && p.Host != "" {
+		return p.Host
+	}
+	return address
 }
 
 func (u *updater) metadata(ctx context.Context, address string) ([]byte, error) {
@@ -50,6 +59,9 @@ func (u *updater) signedManifest(ctx context.Context) (*manifest, error) {
 	if len(u.keys) == 0 {
 		return nil, fail("signature", "invalid: no signers configured")
 	}
+	ctx, cancel := context.WithTimeout(ctx, orDur(u.o.CheckTimeout, 30*time.Second))
+	defer cancel()
+	step(ctx, "checking", "Запрашиваю описание выпуска "+u.o.Channel+" у "+hostOf(u.o.BaseURL)+"...")
 	endpoint := strings.TrimRight(u.o.BaseURL, "/") + "/repos/" + u.o.Repo + "/releases/tags/" + url.PathEscape(u.o.Channel)
 	data, err := u.metadata(ctx, endpoint)
 	if err != nil {
@@ -81,6 +93,7 @@ func (u *updater) signedManifest(ctx context.Context) (*manifest, error) {
 			return nil, fail("size", "invalid asset size")
 		}
 	}
+	step(ctx, "checking", "Скачиваю контрольные суммы выпуска...")
 	checksums, err := u.metadata(ctx, assets["checksums.txt"].URL)
 	if err != nil {
 		return nil, err
@@ -89,6 +102,7 @@ func (u *updater) signedManifest(ctx context.Context) (*manifest, error) {
 	if err != nil {
 		return nil, err
 	}
+	step(ctx, "checking", "Проверяю подпись выпуска...")
 	sig, err := sshsig.Unarmor(signature)
 	if err != nil {
 		return nil, fail("signature", "invalid: unarmor failed: "+err.Error())
@@ -130,6 +144,7 @@ func (u *updater) signedManifest(ctx context.Context) (*manifest, error) {
 	if _, ok := sums[binName]; !ok {
 		return nil, fail("checksums", "binary checksum missing")
 	}
+	step(ctx, "checking", "Подпись верна, читаю номер версии...")
 	versionData, err := u.metadata(ctx, assets["version.txt"].URL)
 	if err != nil {
 		return nil, err
@@ -176,6 +191,7 @@ func (u *updater) Fetch(ctx context.Context, r api.Release) (string, error) {
 	if m.release != r {
 		return "", fail("release", "release changed; check again")
 	}
+	step(ctx, "downloading", "Подключаюсь к "+hostOf(r.URL)+" за версией "+r.Version+"...")
 	resp, err := u.get(ctx, r.URL)
 	if err != nil {
 		return "", err
@@ -184,5 +200,36 @@ func (u *updater) Fetch(ctx context.Context, r api.Release) (string, error) {
 	if resp.ContentLength > maxBinary {
 		return "", fail("size", "binary exceeds 100 MiB")
 	}
-	return u.ReceiveDev(ctx, resp.Body, r.SHA256, r.Version)
+	body := &progressReader{r: resp.Body, total: resp.ContentLength, ctx: ctx}
+	cand, err := u.ReceiveDev(ctx, body, r.SHA256, r.Version)
+	if err == nil {
+		step(ctx, "verifying", "Скачано "+mib(body.n)+", контрольная сумма совпала.")
+	}
+	return cand, err
+}
+
+func mib(n int64) string { return fmt.Sprintf("%.1f МиБ", float64(n)/(1<<20)) }
+
+// progressReader сообщает о ходе скачивания по мере чтения: каждые 10% (или каждые 2 МиБ, если размер неизвестен).
+type progressReader struct {
+	r     io.Reader
+	ctx   context.Context
+	total int64
+	n     int64
+	mark  int64
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	p.n += int64(n)
+	if p.total > 0 {
+		if pct := p.n * 10 / p.total; pct > p.mark {
+			p.mark = pct
+			step(p.ctx, "downloading", fmt.Sprintf("Скачано %d%% (%s из %s)", pct*10, mib(p.n), mib(p.total)))
+		}
+	} else if blk := p.n / (2 << 20); blk > p.mark {
+		p.mark = blk
+		step(p.ctx, "downloading", "Скачано "+mib(p.n))
+	}
+	return n, err
 }

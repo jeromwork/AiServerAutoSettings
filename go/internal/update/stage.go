@@ -67,6 +67,7 @@ func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 		return fail("perms", "candidate is not executable")
 	}
 
+	step(ctx, "verifying", "Проверяю кандидата: запускаю и сверяю версию...")
 	// 4. Run <cand> version --json (5s timeout) -> os/arch match, version matches.
 	vctx, vcancel := context.WithTimeout(ctx, 5*time.Second)
 	defer vcancel()
@@ -98,6 +99,7 @@ func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 		return fail("platform", fmt.Sprintf("target mismatch: got %s/%s, want %s/%s", vi.OS, vi.Arch, u.os, u.arch))
 	}
 
+	step(ctx, "verifying", "Проверяю, что кандидат читает текущий конфиг...")
 	// 5. Run <cand> config check --current --home <home> (10s timeout) -> exit code 0.
 	cctx, ccancel := context.WithTimeout(ctx, 10*time.Second)
 	defer ccancel()
@@ -120,6 +122,7 @@ func (u *updater) Stage(ctx context.Context, candidate, version string) error {
 		return nil
 	}
 
+	step(ctx, "verifying", "Устанавливаю версию в слот...")
 	// 6. Atomically: Tmp -> versions/<v>.tmp -> rename -> pending.json via .tmp + rename.
 	if err := os.MkdirAll(u.p.Versions, 0700); err != nil {
 		_ = os.Remove(candidate)
