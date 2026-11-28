@@ -324,3 +324,51 @@ func TestArmReturnBacksOff(t *testing.T) {
 	}
 	c.disarmReturnKeep()
 }
+
+// Короткая сессия, оборванная keepalive, помечает путь плохим: берётся следующий; по истечении срока — снова предпочтительный.
+func TestKeepaliveLossMarksPathBad(t *testing.T) {
+	sb := &selectorSB{names: []string{"hy2", "tcp"}, now: "hy2", addr: map[string]string{}}
+	c := &chn{sb: sb, log: &fake.Logger{}}
+	c.failoverUnstable("hy2", 5*time.Minute) // одна долгая сессия — не повод
+	if sb.now != "hy2" {
+		t.Fatalf("переключились без причины: %s", sb.now)
+	}
+	c.failoverUnstable("hy2", 30*time.Second) // короткая — плохой
+	if sb.now != "tcp" {
+		t.Fatalf("ожидался tcp, получен %s", sb.now)
+	}
+	now := time.Now()
+	if got := c.firstGood(sb.names, now); got != "tcp" {
+		t.Fatalf("firstGood=%s", got)
+	}
+	if got := c.firstGood(sb.names, now.Add(badPathTTL+time.Second)); got != "hy2" {
+		t.Fatalf("после срока ожидался hy2, получен %s", got)
+	}
+}
+
+// Две долгие, но частые потери подряд за окно — тоже нестабильность.
+func TestTwoLossesInWindowMarkBad(t *testing.T) {
+	c := &chn{}
+	now := time.Now()
+	if c.noteKeepaliveLoss("p", 10*time.Minute, now) {
+		t.Fatal("первая долгая потеря не должна метить")
+	}
+	if !c.noteKeepaliveLoss("p", 10*time.Minute, now.Add(time.Minute)) {
+		t.Fatal("вторая за окно должна метить")
+	}
+	c2 := &chn{}
+	c2.noteKeepaliveLoss("p", 10*time.Minute, now)
+	if c2.noteKeepaliveLoss("p", 10*time.Minute, now.Add(unstableWindow+time.Second)) {
+		t.Fatal("потери вне окна не считаются подряд")
+	}
+}
+
+// Единственный путь или все остальные плохие — переключаться некуда.
+func TestNoFailoverWhenNoAlternative(t *testing.T) {
+	sb := &selectorSB{names: []string{"hy2"}, now: "hy2", addr: map[string]string{}}
+	c := &chn{sb: sb, log: &fake.Logger{}}
+	c.failoverUnstable("hy2", time.Second)
+	if sb.now != "hy2" {
+		t.Fatal("переключение без альтернативы")
+	}
+}

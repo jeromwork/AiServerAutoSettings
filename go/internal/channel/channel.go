@@ -92,6 +92,9 @@ type chn struct {
 	retPref    chan struct{}      // сработал таймер возврата на предпочтительный путь
 	retFails   int                // подряд неудачных возвратов (растит задержку)
 	retTimer   *time.Timer
+
+	badUntil map[string]time.Time   // путь → до какого момента считается нестабильным
+	losses   map[string][]time.Time // путь → моменты недавних keepalive-потерь
 }
 
 // New validates the configuration (strict hostKey is mandatory) and builds the channel.
@@ -266,6 +269,7 @@ func (c *chn) loop(ctx context.Context) {
 		c.mu.Lock()
 		c.sessCancel = scancel
 		c.mu.Unlock()
+		sessStart := time.Now()
 		path, err := c.session(sctx, first)
 		scancel()
 		first = false
@@ -297,6 +301,9 @@ func (c *chn) loop(ctx context.Context) {
 		if wasUp {
 			fails = 0
 			sw.reset()
+			if strings.Contains(reason, "keepalive") {
+				c.failoverUnstable(path, time.Since(sessStart))
+			}
 			if c.consumeReturn() {
 				c.selectFirst()
 				continue
@@ -427,8 +434,84 @@ func (c *chn) selectFirst() {
 	pinned := time.Now().Before(c.pinned)
 	c.mu.Unlock()
 	if names := c.sb.PathNames(); !pinned && len(names) > 0 {
-		_ = c.selectPath(names[0])
+		_ = c.selectPath(c.firstGood(names, time.Now()))
 	}
+}
+
+// Нестабильные пути: keepalive-потеря на сессии короче unstableUptime, либо вторая потеря за unstableWindow,
+// помечает путь плохим на badPathTTL. Срок проверяется при выборе пути, таймеров нет.
+const (
+	unstableUptime = 2 * time.Minute
+	unstableWindow = 5 * time.Minute
+	badPathTTL     = 10 * time.Minute
+)
+
+// firstGood — первый по рангу путь без пометки «плохой»; все плохие — первый по рангу.
+func (c *chn) firstGood(names []string, now time.Time) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, n := range names {
+		if !now.Before(c.badUntil[n]) {
+			return n
+		}
+	}
+	return names[0]
+}
+
+// noteKeepaliveLoss учитывает потерю связи по keepalive; true — путь только что помечен плохим.
+func (c *chn) noteKeepaliveLoss(path string, uptime time.Duration, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.badUntil == nil {
+		c.badUntil, c.losses = map[string]time.Time{}, map[string][]time.Time{}
+	}
+	recent := c.losses[path][:0:0]
+	for _, t := range c.losses[path] {
+		if now.Sub(t) < unstableWindow {
+			recent = append(recent, t)
+		}
+	}
+	recent = append(recent, now)
+	c.losses[path] = recent
+	if uptime >= unstableUptime && len(recent) < 2 {
+		return false
+	}
+	c.badUntil[path] = now.Add(badPathTTL)
+	delete(c.losses, path)
+	return true
+}
+
+// failoverUnstable: после keepalive-потери, если путь признан нестабильным, переключает селектор на следующий хороший.
+func (c *chn) failoverUnstable(path string, uptime time.Duration) {
+	if c.sb == nil || c.o.Mode.NoSingbox || path == "" {
+		return
+	}
+	now := time.Now()
+	if !c.noteKeepaliveLoss(path, uptime, now) {
+		return
+	}
+	c.mu.Lock()
+	pinned := now.Before(c.pinned)
+	c.mu.Unlock()
+	names := c.sb.PathNames()
+	if pinned || len(names) < 2 {
+		return
+	}
+	next := ""
+	c.mu.Lock()
+	for _, n := range names {
+		if n != path && !now.Before(c.badUntil[n]) {
+			next = n
+			break
+		}
+	}
+	c.mu.Unlock()
+	if next == "" {
+		return
+	}
+	c.log.Warn("path-unstable", "path", path, "to", next, "bad_min", int(badPathTTL.Minutes()), "uptime_s", int(uptime.Seconds()),
+		"msg", "путь "+path+" нестабилен, перехожу на "+next)
+	_ = c.selectPath(next)
 }
 
 // armReturn: сессия поднялась на пути не первого ранга — один раз через задержку вернуться на предпочтительный.
@@ -457,7 +540,11 @@ func (c *chn) armReturn(path string) {
 		d *= 2
 	}
 	c.retFails++
-	c.retTimer = time.AfterFunc(min(d, returnMax), func() {
+	d = min(d, returnMax)
+	if rem := time.Until(c.badUntil[names[0]]); rem > d { // предпочтительный помечен плохим — не раньше конца срока
+		d = rem
+	}
+	c.retTimer = time.AfterFunc(d, func() {
 		select {
 		case c.retPref <- struct{}{}:
 		default:
