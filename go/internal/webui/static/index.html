@@ -417,21 +417,44 @@ var STN = {trying: "пробую", ok: "успех", error: "ошибка", wait
 var STAGE = {applying: "Применяю", restarting: "Перезапуск", checking: "Проверка связи", ready: "Готово", ok: "Готово", error: "Ошибка"};
 
 var TRIAL = {active: false};
+var VPNBUSY = false;
+
+// Время окна показываем в местном времени браузера (на ПК владельца); запасной вариант — строка от программы.
+function trialClock() {
+  if (TRIAL.deadline) { var d = new Date(TRIAL.deadline); if (!isNaN(d)) return d.toLocaleTimeString("ru-RU"); }
+  return TRIAL.clock || "";
+}
+// Галочка без VPN бессмысленна: при режиме «Выключен» недоступна; в пробном окне тоже.
+function lockEnable() {
+  var off = !!(S && S.vpn && S.vpn.mode === "off");
+  var lk = document.getElementById("vpn-lock");
+  lk.disabled = !!TRIAL.active || off;
+  lk.title = off ? "Включите VPN (Авто или Только наш), чтобы галочка имела смысл" : "";
+}
+// Итог операции VPN приходит событием apply, а не фразой «перезапускаю».
+function vpnApplyMsg(a) {
+  if (!VPNBUSY || a.stage === "applying") return;
+  var m = document.getElementById("vpn-msg");
+  m.className = (a.stage === "error" || a.stage === "rolledback") ? "err" : (a.stage === "ready" ? "ok" : "");
+  m.textContent = (a.at || "") + " " + (a.text || "");
+  if (a.stage !== "checking") VPNBUSY = false;
+}
 
 // Пробное окно нового конфига: галочку и «Применить» блокируем; «Снять галочку» и «Выключить VPN» всегда доступны.
 function onTrial(t) {
   TRIAL = t || {active: false};
-  document.getElementById("vpn-lock").disabled = !!TRIAL.active;
+  lockEnable();
   document.getElementById("btn-cfg-apply").disabled = !!TRIAL.active;
   var bl = document.getElementById("vpn-block");
   if (TRIAL.active) {
     bl.style.display = "";
-    document.getElementById("vpn-block-t").textContent = "Пробное окно до " + (TRIAL.clock || "") + " \u2014 проверяю\u2026";
+    document.getElementById("vpn-block-t").textContent = "Пробное окно до " + trialClock() + " \u2014 проверяю\u2026";
     document.getElementById("vpn-unlock").style.display = "";
   } else if (!(S && S.vpn && S.vpn.state === "blocked")) bl.style.display = "none";
 }
 
 function onApply(a) {
+  vpnApplyMsg(a);
   var el = document.getElementById("apply-st");
   el.className = (a.stage === "error" || a.stage === "rolledback") ? "err" : ((a.stage === "ok" || a.stage === "ready") ? "ok" : "");
   if (a.stage === "rolledback") {
@@ -461,6 +484,7 @@ function onVPN(v) {
   if (v.bypass) h += "<br><span class=err>Часть трафика уходит мимо нашего VPN через <b>" + esc(v.bypass) + "</b></span>";
   var lk = document.getElementById("vpn-lock");
   lk.checked = !!v.lock;
+  lockEnable();
   var bl = document.getElementById("vpn-block");
   if (v.state === "blocked") {
     bl.style.display = "";
@@ -469,7 +493,7 @@ function onVPN(v) {
     h = h.replace(/ <span class=err>.*?<\/span>/, "");
   } else if (TRIAL.active) {
     bl.style.display = "";
-    document.getElementById("vpn-block-t").textContent = "Пробное окно до " + (TRIAL.clock || "") + " \u2014 проверяю\u2026";
+    document.getElementById("vpn-block-t").textContent = "Пробное окно до " + trialClock() + " \u2014 проверяю\u2026";
     document.getElementById("vpn-unlock").style.display = "";
   } else bl.style.display = "none";
   document.getElementById("vpn-st").innerHTML = h;
@@ -479,7 +503,7 @@ function onVPN(v) {
   var via = e.via ? " через " + e.via : "";
   if (!e.known) { ex.className = ""; ex.textContent = "Выход: " + e.ip + via + " (ожидаемый адрес не задан)"; }
   else if (e.ok) { ex.className = "ok"; ex.textContent = "Выход: " + e.ip + " \u2713"; }
-  else { ex.className = "err"; ex.textContent = "Выход: " + e.ip + via + " \u2014 не наш адрес"; }
+  else { ex.className = "err"; ex.textContent = "Выход: " + e.ip + via + " \u2014 не наш адрес" + (v.mode === "off" || v.state === "off" ? " (VPN выключен)" : ""); }
 }
 
 // Системный прокси ПК (например Clash без TUN): браузеры идут через него мимо нашего VPN. Перекрыть нельзя — только предупреждение.
@@ -505,9 +529,10 @@ document.getElementById("vpn-lock").onchange = function() {
   var c = this, m = document.getElementById("vpn-msg");
   m.className = "";
   m.textContent = "Меняю галочку в конфиге...";
+  VPNBUSY = true;
   post("/api/vpn/lock", { on: c.checked ? "1" : "0" }).then(function(x) {
-    m.className = x.ok ? "ok" : "err";
-    m.textContent = x.ok ? "Записано, перезапускаю..." : (x.problems || [x.error || "Ошибка"]).join("\n");
+    if (x.ok) { m.className = ""; if (VPNBUSY) m.textContent = "Применяю..."; } else { VPNBUSY = false; m.className = "err"; }
+    if (!x.ok) m.textContent = (x.problems || [x.error || "Ошибка"]).join("\n");
     if (!x.ok && S && S.vpn) onVPN(S.vpn);
   }).catch(function(e) {
     m.className = "err";
@@ -551,9 +576,10 @@ Array.prototype.forEach.call(document.querySelectorAll("input[name=vpnmode]"), f
     var m = document.getElementById("vpn-msg");
     m.className = "";
     m.textContent = "Меняю режим в конфиге...";
+    VPNBUSY = true;
     post("/api/vpn", { mode: r.value }).then(function(x) {
-      m.className = x.ok ? "ok" : "err";
-      m.textContent = x.ok ? "Режим записан, перезапускаю..." : (x.problems || [x.error || "Ошибка"]).join("\n");
+      if (x.ok) { m.className = ""; if (VPNBUSY) m.textContent = "Применяю..."; } else { VPNBUSY = false; m.className = "err"; }
+      if (!x.ok) m.textContent = (x.problems || [x.error || "Ошибка"]).join("\n");
       if (!x.ok && S && S.vpn) onVPN(S.vpn);
     }).catch(function(e) {
       m.className = "err";

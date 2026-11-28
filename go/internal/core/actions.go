@@ -300,7 +300,12 @@ func (c *core) ConfigSetVPNLock(ctx context.Context, on bool) error {
 		return fail(err)
 	}
 	c.log.Info("core: config-vpn-lock-applied", "gen", gen, "lock", on)
-	if err := c.adoptVPNConfig(ctx, !on); err != nil {
+	// Галочка без VPN (mode=off) ничего не меняет и подтвердить её проверкой выхода нельзя: окно закрываем сразу.
+	modeOff := false
+	if cfg, _, lerr := config.Load(c.p, c.log); lerr == nil {
+		modeOff = cfg.VPN.Mode == "off"
+	}
+	if err := c.adoptVPNConfig(ctx, !on || modeOff); err != nil {
 		return fail(err)
 	}
 	c.reconcileLock(ctx)

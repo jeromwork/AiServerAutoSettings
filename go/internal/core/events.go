@@ -107,7 +107,7 @@ func (c *core) publishStatus() { c.publish("status", c.Status()) }
 // trialState — пробное окно нового конфига: идёт ли и до какого времени (из switch.json, живые данные).
 func (c *core) trialState() map[string]any {
 	if ptr, err := config.ReadPointers(c.p); err == nil && ptr.Switch != nil {
-		return map[string]any{"active": true, "deadline": ptr.Switch.Deadline.Format(time.RFC3339), "clock": ptr.Switch.Deadline.Format("15:04:05")}
+		return map[string]any{"active": true, "deadline": ptr.Switch.Deadline.Format(time.RFC3339), "clock": ptr.Switch.Deadline.Local().Format("15:04:05")}
 	}
 	return map[string]any{"active": false}
 }
@@ -130,7 +130,7 @@ func (c *core) publishReady(text string) {
 }
 
 func (c *core) publishApply(stage, text string) {
-	m := map[string]any{"stage": stage, "text": text, "at": time.Now().Format("15:04:05")}
+	m := map[string]any{"stage": stage, "text": text, "at": time.Now().Local().Format("15:04:05")}
 	c.ev.mu.Lock()
 	c.ev.apply = m
 	c.ev.mu.Unlock()
