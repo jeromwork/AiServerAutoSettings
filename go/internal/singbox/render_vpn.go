@@ -355,7 +355,7 @@ func RenderVPN(rc api.RenderContext) ([]byte, error) {
 	route["rules"] = rules
 	tun := m{"type": "tun", "tag": "vpn-in", "interface_name": name,
 		"address": []string{"172.19.8.1/30", "fdfe:dcba:9877::1/126"}, "mtu": 1400,
-		"auto_route": true, "strict_route": lock,
+		"auto_route": true, "strict_route": lock && !rc.ForeignVPN, // рядом с чужим TUN (Happ) strict_route/WFP вешает открытие адаптера
 		"route_address":         SplitRoutes(rc.VPNSplit),
 		"route_exclude_address": excludeSet(rc, sel.hosts)}
 	if lock && vpnGOOS == "linux" {

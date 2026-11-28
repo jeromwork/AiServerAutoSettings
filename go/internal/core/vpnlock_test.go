@@ -206,3 +206,20 @@ func TestExitConfirmedOnlyWhenOurs(t *testing.T) {
 		t.Fatal("ожидаемые не заданы, выход не через наш TUN — подтверждения нет")
 	}
 }
+
+// Рядом с чужим VPN TUN не открылся (Apply с ошибкой) — failopen с понятной причиной.
+func TestForeignTunOpenFailureFailsOpenWithReason(t *testing.T) {
+	c, _ := newLockCore(true)
+	c.plat = &fvPlat{fv: "happ-tun"}
+	c.vsb = &failSb{}
+	g := c.tun
+	g.vpnState = "off"
+	g.reconcile(context.Background(), "start")
+	if g.vpnState != "failopen" || g.blocked.Load() || !contains(g.vpnWhy, "TUN VPN не открылся рядом с happ-tun") {
+		t.Fatalf("state=%s blocked=%v why=%q", g.vpnState, g.blocked.Load(), g.vpnWhy)
+	}
+}
+
+type failSb struct{ fvSb }
+
+func (s *failSb) Apply(context.Context, api.Effective) error { return context.DeadlineExceeded }

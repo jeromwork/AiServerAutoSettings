@@ -155,3 +155,15 @@ func TestRenderVPNLockBlockSelfThenReject(t *testing.T) {
 		t.Fatalf("блок: %s", raw)
 	}
 }
+
+// Рядом с чужим TUN (Happ) strict_route выключен даже с галочкой; без чужого — включён.
+func TestRenderVPNNoStrictRouteNextToForeign(t *testing.T) {
+	rc := vpnRC(true, false, "happ-tun")
+	rc.ForeignVPN = true
+	if v, raw := renderVPNOut(t, rc); v.Inbounds[0]["strict_route"] != false {
+		t.Fatalf("strict_route рядом с чужим VPN: %s", raw)
+	}
+	if v, _ := renderVPNOut(t, vpnRC(true, false, "")); v.Inbounds[0]["strict_route"] != true {
+		t.Fatal("без чужого VPN с галочкой strict_route нужен")
+	}
+}

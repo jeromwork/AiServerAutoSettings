@@ -291,9 +291,17 @@ func (g *tunGuard) applyVPN(ctx context.Context, vsb api.Singbox, reason string,
 	c := g.c
 	if want != vsb.Effective().VPN {
 		defer c.underlay() // старт/стоп нашего VPN меняет сеть под каналом
-		actx, cancel := context.WithTimeout(ctx, 40*time.Second)
+		to := 40 * time.Second
+		if want && g.lastForeign != "" {
+			to = 15 * time.Second // рядом с чужим TUN открытие адаптера может повиснуть — не ждём долго
+		}
+		actx, cancel := context.WithTimeout(ctx, to)
 		err := vsb.Apply(actx, api.Effective{VPN: want})
 		cancel()
+		if err != nil && want && g.lastForeign != "" {
+			c.log.Error("vpn.apply-failed", "reason", reason, "err", err.Error())
+			return vsb.Effective().VPN, "TUN VPN не открылся рядом с " + g.lastForeign
+		}
 		if err != nil && !want {
 			// выключение обязано сработать (например, прошлая операция, переподключение при смене адаптера, держала замок): ещё одна попытка
 			c.log.Error("vpn.stop-retry", "reason", reason, "err", err.Error())
